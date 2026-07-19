@@ -1,0 +1,497 @@
+from typing import Literal, Protocol
+
+import httpx
+from pydantic import BaseModel, SecretStr
+
+from full_view_agent.application.errors import (
+    ReauthenticationRequired,
+    SemanticValidationError,
+    UpstreamContractError,
+    UpstreamTimeout,
+    UpstreamUnavailable,
+)
+from full_view_agent.application.fingerprints import canonical_fingerprint
+from full_view_agent.application.session_run_service import new_id
+from full_view_agent.domain.models import (
+    AreaCandidate,
+    AreaCandidatesData,
+    AreaCandidatesResult,
+    AuthContext,
+    DataResult,
+    GetObjectProfileInput,
+    InternalToolManifest,
+    ObjectProfileData,
+    ObjectProfileField,
+    ObjectProfileResult,
+    PolicyDecision,
+    PopulationMetricRow,
+    PopulationMetricTable,
+    QueryPopulationMetricsInput,
+    ResolveAreaInput,
+    TableDataResult,
+)
+
+
+class InMemoryGovernanceAdapter:
+    def __init__(self) -> None:
+        self._areas = [
+            AreaCandidate(
+                area_code="330106",
+                area_name="西湖区",
+                level="district",
+                parent_area_code="330100",
+                bounds=(120.02, 30.05, 120.20, 30.35),
+            ),
+            AreaCandidate(
+                area_code="330105",
+                area_name="拱墅区",
+                level="district",
+                parent_area_code="330100",
+                bounds=(120.10, 30.25, 120.25, 30.40),
+            ),
+        ]
+
+    async def execute(
+        self,
+        *,
+        manifest: InternalToolManifest,
+        arguments: BaseModel,
+        policy_decision: PolicyDecision,
+        auth_context: AuthContext,
+    ) -> DataResult:
+        del auth_context
+        if manifest.tool_id == "governance.resolve_area":
+            if not isinstance(arguments, ResolveAreaInput):
+                raise TypeError("resolve_area requires ResolveAreaInput")
+            return self._resolve_area(arguments, policy_decision)
+        if manifest.tool_id == "governance.query_population_metrics":
+            if not isinstance(arguments, QueryPopulationMetricsInput):
+                raise TypeError(
+                    "query_population_metrics requires QueryPopulationMetricsInput"
+                )
+            return self._query_population_metrics(arguments)
+        if manifest.tool_id == "governance.get_object_profile":
+            if not isinstance(arguments, GetObjectProfileInput):
+                raise TypeError(
+                    "get_object_profile requires GetObjectProfileInput"
+                )
+            return self._get_object_profile(arguments, policy_decision)
+        raise NotImplementedError(f"adapter not implemented for {manifest.tool_id}")
+
+    def _resolve_area(
+        self,
+        arguments: ResolveAreaInput,
+        policy_decision: PolicyDecision,
+    ) -> AreaCandidatesResult:
+        allowed_area_codes = policy_decision.effective_scope.area_codes
+        candidates = [
+            area
+            for area in self._areas
+            if arguments.query in area.area_name
+            and _area_in_scope(area.area_code, allowed_area_codes)
+            and (
+                arguments.parent_area_code is None
+                or area.parent_area_code == arguments.parent_area_code
+            )
+        ][: arguments.max_candidates]
+        data = AreaCandidatesData(
+            resolved_area_code=(candidates[0].area_code if len(candidates) == 1 else None),
+            ambiguous=len(candidates) > 1,
+            candidates=candidates,
+        )
+        return AreaCandidatesResult(
+            result_id=new_id("res"),
+            data_schema_ref="schema://data/area-candidates/1.0.0",
+            result_fingerprint=canonical_fingerprint(
+                domain="data-result:area-candidates:1.0.0",
+                value=data,
+            ),
+            data=data,
+            candidate_count=len(candidates),
+        )
+
+    @staticmethod
+    def _query_population_metrics(
+        arguments: QueryPopulationMetricsInput,
+    ) -> TableDataResult:
+        area_code = arguments.query.scope.area_code
+        data = PopulationMetricTable(
+            rows=[
+                PopulationMetricRow(
+                    area_code=f"{area_code}001",
+                    area_name="示例街道",
+                    person_count=128,
+                )
+            ][: arguments.query.limit]
+        )
+        return TableDataResult(
+            result_id=new_id("res"),
+            data_schema_ref="schema://data/population-metric-table/1.0.0",
+            result_fingerprint=canonical_fingerprint(
+                domain="data-result:population-metric-table:1.0.0",
+                value=data,
+            ),
+            data=data,
+            row_count=len(data.rows),
+        )
+
+    @staticmethod
+    def _get_object_profile(
+        arguments: GetObjectProfileInput,
+        policy_decision: PolicyDecision,
+    ) -> ObjectProfileResult:
+        field_sets = set(policy_decision.effective_scope.allowed_field_sets)
+        fields: list[ObjectProfileField] = []
+        if "summary" in field_sets:
+            fields.extend(
+                [
+                    ObjectProfileField(
+                        field_id="display_name",
+                        label="显示名称",
+                        value="张某",
+                        classification="internal",
+                    ),
+                    ObjectProfileField(
+                        field_id="object_type",
+                        label="对象类型",
+                        value=arguments.object_ref.object_type,
+                        classification="internal",
+                    ),
+                ]
+            )
+        if "demographics" in field_sets:
+            fields.append(
+                ObjectProfileField(
+                    field_id="age",
+                    label="年龄",
+                    value=82,
+                    classification="internal",
+                )
+            )
+        if "contact" in field_sets:
+            fields.append(
+                ObjectProfileField(
+                    field_id="phone",
+                    label="联系电话",
+                    value="13800000000",
+                    classification="sensitive",
+                )
+            )
+        data = ObjectProfileData(
+            object_ref=arguments.object_ref,
+            area_code="330106001",
+            title="张某",
+            fields=fields,
+        )
+        return ObjectProfileResult(
+            result_id=new_id("res"),
+            data_schema_ref="schema://data/object-profile/1.0.0",
+            result_fingerprint=canonical_fingerprint(
+                domain="data-result:object-profile:1.0.0",
+                value=data,
+            ),
+            data=data,
+        )
+
+
+def _area_in_scope(area_code: str, allowed_area_codes: list[str]) -> bool:
+    return any(
+        area_code == allowed_area_code or area_code.startswith(allowed_area_code)
+        for allowed_area_code in allowed_area_codes
+    )
+
+
+class HttpGovernanceAdapter:
+    """Adapter boundary for the existing geo-qxst read APIs."""
+
+    def __init__(
+        self,
+        *,
+        base_url: str,
+        credential_broker: "LegacyCredentialResolver",
+        client: httpx.AsyncClient | None = None,
+    ) -> None:
+        self._base_url = base_url.rstrip("/")
+        self._credential_broker = credential_broker
+        self._owns_client = client is None
+        self._client = client or httpx.AsyncClient()
+
+    async def aclose(self) -> None:
+        if self._owns_client:
+            await self._client.aclose()
+
+    async def execute(
+        self,
+        *,
+        manifest: InternalToolManifest,
+        arguments: BaseModel,
+        policy_decision: PolicyDecision,
+        auth_context: AuthContext,
+    ) -> DataResult:
+        if manifest.tool_id == "governance.resolve_area" and isinstance(
+            arguments, ResolveAreaInput
+        ):
+            return await self._resolve_area_http(
+                arguments=arguments,
+                policy_decision=policy_decision,
+                auth_context=auth_context,
+                timeout_seconds=manifest.limits.timeout_ms / 1000,
+                max_attempts=manifest.limits.max_attempts,
+            )
+        if manifest.tool_id == "governance.query_population_metrics" and isinstance(
+            arguments, QueryPopulationMetricsInput
+        ):
+            return await self._query_population_metrics_http(
+                arguments=arguments,
+                auth_context=auth_context,
+                timeout_seconds=manifest.limits.timeout_ms / 1000,
+                max_attempts=manifest.limits.max_attempts,
+            )
+        raise NotImplementedError(f"HTTP adapter not implemented for {manifest.tool_id}")
+
+    async def _resolve_area_http(
+        self,
+        *,
+        arguments: ResolveAreaInput,
+        policy_decision: PolicyDecision,
+        auth_context: AuthContext,
+        timeout_seconds: float,
+        max_attempts: int,
+    ) -> AreaCandidatesResult:
+        token = await self._credential_broker.resolve(
+            credential_ref=auth_context.credential_ref,
+            subject_user_id=auth_context.principal.user_id,
+            app_id=auth_context.application.app_id,
+            run_id=auth_context.run_id,
+        )
+        response = await self._post(
+            "/area/getAreaInfoByAreaName",
+            data={"areaName": arguments.query},
+            token=token,
+            timeout_seconds=timeout_seconds,
+            max_attempts=max_attempts,
+        )
+        area = _unwrap_standard_result(response)
+        if area is None or area == []:
+            data = AreaCandidatesData(
+                resolved_area_code=None,
+                ambiguous=False,
+                candidates=[],
+            )
+            return AreaCandidatesResult(
+                result_id=new_id("res"),
+                data_schema_ref="schema://data/area-candidates/1.0.0",
+                result_fingerprint=canonical_fingerprint(
+                    domain="data-result:area-candidates:1.0.0",
+                    value=data,
+                ),
+                data=data,
+                candidate_count=0,
+            )
+        try:
+            area_code = str(area["areacode"])
+            area_name = str(area["areaname"])
+        except (KeyError, TypeError) as exc:
+            raise UpstreamContractError("legacy area response is malformed") from exc
+        candidates = []
+        if _area_in_scope(area_code, policy_decision.effective_scope.area_codes):
+            candidates.append(
+                AreaCandidate(
+                    area_code=area_code,
+                    area_name=area_name,
+                    level=_area_level(area_code),
+                )
+            )
+        data = AreaCandidatesData(
+            resolved_area_code=area_code if len(candidates) == 1 else None,
+            ambiguous=False,
+            candidates=candidates,
+        )
+        return AreaCandidatesResult(
+            result_id=new_id("res"),
+            data_schema_ref="schema://data/area-candidates/1.0.0",
+            result_fingerprint=canonical_fingerprint(
+                domain="data-result:area-candidates:1.0.0",
+                value=data,
+            ),
+            data=data,
+            candidate_count=len(candidates),
+        )
+
+    async def _query_population_metrics_http(
+        self,
+        *,
+        arguments: QueryPopulationMetricsInput,
+        auth_context: AuthContext,
+        timeout_seconds: float,
+        max_attempts: int,
+    ) -> TableDataResult:
+        area_code = arguments.query.scope.area_code
+        _validate_solitary_elderly_query(arguments)
+        token = await self._credential_broker.resolve(
+            credential_ref=auth_context.credential_ref,
+            subject_user_id=auth_context.principal.user_id,
+            app_id=auth_context.application.app_id,
+            run_id=auth_context.run_id,
+        )
+        response = await self._post(
+            "/getNextSiteData",
+            data={
+                "areaName": _area_code_column(area_code),
+                "areaCode": area_code,
+                "tableName": "dm_empty_nest_old",
+            },
+            token=token,
+            timeout_seconds=timeout_seconds,
+            max_attempts=max_attempts,
+        )
+        raw_rows = _unwrap_standard_result(response)
+        try:
+            rows = [
+                PopulationMetricRow(
+                    area_code=str(item["areaCode"]),
+                    area_name=str(item["areaName"]),
+                    person_count=int(item["total"]),
+                )
+                for item in raw_rows[: arguments.query.limit]
+            ]
+        except (KeyError, TypeError, ValueError) as exc:
+            raise UpstreamContractError(
+                "legacy population response is malformed"
+            ) from exc
+        data = PopulationMetricTable(rows=rows)
+        return TableDataResult(
+            result_id=new_id("res"),
+            data_schema_ref="schema://data/population-metric-table/1.0.0",
+            result_fingerprint=canonical_fingerprint(
+                domain="data-result:population-metric-table:1.0.0",
+                value=data,
+            ),
+            data=data,
+            row_count=len(rows),
+            truncated=len(raw_rows) > arguments.query.limit,
+        )
+
+    async def _post(
+        self,
+        path: str,
+        *,
+        data: dict[str, str],
+        token: SecretStr,
+        timeout_seconds: float,
+        max_attempts: int,
+    ) -> httpx.Response:
+        attempts = max(1, max_attempts)
+        for attempt in range(attempts):
+            try:
+                response = await self._client.post(
+                    f"{self._base_url}{path}",
+                    data=data,
+                    headers={"geoToken": token.get_secret_value()},
+                    timeout=timeout_seconds,
+                )
+                if _is_token_failure_response(response):
+                    raise ReauthenticationRequired("登录凭据已失效，请重新认证")
+                response.raise_for_status()
+                return response
+            except ReauthenticationRequired:
+                raise
+            except httpx.TimeoutException as exc:
+                if attempt + 1 == attempts:
+                    raise UpstreamTimeout(
+                        "legacy geo-qxst request timed out"
+                    ) from exc
+            except httpx.HTTPStatusError as exc:
+                if exc.response.status_code < 500 or attempt + 1 == attempts:
+                    raise UpstreamUnavailable(
+                        "legacy geo-qxst is unavailable"
+                    ) from exc
+            except httpx.RequestError as exc:
+                if attempt + 1 == attempts:
+                    raise UpstreamUnavailable(
+                        "legacy geo-qxst is unavailable"
+                    ) from exc
+        raise AssertionError("unreachable retry state")
+
+
+class LegacyCredentialResolver(Protocol):
+    async def resolve(
+        self,
+        *,
+        credential_ref: str,
+        subject_user_id: str,
+        app_id: str,
+        run_id: str,
+    ) -> SecretStr: ...
+
+
+def _area_level(
+    area_code: str,
+) -> Literal["province", "city", "district", "street", "community", "grid"]:
+    if len(area_code) == 4:
+        return "city"
+    if len(area_code) == 6:
+        return "district"
+    if len(area_code) == 9:
+        return "street"
+    if len(area_code) == 12:
+        return "community"
+    if len(area_code) == 15:
+        return "grid"
+    raise SemanticValidationError("unsupported legacy area code level")
+
+
+def _area_code_column(area_code: str) -> str:
+    return {
+        4: "city_code",
+        6: "county_code",
+        9: "town_code",
+        12: "community_code",
+        15: "grid_code",
+        17: "courtyard_code",
+        21: "unifiedaddressid",
+    }[len(area_code)]
+
+
+def _unwrap_standard_result(response: httpx.Response):
+    try:
+        envelope = response.json()
+    except ValueError as exc:
+        raise UpstreamContractError("legacy response is not valid JSON") from exc
+    if not isinstance(envelope, dict) or "data" not in envelope:
+        raise UpstreamContractError("legacy response envelope is malformed")
+    if envelope.get("code") in {401, 403}:
+        raise ReauthenticationRequired("登录凭据已失效，请重新认证")
+    if envelope.get("state") is not True or envelope.get("code") != 200:
+        raise UpstreamUnavailable(str(envelope.get("msg") or "legacy service failed"))
+    return envelope["data"]
+
+
+def _is_token_failure_response(response: httpx.Response) -> bool:
+    if response.status_code not in {401, 403}:
+        return False
+    try:
+        envelope = response.json()
+    except ValueError:
+        return response.status_code == 401
+    return isinstance(envelope, dict) and envelope.get("code") in {401, 403}
+
+
+def _validate_solitary_elderly_query(arguments: QueryPopulationMetricsInput) -> None:
+    filters = arguments.query.filters
+    if (
+        len(filters) != 1
+        or filters[0].field != "person_category"
+        or filters[0].operator != "eq"
+        or filters[0].value != "solitary_elderly"
+    ):
+        raise SemanticValidationError(
+            "legacy adapter currently supports only person_category=solitary_elderly"
+        )
+    expected_group = {6: "street", 9: "community", 12: "grid"}.get(
+        len(arguments.query.scope.area_code)
+    )
+    if expected_group is None or arguments.query.group_by != [expected_group]:
+        raise SemanticValidationError(
+            "legacy adapter supports only the immediate child area grouping"
+        )

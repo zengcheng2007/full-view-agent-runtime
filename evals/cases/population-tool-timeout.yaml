@@ -1,0 +1,36 @@
+schema_version: "1.0"
+case_id: population-tool-timeout
+description: 人口 HTTP Tool 被注入超时后以 upstream_timeout 可靠终止
+user_message: 查询西湖区独居老人数量，并按街道汇总
+auth:
+  area_codes: ["330106"]
+  datasets: [administrative_area, population]
+  entitlements: [governance.area.read, governance.population.aggregate.read]
+fault:
+  type: upstream_timeout
+  tool_id: governance.query_population_metrics
+model_steps:
+  - type: tool_call
+    tool_id: governance.resolve_area
+    arguments:
+      query: 西湖区
+  - type: tool_call
+    tool_id: governance.query_population_metrics
+    arguments:
+      query:
+        metrics: [person_count]
+        scope: {area_code: "330106", include_descendants: true}
+        filters:
+          - field: person_category
+            operator: eq
+            value: solitary_elderly
+        group_by: [street]
+  - type: finish
+    content: 人口查询超时，当前无法完成。
+expected:
+  terminal_status: failed
+  outcome: failed
+  completion_reason_code: upstream_timeout
+  tool_ids: [governance.resolve_area, governance.query_population_metrics]
+  min_evidence_count: 0
+  required_event_types: [tool.failed, run.failed]

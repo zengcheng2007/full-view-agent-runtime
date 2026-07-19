@@ -1,0 +1,48 @@
+from dataclasses import dataclass
+from typing import Literal, Protocol
+
+
+@dataclass(frozen=True)
+class ModelMessage:
+    role: Literal["system", "user", "assistant"]
+    content: str
+
+
+@dataclass(frozen=True)
+class ModelToolDefinition:
+    tool_id: str
+    description: str
+    input_schema: dict[str, object]
+
+
+@dataclass(frozen=True)
+class ModelRequest:
+    messages: tuple[ModelMessage, ...]
+    tools: tuple[ModelToolDefinition, ...] = ()
+    max_output_tokens: int | None = None
+    prompt_version: str | None = None
+
+
+@dataclass(frozen=True)
+class ModelToolCall:
+    tool_id: str
+    arguments: dict[str, object]
+
+
+@dataclass(frozen=True)
+class ModelUsage:
+    prompt_tokens: int = 0
+    completion_tokens: int = 0
+    total_tokens: int = 0
+
+
+@dataclass(frozen=True)
+class ModelResponse:
+    content: str | None
+    tool_calls: tuple[ModelToolCall, ...]
+    finish_reason: str
+    usage: ModelUsage = ModelUsage()
+
+
+class ModelProvider(Protocol):
+    async def complete(self, request: ModelRequest) -> ModelResponse: ...

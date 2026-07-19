@@ -1,0 +1,24 @@
+schema_version: "1.0"
+case_id: planning-area-empty-http
+description: 正式区划接口返回空候选时明确结束且不继续查询人口
+user_message: 查询绝对不存在的测试街道XYZ独居老人数量
+auth:
+  area_codes: ["3301"]
+  datasets: [administrative_area, population]
+  entitlements: [governance.area.read, governance.population.aggregate.read]
+model_steps:
+  - type: tool_call
+    tool_id: governance.resolve_area
+    arguments:
+      query: 绝对不存在的测试街道XYZ
+  - type: finish
+    content: 未找到名为“绝对不存在的测试街道XYZ”的授权区划，无法继续查询；这不代表任何业务指标为零。
+expected:
+  terminal_status: completed
+  outcome: success
+  completion_reason_code: goal_completed
+  tool_ids: [governance.resolve_area]
+  min_evidence_count: 1
+  required_event_types: [tool.completed, result.available, evidence.available, run.completed]
+  required_answer_substrings: ["不代表"]
+  forbidden_answer_substrings: ["预期结果应为", "预期数量为"]

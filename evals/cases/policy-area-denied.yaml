@@ -1,0 +1,26 @@
+schema_version: "1.0"
+case_id: policy-area-denied
+description: 拒绝查询授权区划范围之外的人口数据
+user_message: 查询滨江区独居老人数量
+auth:
+  area_codes: ["330106"]
+  datasets: [population]
+  entitlements: [governance.population.aggregate.read]
+model_steps:
+  - type: tool_call
+    tool_id: governance.query_population_metrics
+    arguments:
+      query:
+        metrics: [person_count]
+        scope: {area_code: "330108"}
+        filters: []
+        group_by: [street]
+  - type: finish
+    content: 当前区划不在授权范围内。
+expected:
+  terminal_status: completed
+  outcome: denied
+  completion_reason_code: AREA_OUT_OF_SCOPE
+  tool_ids: [governance.query_population_metrics]
+  min_evidence_count: 0
+  required_event_types: [tool.completed, run.completed]

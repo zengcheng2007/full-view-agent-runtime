@@ -1,0 +1,36 @@
+schema_version: "1.0"
+case_id: planning-population-http-success
+description: 解析区划并通过正式 HTTP Adapter 查询独居老人街道分布
+user_message: 查询西湖区独居老人数量，并按街道汇总
+auth:
+  area_codes: ["3301"]
+  datasets: [administrative_area, population]
+  entitlements: [governance.area.read, governance.population.aggregate.read]
+model_steps:
+  - type: tool_call
+    tool_id: governance.resolve_area
+    arguments:
+      query: 西湖区
+    total_tokens: 100
+  - type: tool_call
+    tool_id: governance.query_population_metrics
+    arguments:
+      query:
+        metrics: [person_count]
+        scope: {area_code: "330106", include_descendants: true}
+        filters:
+          - field: person_category
+            operator: eq
+            value: solitary_elderly
+        group_by: [street]
+    total_tokens: 120
+  - type: finish
+    content: 西湖区独居老人按街道汇总查询已完成。
+    total_tokens: 30
+expected:
+  terminal_status: completed
+  outcome: success
+  completion_reason_code: goal_completed
+  tool_ids: [governance.resolve_area, governance.query_population_metrics]
+  min_evidence_count: 2
+  required_event_types: [tool.completed, result.available, evidence.available, run.completed]

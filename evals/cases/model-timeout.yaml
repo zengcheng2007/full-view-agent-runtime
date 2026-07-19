@@ -1,0 +1,15 @@
+schema_version: "1.0"
+case_id: model-timeout
+description: 模型超时必须以标准错误码可靠终止
+user_message: 查询西湖区人口数量
+model_steps:
+  - type: error
+    error_code: model_timeout
+    message: scripted provider timed out
+expected:
+  terminal_status: failed
+  outcome: failed
+  completion_reason_code: model_timeout
+  tool_ids: []
+  min_evidence_count: 0
+  required_event_types: [run.failed]

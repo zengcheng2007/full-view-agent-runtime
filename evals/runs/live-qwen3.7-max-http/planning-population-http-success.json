@@ -1,0 +1,208 @@
+{
+  "trace_version": "1.0",
+  "eval_run_id": "evl_fcc426e877d09ef418cba652a0",
+  "replayed_from_eval_run_id": null,
+  "case_id": "planning-population-http-success",
+  "started_at": "2026-07-18T10:38:55.708514Z",
+  "completed_at": "2026-07-18T10:39:10.469702Z",
+  "model_provider": "openai_compatible",
+  "model_name": "qwen3.7-max",
+  "prompt_version": "full-view-governance-readonly-v2",
+  "model_requests": [
+    {
+      "messages": [
+        {
+          "role": "system",
+          "content": "你是全量信息视图的只读治理分析智能体。只能使用本次提供的 Tool，不得提升权限或猜测未返回的数据。需要业务数据时必须调用可用 Tool，不得凭记忆直接回答。Tool 返回后只能依据已验证观察作答；已有成功结果时不得重复相同调用。当前 P0 人口能力中，用户所说的独居老人必须表示为filters=[{field:'person_category',operator:'eq',value:'solitary_elderly'}]，不得替换为中文值或年龄条件；区县按街道汇总时必须传 group_by=['street']，街道按社区汇总时必须传 group_by=['community']，社区按网格汇总时必须传 group_by=['grid']。无法完成时应明确说明缺少的权限、参数或能力。授权上下文：{\"area_scopes\": [{\"area_code\": \"3301\", \"include_descendants\": true}], \"datasets\": [\"administrative_area\", \"population\", \"governance_objects\"], \"entitlements\": [\"governance.area.read\", \"governance.population.aggregate.read\", \"governance.object.profile.read\"], \"org_id\": \"1\", \"purpose\": \"interactive_analysis\", \"roles\": [\"1\"], \"tenant_id\": \"legacy\"}"
+        },
+        {
+          "role": "user",
+          "content": "查询西湖区独居老人数量，并按街道汇总"
+        }
+      ],
+      "tool_ids": [
+        "governance.get_object_profile",
+        "governance.query_population_metrics",
+        "governance.resolve_area"
+      ],
+      "prompt_version": "full-view-governance-readonly-v2"
+    },
+    {
+      "messages": [
+        {
+          "role": "system",
+          "content": "你是全量信息视图的只读治理分析智能体。只能使用本次提供的 Tool，不得提升权限或猜测未返回的数据。需要业务数据时必须调用可用 Tool，不得凭记忆直接回答。Tool 返回后只能依据已验证观察作答；已有成功结果时不得重复相同调用。当前 P0 人口能力中，用户所说的独居老人必须表示为filters=[{field:'person_category',operator:'eq',value:'solitary_elderly'}]，不得替换为中文值或年龄条件；区县按街道汇总时必须传 group_by=['street']，街道按社区汇总时必须传 group_by=['community']，社区按网格汇总时必须传 group_by=['grid']。无法完成时应明确说明缺少的权限、参数或能力。授权上下文：{\"area_scopes\": [{\"area_code\": \"3301\", \"include_descendants\": true}], \"datasets\": [\"administrative_area\", \"population\", \"governance_objects\"], \"entitlements\": [\"governance.area.read\", \"governance.population.aggregate.read\", \"governance.object.profile.read\"], \"org_id\": \"1\", \"purpose\": \"interactive_analysis\", \"roles\": [\"1\"], \"tenant_id\": \"legacy\"}"
+        },
+        {
+          "role": "user",
+          "content": "查询西湖区独居老人数量，并按街道汇总"
+        },
+        {
+          "role": "system",
+          "content": "已验证的 Tool 观察（只能基于这些结果继续或完成）：[{\"data_result\": {\"candidate_count\": 1, \"created_at\": \"2026-07-18T10:38:59.578417Z\", \"data\": {\"ambiguous\": false, \"candidates\": [{\"area_code\": \"330106\", \"area_name\": \"西湖区\", \"bounds\": null, \"level\": \"district\", \"parent_area_code\": null}], \"resolved_area_code\": \"330106\"}, \"data_schema_ref\": \"schema://data/area-candidates/1.0.0\", \"evidence_ids\": [], \"inline\": true, \"kind\": \"area_candidates\", \"payload_expires_at\": \"2026-07-19T10:38:59.578421Z\", \"payload_status\": \"available\", \"result_fingerprint\": \"sha256:a5f5a3f79b80a5822d510b52aa60d323a66f7c5986ad102ffe96844d0d68227b\", \"result_id\": \"res_97a92553bdb882f35b3bc7e310\"}, \"evidence_ids\": [], \"status\": \"success\", \"summary\": \"Tool 执行成功。\", \"tool_id\": \"governance.resolve_area\", \"warnings\": []}]"
+        }
+      ],
+      "tool_ids": [
+        "governance.get_object_profile",
+        "governance.query_population_metrics"
+      ],
+      "prompt_version": "full-view-governance-readonly-v2"
+    },
+    {
+      "messages": [
+        {
+          "role": "system",
+          "content": "你是全量信息视图的只读治理分析智能体。只能使用本次提供的 Tool，不得提升权限或猜测未返回的数据。需要业务数据时必须调用可用 Tool，不得凭记忆直接回答。Tool 返回后只能依据已验证观察作答；已有成功结果时不得重复相同调用。当前 P0 人口能力中，用户所说的独居老人必须表示为filters=[{field:'person_category',operator:'eq',value:'solitary_elderly'}]，不得替换为中文值或年龄条件；区县按街道汇总时必须传 group_by=['street']，街道按社区汇总时必须传 group_by=['community']，社区按网格汇总时必须传 group_by=['grid']。无法完成时应明确说明缺少的权限、参数或能力。授权上下文：{\"area_scopes\": [{\"area_code\": \"3301\", \"include_descendants\": true}], \"datasets\": [\"administrative_area\", \"population\", \"governance_objects\"], \"entitlements\": [\"governance.area.read\", \"governance.population.aggregate.read\", \"governance.object.profile.read\"], \"org_id\": \"1\", \"purpose\": \"interactive_analysis\", \"roles\": [\"1\"], \"tenant_id\": \"legacy\"}"
+        },
+        {
+          "role": "user",
+          "content": "查询西湖区独居老人数量，并按街道汇总"
+        },
+        {
+          "role": "system",
+          "content": "已验证的 Tool 观察（只能基于这些结果继续或完成）：[{\"data_result\": {\"candidate_count\": 1, \"created_at\": \"2026-07-18T10:38:59.578417Z\", \"data\": {\"ambiguous\": false, \"candidates\": [{\"area_code\": \"330106\", \"area_name\": \"西湖区\", \"bounds\": null, \"level\": \"district\", \"parent_area_code\": null}], \"resolved_area_code\": \"330106\"}, \"data_schema_ref\": \"schema://data/area-candidates/1.0.0\", \"evidence_ids\": [], \"inline\": true, \"kind\": \"area_candidates\", \"payload_expires_at\": \"2026-07-19T10:38:59.578421Z\", \"payload_status\": \"available\", \"result_fingerprint\": \"sha256:a5f5a3f79b80a5822d510b52aa60d323a66f7c5986ad102ffe96844d0d68227b\", \"result_id\": \"res_97a92553bdb882f35b3bc7e310\"}, \"evidence_ids\": [], \"status\": \"success\", \"summary\": \"Tool 执行成功。\", \"tool_id\": \"governance.resolve_area\", \"warnings\": []}, {\"data_result\": {\"created_at\": \"2026-07-18T10:39:04.376572Z\", \"data\": {\"rows\": [{\"area_code\": \"330106003\", \"area_name\": \"灵隐街道\", \"person_count\": 1}, {\"area_code\": \"330106004\", \"area_name\": \"西溪街道\", \"person_count\": 1}, {\"area_code\": \"330106002\", \"area_name\": \"北山街道\", \"person_count\": 2}]}, \"data_schema_ref\": \"schema://data/population-metric-table/1.0.0\", \"evidence_ids\": [], \"inline\": true, \"kind\": \"table\", \"payload_expires_at\": \"2026-07-19T10:39:04.376576Z\", \"payload_status\": \"available\", \"result_fingerprint\": \"sha256:2bbcd6cdd8bbe7f78e3f4e23c742f702b6baee226a94ba1465c0679cfac4b621\", \"result_id\": \"res_6e5b719ce4c9b366fce12dc8c3\", \"row_count\": 3, \"truncated\": false}, \"evidence_ids\": [], \"status\": \"success\", \"summary\": \"Tool 执行成功。\", \"tool_id\": \"governance.query_population_metrics\", \"warnings\": []}]"
+        }
+      ],
+      "tool_ids": [
+        "governance.get_object_profile"
+      ],
+      "prompt_version": "full-view-governance-readonly-v2"
+    }
+  ],
+  "model_steps": [
+    {
+      "type": "tool_call",
+      "tool_id": "governance.resolve_area",
+      "arguments": {
+        "query": "西湖区"
+      },
+      "total_tokens": 1900
+    },
+    {
+      "type": "tool_call",
+      "tool_id": "governance.query_population_metrics",
+      "arguments": {
+        "query": {
+          "metrics": [
+            "person_count"
+          ],
+          "scope": {
+            "area_code": "330106",
+            "include_descendants": true
+          },
+          "filters": [
+            {
+              "field": "person_category",
+              "operator": "eq",
+              "value": "solitary_elderly"
+            }
+          ],
+          "group_by": [
+            "street"
+          ]
+        }
+      },
+      "total_tokens": 2050
+    },
+    {
+      "type": "finish",
+      "content": "根据已验证的查询结果，西湖区（area_code: 330106）独居老人按街道汇总如下：\n\n| 街道 | 独居老人数量 |\n|------|------------|\n| 北山街道 | 2 |\n| 灵隐街道 | 1 |\n| 西溪街道 | 1 |\n\n**合计：4 人**\n\n查询覆盖了西湖区全部 3 个有独居老人登记的街道，数据未截断，结果完整。",
+      "total_tokens": 1733
+    }
+  ],
+  "total_tokens": 5683,
+  "event_types": [
+    "run.started",
+    "tool.started",
+    "tool.completed",
+    "tool.started",
+    "tool.completed",
+    "result.available",
+    "evidence.available",
+    "result.available",
+    "evidence.available",
+    "frontend.command.requested",
+    "assistant.message.completed",
+    "run.completed"
+  ],
+  "terminal_status": "completed",
+  "outcome": "success",
+  "completion_reason_code": "goal_completed",
+  "tool_ids": [
+    "governance.resolve_area",
+    "governance.query_population_metrics"
+  ],
+  "evidence_ids": [
+    "evd_594800b628f58f96514b593279",
+    "evd_f324151cb8af9c016ad9c91af4"
+  ],
+  "grades": [
+    {
+      "name": "terminal_status",
+      "passed": true,
+      "expected": "completed",
+      "actual": "completed"
+    },
+    {
+      "name": "outcome",
+      "passed": true,
+      "expected": "success",
+      "actual": "success"
+    },
+    {
+      "name": "completion_reason_code",
+      "passed": true,
+      "expected": "goal_completed",
+      "actual": "goal_completed"
+    },
+    {
+      "name": "tool_ids",
+      "passed": true,
+      "expected": [
+        "governance.resolve_area",
+        "governance.query_population_metrics"
+      ],
+      "actual": [
+        "governance.resolve_area",
+        "governance.query_population_metrics"
+      ]
+    },
+    {
+      "name": "min_evidence_count",
+      "passed": true,
+      "expected": 2,
+      "actual": 2
+    },
+    {
+      "name": "tool_lifecycle_terminal_count",
+      "passed": true,
+      "expected": 2,
+      "actual": 2
+    },
+    {
+      "name": "required_event_types",
+      "passed": true,
+      "expected": [
+        "tool.completed",
+        "result.available",
+        "evidence.available",
+        "run.completed"
+      ],
+      "actual": [
+        "run.started",
+        "tool.started",
+        "tool.completed",
+        "tool.started",
+        "tool.completed",
+        "result.available",
+        "evidence.available",
+        "result.available",
+        "evidence.available",
+        "frontend.command.requested",
+        "assistant.message.completed",
+        "run.completed"
+      ]
+    }
+  ],
+  "passed": true
+}
