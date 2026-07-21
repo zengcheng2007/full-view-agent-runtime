@@ -2,6 +2,10 @@ from datetime import UTC, datetime, timedelta
 
 from pydantic import BaseModel
 
+from full_view_agent.application.authorization_scope import (
+    area_is_within_scope,
+    extract_area_scope,
+)
 from full_view_agent.application.fingerprints import canonical_fingerprint
 from full_view_agent.application.session_run_service import new_id
 from full_view_agent.domain.models import (
@@ -9,9 +13,7 @@ from full_view_agent.domain.models import (
     DataResult,
     GetObjectProfileInput,
     InternalToolManifest,
-    ObjectProfileResult,
     PolicyDecision,
-    QueryPopulationMetricsInput,
 )
 
 
@@ -75,13 +77,25 @@ class MinimalPolicyAdapter:
                 ),
             },
         )
-        requested_area = _requested_area(arguments, result)
+        argument_scope = extract_area_scope(arguments)
+        result_scope = extract_area_scope(result)
+        requested_area = (
+            result_scope.area_code
+            if result_scope is not None
+            else argument_scope.area_code if argument_scope is not None else None
+        )
+        result_outside_request_scope = bool(
+            result_scope is not None
+            and argument_scope is not None
+            and not area_is_within_scope(result_scope.area_code, argument_scope)
+        )
         decision, reasons, message = self._decide(
             manifest=manifest,
             auth_context=auth_context,
             arguments=arguments,
             now=now,
             requested_area=requested_area,
+            result_outside_request_scope=result_outside_request_scope,
         )
         allowed_field_sets, denied_field_sets = _field_sets(arguments, auth_context)
         effective_area_codes = [requested_area] if requested_area else [
@@ -142,6 +156,7 @@ class MinimalPolicyAdapter:
         arguments: BaseModel,
         now: datetime,
         requested_area: str | None,
+        result_outside_request_scope: bool,
     ) -> tuple[str, list[str], str]:
         if auth_context.expires_at <= now:
             return "deny", ["AUTH_CONTEXT_EXPIRED"], "登录授权已过期，请重新认证。"
@@ -149,6 +164,12 @@ class MinimalPolicyAdapter:
             return "deny", ["TOOL_NOT_ENTITLED"], "当前用户无权使用该能力。"
         if manifest.dataset_id not in auth_context.data_scopes.datasets:
             return "deny", ["DATASET_NOT_AUTHORIZED"], "当前数据集不在授权范围内。"
+        if result_outside_request_scope:
+            return (
+                "deny",
+                ["RESULT_AREA_OUTSIDE_REQUEST_SCOPE"],
+                "结果区域与请求范围不一致。",
+            )
         if requested_area and not _area_is_authorized(requested_area, auth_context):
             return "deny", ["AREA_OUT_OF_SCOPE"], "请求区域不在当前授权范围内。"
         allowed_field_sets, denied_field_sets = _field_sets(arguments, auth_context)
@@ -157,17 +178,6 @@ class MinimalPolicyAdapter:
         if denied_field_sets:
             return "deny", ["FIELD_NOT_AUTHORIZED"], "请求字段不在当前授权范围内。"
         return "allow", [], "允许执行。"
-
-
-def _requested_area(
-    arguments: BaseModel,
-    result: DataResult | None = None,
-) -> str | None:
-    if isinstance(result, ObjectProfileResult):
-        return result.data.area_code
-    if isinstance(arguments, QueryPopulationMetricsInput):
-        return arguments.query.scope.area_code
-    return None
 
 
 def _area_is_authorized(area_code: str, auth_context: AuthContext) -> bool:

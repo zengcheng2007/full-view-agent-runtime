@@ -1,0 +1,45 @@
+schema_version: "1.0"
+case_id: q20-xihu-governance-overview
+description: "Q20/S5: 给我一份西湖区治理要素总览（人房企事组合和摘要）"
+user_message: 给我一份西湖区治理要素总览。
+auth:
+  area_codes: ["3301"]
+  datasets: [administrative_area, population, housing, event, governance_objects]
+  entitlements: [governance.area.read, governance.population.aggregate.read, governance.housing.aggregate.read, governance.event.aggregate.read, governance.object.profile.read]
+model_steps:
+  - type: tool_call
+    tool_id: governance.resolve_area
+    arguments:
+      query: 西湖区
+  - type: tool_call
+    tool_id: governance.query_population_metrics
+    arguments:
+      query:
+        metrics: [person_count]
+        scope: {area_code: "330106", include_descendants: true}
+        filters:
+          - {field: person_category, operator: eq, value: solitary_elderly}
+        group_by: [street]
+  - type: tool_call
+    tool_id: governance.query_housing_metrics
+    arguments:
+      query:
+        scope: {area_code: "330106", include_descendants: true}
+  - type: tool_call
+    tool_id: governance.query_event_metrics
+    arguments:
+      query:
+        scope: {area_code: "330106", include_descendants: true}
+  - type: finish
+    content: 西湖区治理要素总览已完成，涵盖人口、出租房和网格事件办结率。
+expected:
+  terminal_status: completed
+  outcome: success
+  completion_reason_code: goal_completed
+  tool_ids:
+    - governance.resolve_area
+    - governance.query_population_metrics
+    - governance.query_housing_metrics
+    - governance.query_event_metrics
+  min_evidence_count: 0
+  required_event_types: [tool.completed, result.available, run.completed]

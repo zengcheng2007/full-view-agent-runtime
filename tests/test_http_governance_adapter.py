@@ -7,6 +7,7 @@ from pydantic import SecretStr
 from full_view_agent.application import errors
 from full_view_agent.application.policy import MinimalPolicyAdapter
 from full_view_agent.application.tool_registry import ToolRegistry
+from full_view_agent.domain import models
 from full_view_agent.domain.models import QueryPopulationMetricsInput, ResolveAreaInput
 from full_view_agent.infrastructure import governance_adapter
 
@@ -497,3 +498,250 @@ async def test_http_adapter_maps_solitary_elderly_query_to_fixed_legacy_fields()
     assert result.data.rows[0].area_code == "330106001"
     assert result.data.rows[0].area_name == "翠苑街道"
     assert result.data.rows[0].person_count == 12
+
+
+def _domain_auth_context(*, entitlement: str, dataset_id: str):
+    context = population_auth_context()
+    return context.model_copy(
+        update={
+            "entitlements": [entitlement],
+            "data_scopes": context.data_scopes.model_copy(
+                update={"datasets": [dataset_id]}
+            ),
+        }
+    )
+
+
+@pytest.mark.asyncio
+async def test_http_adapter_maps_housing_request_to_lease_type_contract() -> None:
+    requests: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        return httpx.Response(
+            200,
+            json={
+                "state": True,
+                "code": 200,
+                "msg": "",
+                "data": [
+                    {"house_type": "住宅出租", "total": 32},
+                    {"house_type": "商铺出租", "total": 8},
+                ],
+            },
+        )
+
+    auth_context = _domain_auth_context(
+        entitlement="governance.housing.aggregate.read",
+        dataset_id="housing",
+    )
+    arguments = models.QueryHousingMetricsInput.model_validate(
+        {"query": {"scope": {"area_code": "330106"}}}
+    )
+    manifest = ToolRegistry.default().get_manifest(
+        "governance.query_housing_metrics"
+    )
+    policy = MinimalPolicyAdapter().evaluate(
+        manifest=manifest,
+        auth_context=auth_context,
+        arguments=arguments,
+    )
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        adapter = governance_adapter.HttpGovernanceAdapter(
+            base_url="http://legacy.test/geo-qxst",
+            credential_broker=RecordingCredentialBroker(),
+            client=client,
+        )
+        result = await adapter.execute(
+            manifest=manifest,
+            arguments=arguments,
+            policy_decision=policy,
+            auth_context=auth_context,
+        )
+
+    assert requests[0].method == "POST"
+    assert requests[0].url.path == "/geo-qxst/house/getRoomLeaseType"
+    assert parse_qs(requests[0].content.decode()) == {
+        "areaName": ["county_code"],
+        "areaCode": ["330106"],
+    }
+    assert result.data_schema_ref == "schema://data/housing-lease-type-table/1.0.0"
+    assert result.data.rows[0].lease_type == "住宅出租"
+    assert result.data.rows[0].dwelling_count == 32
+
+
+@pytest.mark.asyncio
+async def test_http_adapter_preserves_event_finish_rate_decimals() -> None:
+    def handler(_request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            json={
+                "state": True,
+                "code": 200,
+                "msg": "",
+                "data": {
+                    "gridFinishRate": "75.5%",
+                    "communityFinishRate": "82.25%",
+                    "streetFinishRate": "90%",
+                },
+            },
+        )
+
+    auth_context = _domain_auth_context(
+        entitlement="governance.event.aggregate.read",
+        dataset_id="event",
+    )
+    arguments = models.QueryEventMetricsInput.model_validate(
+        {"query": {"scope": {"area_code": "330106"}}}
+    )
+    manifest = ToolRegistry.default().get_manifest(
+        "governance.query_event_metrics"
+    )
+    policy = MinimalPolicyAdapter().evaluate(
+        manifest=manifest,
+        auth_context=auth_context,
+        arguments=arguments,
+    )
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        result = await governance_adapter.HttpGovernanceAdapter(
+            base_url="http://legacy.test/geo-qxst",
+            credential_broker=RecordingCredentialBroker(),
+            client=client,
+        ).execute(
+            manifest=manifest,
+            arguments=arguments,
+            policy_decision=policy,
+            auth_context=auth_context,
+        )
+
+    assert result.data_schema_ref == "schema://data/event-finish-rate-table/1.0.0"
+    assert [(row.level, row.finish_rate) for row in result.data.rows] == [
+        ("grid", 75.5),
+        ("community", 82.25),
+        ("street", 90.0),
+    ]
+
+
+@pytest.mark.asyncio
+async def test_http_adapter_maps_building_profile_and_verifies_area_binding() -> None:
+    requests: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        return httpx.Response(
+            200,
+            json={
+                "state": True,
+                "code": 200,
+                "msg": "",
+                "data": [
+                    {
+                        "_source": {
+                            "code": "3301060010016838",
+                            "building_path": "测试路18号1幢",
+                            "longitude": 120.1,
+                            "latitude": 30.2,
+                        }
+                    }
+                ],
+            },
+        )
+
+    auth_context = _domain_auth_context(
+        entitlement="governance.object.profile.read",
+        dataset_id="governance_objects",
+    )
+    arguments = models.GetObjectProfileInput.model_validate(
+        {
+            "object_ref": {
+                "object_type": "building",
+                "object_id": "3301060010016838",
+            },
+            "scope": {"area_code": "330106"},
+            "field_sets": ["summary", "location"],
+        }
+    )
+    manifest = ToolRegistry.default().get_manifest(
+        "governance.get_object_profile"
+    )
+    policy = MinimalPolicyAdapter().evaluate(
+        manifest=manifest,
+        auth_context=auth_context,
+        arguments=arguments,
+    )
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        result = await governance_adapter.HttpGovernanceAdapter(
+            base_url="http://legacy.test/geo-qxst",
+            credential_broker=RecordingCredentialBroker(),
+            client=client,
+        ).execute(
+            manifest=manifest,
+            arguments=arguments,
+            policy_decision=policy,
+            auth_context=auth_context,
+        )
+
+    assert requests[0].method == "POST"
+    assert requests[0].url.path == "/geo-qxst/house/getHouseDetails"
+    assert parse_qs(requests[0].content.decode()) == {
+        "houseId": ["3301060010016838"]
+    }
+    assert result.data.area_code == "330106"
+    assert result.data.title == "测试路18号1幢"
+
+
+@pytest.mark.asyncio
+async def test_http_adapter_rejects_building_outside_declared_area_scope() -> None:
+    def handler(_request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            json={
+                "state": True,
+                "code": 200,
+                "msg": "",
+                "data": [
+                    {
+                        "_source": {
+                            "code": "3301080010010001",
+                            "building_path": "另一区域楼栋",
+                        }
+                    }
+                ],
+            },
+        )
+
+    auth_context = _domain_auth_context(
+        entitlement="governance.object.profile.read",
+        dataset_id="governance_objects",
+    )
+    arguments = models.GetObjectProfileInput.model_validate(
+        {
+            "object_ref": {
+                "object_type": "building",
+                "object_id": "3301060010016838",
+            },
+            "scope": {"area_code": "330106"},
+            "field_sets": ["summary"],
+        }
+    )
+    manifest = ToolRegistry.default().get_manifest(
+        "governance.get_object_profile"
+    )
+    policy = MinimalPolicyAdapter().evaluate(
+        manifest=manifest,
+        auth_context=auth_context,
+        arguments=arguments,
+    )
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        adapter = governance_adapter.HttpGovernanceAdapter(
+            base_url="http://legacy.test/geo-qxst",
+            credential_broker=RecordingCredentialBroker(),
+            client=client,
+        )
+        with pytest.raises(errors.UpstreamContractError, match="outside"):
+            await adapter.execute(
+                manifest=manifest,
+                arguments=arguments,
+                policy_decision=policy,
+                auth_context=auth_context,
+            )

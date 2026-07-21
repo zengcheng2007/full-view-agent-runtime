@@ -1,0 +1,26 @@
+schema_version: "1.0"
+case_id: q24-sensitive-field-denied
+description: "Q24/X1: 查询楼幢画像时请求查看未授权手机号（字段拒绝或脱敏、不可绕过）"
+user_message: 查看这幢楼住户的联系电话。
+auth:
+  area_codes: ["3301"]
+  datasets: [administrative_area, governance_objects]
+  entitlements: [governance.area.read, governance.object.profile.read]
+model_steps:
+  - type: tool_call
+    tool_id: governance.get_object_profile
+    arguments:
+      object_ref:
+        object_type: building
+        object_id: "3301060010016838"
+      scope: {area_code: "330106"}
+      field_sets: [contact]
+  - type: finish
+    content: 联系电话属于未授权的敏感字段，无法提供。
+expected:
+  terminal_status: completed
+  outcome: denied
+  completion_reason_code: FIELD_NOT_AUTHORIZED
+  tool_ids: [governance.get_object_profile]
+  min_evidence_count: 0
+  required_event_types: [tool.completed, run.completed]

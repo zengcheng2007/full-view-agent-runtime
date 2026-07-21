@@ -66,6 +66,12 @@ class ResolveAreaInput(ContractModel):
     context_area_code: str | None = Field(default=None, min_length=1, max_length=32)
     max_candidates: int = Field(default=5, ge=1, le=20)
 
+    def authorization_area_scope(self) -> "MetricQueryScope | None":
+        area_code = self.context_area_code or self.parent_area_code
+        if area_code is None:
+            return None
+        return MetricQueryScope(area_code=area_code)
+
 
 class MetricQueryScope(ContractModel):
     area_code: str = Field(min_length=1, max_length=32)
@@ -104,6 +110,35 @@ class PopulationMetricQuerySpec(ContractModel):
 class QueryPopulationMetricsInput(ContractModel):
     query: PopulationMetricQuerySpec
 
+    def authorization_area_scope(self) -> MetricQueryScope:
+        return self.query.scope
+
+
+class HousingMetricQuerySpec(ContractModel):
+    schema_version: Literal["1.1"] = "1.1"
+    scope: MetricQueryScope
+    limit: int = Field(default=200, ge=1, le=1000)
+
+
+class QueryHousingMetricsInput(ContractModel):
+    query: HousingMetricQuerySpec
+
+    def authorization_area_scope(self) -> MetricQueryScope:
+        return self.query.scope
+
+
+class EventMetricQuerySpec(ContractModel):
+    schema_version: Literal["1.1"] = "1.1"
+    scope: MetricQueryScope
+    limit: int = Field(default=200, ge=1, le=1000)
+
+
+class QueryEventMetricsInput(ContractModel):
+    query: EventMetricQuerySpec
+
+    def authorization_area_scope(self) -> MetricQueryScope:
+        return self.query.scope
+
 
 class GovernanceObjectRef(ContractModel):
     object_type: Literal["person", "building", "room", "enterprise", "event"]
@@ -112,9 +147,13 @@ class GovernanceObjectRef(ContractModel):
 
 class GetObjectProfileInput(ContractModel):
     object_ref: GovernanceObjectRef
+    scope: MetricQueryScope
     field_sets: list[
         Literal["summary", "demographics", "location", "governance_status", "contact"]
     ] = Field(default_factory=lambda: ["summary"], min_length=1, max_length=5)
+
+    def authorization_area_scope(self) -> MetricQueryScope:
+        return self.scope
 
 
 class ToolResultSchemaBinding(ContractModel):
@@ -508,6 +547,24 @@ class PopulationMetricTable(ContractModel):
     rows: list[PopulationMetricRow]
 
 
+class HousingLeaseTypeRow(ContractModel):
+    lease_type: str = Field(min_length=1, max_length=100)
+    dwelling_count: int = Field(ge=0)
+
+
+class HousingLeaseTypeTable(ContractModel):
+    rows: list[HousingLeaseTypeRow]
+
+
+class EventFinishRateRow(ContractModel):
+    level: Literal["grid", "community", "street"]
+    finish_rate: float = Field(ge=0, le=100)
+
+
+class EventFinishRateTable(ContractModel):
+    rows: list[EventFinishRateRow]
+
+
 class TableDataResult(ContractModel):
     result_id: str
     kind: Literal["table"] = "table"
@@ -520,7 +577,7 @@ class TableDataResult(ContractModel):
     )
     evidence_ids: list[str] = Field(default_factory=list)
     inline: bool = True
-    data: PopulationMetricTable
+    data: PopulationMetricTable | HousingLeaseTypeTable | EventFinishRateTable
     row_count: int = Field(ge=0)
     truncated: bool = False
 
@@ -554,6 +611,14 @@ class AreaCandidatesResult(ContractModel):
     data: AreaCandidatesData
     candidate_count: int = Field(ge=0, le=20)
 
+    def authorization_area_scope(self) -> MetricQueryScope | None:
+        if self.data.resolved_area_code is None:
+            return None
+        return MetricQueryScope(
+            area_code=self.data.resolved_area_code,
+            include_descendants=False,
+        )
+
 
 class ObjectProfileField(ContractModel):
     field_id: str = Field(min_length=1, max_length=100)
@@ -583,6 +648,12 @@ class ObjectProfileResult(ContractModel):
     evidence_ids: list[str] = Field(default_factory=list)
     inline: bool = True
     data: ObjectProfileData
+
+    def authorization_area_scope(self) -> MetricQueryScope:
+        return MetricQueryScope(
+            area_code=self.data.area_code,
+            include_descendants=False,
+        )
 
 
 DataResult = Annotated[

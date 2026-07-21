@@ -1,0 +1,26 @@
+schema_version: "1.0"
+case_id: q16-building-profile-basic
+description: "Q16/S4: 打开这幢楼的基本画像（对象详情、字段策略和详情命令）"
+user_message: 打开这幢楼的基本画像。
+auth:
+  area_codes: ["3301"]
+  datasets: [administrative_area, population, housing, event, governance_objects]
+  entitlements: [governance.area.read, governance.population.aggregate.read, governance.housing.aggregate.read, governance.event.aggregate.read, governance.object.profile.read]
+model_steps:
+  - type: tool_call
+    tool_id: governance.get_object_profile
+    arguments:
+      object_ref:
+        object_type: building
+        object_id: "3301060010016838"
+      scope: {area_code: "330106"}
+      field_sets: [summary, demographics]
+  - type: finish
+    content: 楼幢基本画像查询完成，字段已按权限策略过滤。
+expected:
+  terminal_status: completed
+  outcome: success
+  completion_reason_code: goal_completed
+  tool_ids: [governance.get_object_profile]
+  min_evidence_count: 0
+  required_event_types: [tool.completed, result.available, run.completed]

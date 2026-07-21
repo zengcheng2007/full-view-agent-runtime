@@ -1,0 +1,23 @@
+schema_version: "1.0"
+case_id: q13-xihu-event-below60-map
+description: "Q13/S3: 把低于60%的区域在地图上高亮（结果引用、地图高亮命令）"
+user_message: 把低于60%的区域在地图上高亮。
+auth:
+  area_codes: ["3301"]
+  datasets: [administrative_area, population, housing, event, governance_objects]
+  entitlements: [governance.area.read, governance.population.aggregate.read, governance.housing.aggregate.read, governance.event.aggregate.read, governance.object.profile.read]
+model_steps:
+  - type: tool_call
+    tool_id: governance.resolve_area
+    arguments:
+      query: 西湖区
+  - type: finish
+    content: 当前数据源不支持下级区域明细和阈值筛选，不能生成可信的地图高亮数据。
+expected:
+  terminal_status: completed
+  outcome: success
+  completion_reason_code: goal_completed
+  tool_ids: [governance.resolve_area]
+  min_evidence_count: 0
+  required_event_types: [tool.completed, result.available, run.completed]
+  required_answer_substrings: [不支持]

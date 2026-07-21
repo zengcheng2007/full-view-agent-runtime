@@ -1,0 +1,23 @@
+schema_version: "1.0"
+case_id: q11-xihu-event-finish-rate
+description: "Q11/S3: 查询西湖区各街道网格事件办结率（事件指标口径和分组）"
+user_message: 查询西湖区各街道网格事件办结率。
+auth:
+  area_codes: ["3301"]
+  datasets: [administrative_area, population, housing, event, governance_objects]
+  entitlements: [governance.area.read, governance.population.aggregate.read, governance.housing.aggregate.read, governance.event.aggregate.read, governance.object.profile.read]
+model_steps:
+  - type: tool_call
+    tool_id: governance.resolve_area
+    arguments:
+      query: 西湖区
+  - type: finish
+    content: 当前数据源只返回西湖区自身的层级汇总办结率，不支持各街道明细。
+expected:
+  terminal_status: completed
+  outcome: success
+  completion_reason_code: goal_completed
+  tool_ids: [governance.resolve_area]
+  min_evidence_count: 0
+  required_event_types: [tool.completed, result.available, run.completed]
+  required_answer_substrings: [不支持]

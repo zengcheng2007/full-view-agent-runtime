@@ -51,7 +51,7 @@ async def test_context_builder_uses_messages_and_only_authorized_tools() -> None
     assert [tool.tool_id for tool in request.tools] == [
         "governance.query_population_metrics"
     ]
-    assert request.prompt_version == "full-view-governance-readonly-v4"
+    assert request.prompt_version == "full-view-governance-readonly-v6"
     assert "需要业务数据时必须调用" in request.messages[0].content
     assert "solitary_elderly" in request.messages[0].content
     assert "区县按街道" in request.messages[0].content
@@ -60,6 +60,43 @@ async def test_context_builder_uses_messages_and_only_authorized_tools() -> None
     assert "query" in request.tools[0].input_schema["properties"]
     assert "solitary_elderly" in request.tools[0].description
     assert "group_by" in request.tools[0].description
+
+
+@pytest.mark.asyncio
+async def test_context_builder_does_not_advertise_unimplemented_event_filters() -> None:
+    store = InMemoryAgentStore()
+    service = SessionRunService(store)
+    session = await service.create_session(user_id="user-event", title="事件查询")
+    run = await service.create_run(
+        user_id="user-event",
+        session_id=session.session_id,
+        request=run_request(),
+    )
+    base_context = population_auth_context()
+    auth_context = base_context.model_copy(
+        update={
+            "session_id": session.session_id,
+            "run_id": run.run_id,
+            "entitlements": ["governance.event.aggregate.read"],
+            "data_scopes": base_context.data_scopes.model_copy(
+                update={"datasets": ["event"]}
+            ),
+        }
+    )
+
+    request = await AgentContextBuilder(
+        store=store,
+        registry=ToolRegistry.default(),
+    ).build(
+        user_id="user-event",
+        auth_context=auth_context,
+        state=HarnessState(),
+    )
+
+    prompt = request.messages[0].content
+    assert "事件总量或办结数" in prompt
+    assert "不支持按阈值筛选" in prompt
+    assert "min_finish_rate" not in prompt
 
 
 @pytest.mark.asyncio

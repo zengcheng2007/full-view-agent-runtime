@@ -1,0 +1,32 @@
+schema_version: "1.0"
+case_id: q03-xihu-solitary-elderly-map
+description: "Q03/S1: 把独居老人街道汇总结果在地图上显示（继承结果引用、地图分色命令与回执）"
+user_message: 把刚才的结果在地图上显示。
+auth:
+  area_codes: ["3301"]
+  datasets: [administrative_area, population, housing, event, governance_objects]
+  entitlements: [governance.area.read, governance.population.aggregate.read, governance.housing.aggregate.read, governance.event.aggregate.read, governance.object.profile.read]
+model_steps:
+  - type: tool_call
+    tool_id: governance.resolve_area
+    arguments:
+      query: 西湖区
+  - type: tool_call
+    tool_id: governance.query_population_metrics
+    arguments:
+      query:
+        metrics: [person_count]
+        scope: {area_code: "330106", include_descendants: true}
+        filters:
+          - {field: person_category, operator: eq, value: solitary_elderly}
+        group_by: [street]
+        presentation_hint: choropleth
+  - type: finish
+    content: 已按街道生成独居老人分色图数据，地图渲染命令已下发。
+expected:
+  terminal_status: completed
+  outcome: success
+  completion_reason_code: goal_completed
+  tool_ids: [governance.resolve_area, governance.query_population_metrics]
+  min_evidence_count: 2
+  required_event_types: [tool.completed, result.available, evidence.available, run.completed]

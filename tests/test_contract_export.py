@@ -66,6 +66,12 @@ def test_export_contracts_writes_openapi_and_versioned_json_schemas(tmp_path) ->
         "data/tool-specific/population-metric-table.schema.json": (
             "PopulationMetricTable"
         ),
+        "data/tool-specific/housing-lease-type-table.schema.json": (
+            "HousingLeaseTypeTable"
+        ),
+        "data/tool-specific/event-finish-rate-table.schema.json": (
+            "EventFinishRateTable"
+        ),
     }
     for relative_path, expected_title in expected_schemas.items():
         schema = json.loads(
@@ -95,6 +101,8 @@ def test_export_contracts_writes_openapi_and_versioned_json_schemas(tmp_path) ->
     )
     assert [item["tool_id"] for item in descriptors] == [
         "governance.get_object_profile",
+        "governance.query_event_metrics",
+        "governance.query_housing_metrics",
         "governance.query_population_metrics",
         "governance.resolve_area",
     ]

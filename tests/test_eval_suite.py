@@ -14,20 +14,15 @@ async def test_versioned_baseline_suite_passes_and_writes_replayable_artifacts(
 
     report = await run_eval_suite(cases_dir=cases_dir, output_dir=tmp_path)
 
-    assert report.total_cases == 8
-    assert report.passed_cases == 8
+    assert report.total_cases >= 12
+    assert report.passed_cases == report.total_cases
     assert report.failed_cases == 0
     assert report.pass_at_1 == 1.0
-    assert [result.case_id for result in report.case_results] == [
-        "model-timeout",
-        "planning-area-empty-http",
-        "planning-population-http-success",
-        "planning-population-success",
-        "policy-area-denied",
-        "policy-real-area-denied",
-        "population-tool-timeout",
-        "result-traceability",
-    ]
+    case_ids = [r.case_id for r in report.case_results]
+    assert "result-traceability" in case_ids
+    assert "s2-housing-metrics-success" in case_ids
+    assert "s3-event-metrics-success" in case_ids
+    assert "s5-comprehensive-overview" in case_ids
     assert load_eval_suite_report(tmp_path / "report.json") == report
     for result in report.case_results:
         assert (tmp_path / result.trace_path).is_file()

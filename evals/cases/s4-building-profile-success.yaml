@@ -1,0 +1,26 @@
+schema_version: "1.0"
+case_id: s4-building-profile-success
+description: "S4: 查询楼栋画像"
+user_message: 查看编号3301060010016838的楼栋信息
+auth:
+  area_codes: ["3301"]
+  datasets: [administrative_area, governance_objects]
+  entitlements: [governance.area.read, governance.object.profile.read]
+model_steps:
+  - type: tool_call
+    tool_id: governance.get_object_profile
+    arguments:
+      object_ref:
+        object_type: building
+        object_id: "3301060010016838"
+      scope: {area_code: "330106"}
+      field_sets: [summary, location]
+  - type: finish
+    content: 楼栋画像查询完成。
+expected:
+  terminal_status: completed
+  outcome: success
+  completion_reason_code: goal_completed
+  tool_ids: [governance.get_object_profile]
+  min_evidence_count: 0
+  required_event_types: [tool.completed, result.available, run.completed]

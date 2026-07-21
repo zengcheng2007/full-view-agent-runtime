@@ -76,7 +76,10 @@ class EvalCase(ContractModel):
     description: str = Field(min_length=1, max_length=500)
     user_message: str = Field(min_length=1, max_length=10_000)
     auth: EvalAuthSpec = Field(default_factory=EvalAuthSpec)
-    model_steps: list[EvalModelStep] = Field(min_length=1, max_length=20)
+    model_steps: list[EvalModelStep] = Field(
+        default_factory=list, max_length=20,
+        description="Scripted model steps. Empty = use live model provider.",
+    )
     fault: EvalFaultSpec | None = None
     expected: EvalExpected
 

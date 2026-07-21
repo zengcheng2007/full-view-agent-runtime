@@ -1,0 +1,31 @@
+schema_version: "1.0"
+case_id: q02-xihu-solitary-elderly-top-streets
+description: "Q02/S1: 西湖区独居老人主要集中在哪几个街道（结果排序与自然语言总结）"
+user_message: 西湖区独居老人主要集中在哪几个街道？
+auth:
+  area_codes: ["3301"]
+  datasets: [administrative_area, population, housing, event, governance_objects]
+  entitlements: [governance.area.read, governance.population.aggregate.read, governance.housing.aggregate.read, governance.event.aggregate.read, governance.object.profile.read]
+model_steps:
+  - type: tool_call
+    tool_id: governance.resolve_area
+    arguments:
+      query: 西湖区
+  - type: tool_call
+    tool_id: governance.query_population_metrics
+    arguments:
+      query:
+        metrics: [person_count]
+        scope: {area_code: "330106", include_descendants: true}
+        filters:
+          - {field: person_category, operator: eq, value: solitary_elderly}
+        group_by: [street]
+  - type: finish
+    content: 西湖区独居老人主要集中在排名靠前的几个街道，已按数量从高到低汇总。
+expected:
+  terminal_status: completed
+  outcome: success
+  completion_reason_code: goal_completed
+  tool_ids: [governance.resolve_area, governance.query_population_metrics]
+  min_evidence_count: 2
+  required_event_types: [tool.completed, result.available, evidence.available, run.completed]

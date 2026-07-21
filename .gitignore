@@ -9,3 +9,5 @@ data/
 *.db
 test_results.txt
 evals/runs/latest/
+# Generated evaluation reports and traces are local evidence, not source inputs.
+evals/runs/*/

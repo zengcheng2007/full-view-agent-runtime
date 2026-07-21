@@ -1,0 +1,26 @@
+schema_version: "1.0"
+case_id: q17-building-rooms-population
+description: "Q17/S4: 这幢楼有多少户室和关联人口（楼幢—户室—人口关联统计）"
+user_message: 这幢楼有多少户室和关联人口？
+auth:
+  area_codes: ["3301"]
+  datasets: [administrative_area, population, housing, event, governance_objects]
+  entitlements: [governance.area.read, governance.population.aggregate.read, governance.housing.aggregate.read, governance.event.aggregate.read, governance.object.profile.read]
+model_steps:
+  - type: tool_call
+    tool_id: governance.get_object_profile
+    arguments:
+      object_ref:
+        object_type: building
+        object_id: "3301060010016838"
+      scope: {area_code: "330106"}
+      field_sets: [summary, demographics]
+  - type: finish
+    content: 楼幢户室与关联人口统计查询完成。
+expected:
+  terminal_status: completed
+  outcome: success
+  completion_reason_code: goal_completed
+  tool_ids: [governance.get_object_profile]
+  min_evidence_count: 0
+  required_event_types: [tool.completed, result.available, run.completed]

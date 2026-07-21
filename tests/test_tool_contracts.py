@@ -69,6 +69,7 @@ def test_object_profile_input_uses_registered_field_sets_not_raw_fields() -> Non
                 "object_type": "person",
                 "object_id": "person-01",
             },
+            "scope": {"area_code": "330106"},
             "field_sets": ["summary", "demographics"],
         }
     )
@@ -81,7 +82,41 @@ def test_object_profile_input_uses_registered_field_sets_not_raw_fields() -> Non
                     "object_type": "person",
                     "object_id": "person-01",
                 },
+                "scope": {"area_code": "330106"},
                 "fields": ["phone", "id_card"],
+            }
+        )
+
+
+def test_housing_contract_rejects_unimplemented_area_grouping() -> None:
+    with pytest.raises(ValidationError):
+        models.QueryHousingMetricsInput.model_validate(
+            {
+                "query": {
+                    "scope": {"area_code": "330106"},
+                    "group_by": ["community"],
+                }
+            }
+        )
+
+
+def test_event_contract_rejects_unimplemented_grouping_and_threshold() -> None:
+    with pytest.raises(ValidationError):
+        models.QueryEventMetricsInput.model_validate(
+            {
+                "query": {
+                    "scope": {"area_code": "330106"},
+                    "group_by": ["street"],
+                }
+            }
+        )
+    with pytest.raises(ValidationError):
+        models.QueryEventMetricsInput.model_validate(
+            {
+                "query": {
+                    "scope": {"area_code": "330106"},
+                    "min_finish_rate": 60,
+                }
             }
         )
 

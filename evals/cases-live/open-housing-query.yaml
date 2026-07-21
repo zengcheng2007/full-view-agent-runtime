@@ -1,0 +1,24 @@
+# 开放式评测用例 —— 不预编排 model_steps，由真实模型自主决策
+# 运行方式：uv run python scripts/run_evals.py run-live --case evals/cases-live/open-housing-query.yaml --env-file .env
+# 断言只校验最终结果，不规定 Tool 调用顺序
+schema_version: "1.0"
+case_id: open-housing-cuiyuan
+description: "开放式：用自然语言问翠苑出租房，模型自主选 Tool"
+user_message: 翠苑那边租房的多不多？按类型给我分一下
+auth:
+  area_codes: ["3301"]
+  datasets: [administrative_area, housing]
+  entitlements: [governance.area.read, governance.housing.aggregate.read]
+# model_steps 留空 → 使用真实模型
+model_steps: []
+expected:
+  terminal_status: completed
+  outcome: success
+  completion_reason_code: goal_completed
+  # 不指定 tool_ids —— 模型可能先 resolve_area 再 query_housing_metrics，也可能直接传区划编码
+  tool_ids: []
+  min_evidence_count: 2
+  required_event_types: [tool.completed, result.available, evidence.available, run.completed]
+  # 只校验回答里应该包含的关键词
+  required_answer_substrings: ["出租"]
+  forbidden_answer_substrings: ["无法完成", "没有可用工具"]

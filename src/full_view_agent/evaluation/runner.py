@@ -147,8 +147,14 @@ class EvalRunner:
         if use_live_provider:
             assert self._provider is not None
             provider = RecordingModelProvider(self._provider)
-        else:
+        elif case.model_steps:
             provider = ScriptedModelProvider(case.model_steps)
+        else:
+            raise ValueError(
+                f"case {case.case_id}: model_steps is empty and no live "
+                "model provider configured. Either provide model_steps "
+                "or configure a live provider via EvalRunner(provider=...)."
+            )
 
         session = await service.create_session(
             user_id=user_id,
@@ -175,6 +181,7 @@ class EvalRunner:
             registry=registry,
             policy=MinimalPolicyAdapter(),
             adapter=adapter,
+            auth_context_refresher=_NoopRefresher(),
         )
         executor = MockRunExecutor(
             service=service,
@@ -369,7 +376,12 @@ def _grade(
                     completion_reason_code,
                     completion_reason_code == expected.completion_reason_code,
                 ),
-                ("tool_ids", expected.tool_ids, tool_ids, tool_ids == expected.tool_ids),
+                (
+                    "tool_ids",
+                    expected.tool_ids,
+                    tool_ids,
+                    (not expected.tool_ids) or tool_ids == expected.tool_ids,
+                ),
             ]
         )
     checks.extend(
@@ -433,3 +445,8 @@ def _terminal_signature(
     tool_ids: list[str],
 ) -> str:
     return f"{outcome}|{completion_reason_code}|{','.join(tool_ids)}"
+
+
+class _NoopRefresher:
+    async def refresh(self, auth_context: AuthContext) -> AuthContext:
+        return auth_context

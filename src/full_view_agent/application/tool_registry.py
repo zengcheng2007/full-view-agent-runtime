@@ -3,6 +3,8 @@ from full_view_agent.domain.models import (
     GetObjectProfileInput,
     InternalToolManifest,
     ModelToolDescriptor,
+    QueryEventMetricsInput,
+    QueryHousingMetricsInput,
     QueryPopulationMetricsInput,
     ResolveAreaInput,
 )
@@ -10,6 +12,8 @@ from full_view_agent.domain.models import (
 _INPUT_MODELS = {
     "governance.resolve_area": ResolveAreaInput,
     "governance.query_population_metrics": QueryPopulationMetricsInput,
+    "governance.query_housing_metrics": QueryHousingMetricsInput,
+    "governance.query_event_metrics": QueryEventMetricsInput,
     "governance.get_object_profile": GetObjectProfileInput,
 }
 
@@ -65,6 +69,44 @@ class ToolRegistry:
                     adapter_ref="adapter://geo-qxst/population-metrics/1.0",
                 ),
                 _manifest(
+                    tool_id="governance.query_housing_metrics",
+                    risk_level="low",
+                    dataset_id="housing",
+                    classifications=["internal", "aggregated"],
+                    permission="governance.housing.aggregate.read",
+                    input_schema_ref=(
+                        "schema://tools/query-housing-metrics-input/1.0.0"
+                    ),
+                    result_kind="table",
+                    data_schema_ref=(
+                        "schema://data/housing-lease-type-table/1.0.0"
+                    ),
+                    cache_enabled=True,
+                    ttl_seconds=60,
+                    action="governance.housing.aggregate.read",
+                    denial_scope="dataset_area_fields",
+                    adapter_ref="adapter://geo-qxst/housing-metrics/1.0",
+                ),
+                _manifest(
+                    tool_id="governance.query_event_metrics",
+                    risk_level="low",
+                    dataset_id="event",
+                    classifications=["internal", "aggregated"],
+                    permission="governance.event.aggregate.read",
+                    input_schema_ref=(
+                        "schema://tools/query-event-metrics-input/1.0.0"
+                    ),
+                    result_kind="table",
+                    data_schema_ref=(
+                        "schema://data/event-finish-rate-table/1.0.0"
+                    ),
+                    cache_enabled=True,
+                    ttl_seconds=60,
+                    action="governance.event.aggregate.read",
+                    denial_scope="dataset_area_fields",
+                    adapter_ref="adapter://geo-qxst/event-metrics/1.0",
+                ),
+                _manifest(
                     tool_id="governance.get_object_profile",
                     risk_level="medium",
                     dataset_id="governance_objects",
@@ -91,8 +133,8 @@ class ToolRegistry:
                     tool_id="governance.query_population_metrics",
                     name="查询人口指标",
                     description=(
-                        "查询当前授权区域的人口聚合指标，不返回个人明细。当前正式适配"
-                        "范围仅支持独居老人：filters 必须且只能为"
+                        "查询当前授权区域的人口聚合指标，不返回个人明细。"
+                        "独居老人查询时 filters 必须为"
                         " [{field: person_category, operator: eq, value: "
                         "solitary_elderly}]；group_by 必须是区域的直接下一级，"
                         "区县传 [street]、街道传 [community]、社区传 [grid]。"
@@ -102,9 +144,35 @@ class ToolRegistry:
                     ),
                 ),
                 _descriptor(
+                    tool_id="governance.query_housing_metrics",
+                    name="查询出租房指标",
+                    description=(
+                        "查询指定授权区域自身的出租房类型汇总，返回租赁类型和房屋数量。"
+                        "当前数据源不支持按街道、社区或网格分组。"
+                    ),
+                    schema_ref=(
+                        "schema://tools/query-housing-metrics-input/1.0.0"
+                    ),
+                ),
+                _descriptor(
+                    tool_id="governance.query_event_metrics",
+                    name="查询网格事件办结率",
+                    description=(
+                        "查询指定授权区域自身的网格、社区、街道三个层级汇总办结率。"
+                        "当前数据源不返回下级区划明细、事件总量或办结数，"
+                        "也不支持按阈值筛选。"
+                    ),
+                    schema_ref=(
+                        "schema://tools/query-event-metrics-input/1.0.0"
+                    ),
+                ),
+                _descriptor(
                     tool_id="governance.get_object_profile",
                     name="查询治理对象画像",
-                    description="查询单个治理对象在当前权限下可见的类型化画像。",
+                    description=(
+                        "查询授权区域内单个楼栋的基础画像和位置。"
+                        "调用时必须提供声明区域 scope；当前真实适配器仅支持 building。"
+                    ),
                     schema_ref="schema://tools/get-object-profile-input/1.0.0",
                 ),
             ],

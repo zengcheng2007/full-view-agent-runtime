@@ -368,6 +368,7 @@ async def test_object_profile_adapter_applies_policy_field_mask() -> None:
                 "object_type": "person",
                 "object_id": "person-01",
             },
+            "scope": {"area_code": "330106"},
             "field_sets": ["summary", "contact"],
         },
         auth_context=auth_context,
@@ -444,6 +445,7 @@ async def test_object_profile_post_policy_denies_actual_object_outside_area() ->
                 "object_type": "person",
                 "object_id": "person-outside",
             },
+            "scope": {"area_code": "330106"},
             "field_sets": ["summary"],
         },
         auth_context=auth_context,
@@ -451,5 +453,5 @@ async def test_object_profile_post_policy_denies_actual_object_outside_area() ->
 
     assert result.status == "denied"
     assert result.data_result is None
-    assert result.warnings == ["AREA_OUT_OF_SCOPE"]
+    assert result.warnings == ["RESULT_AREA_OUTSIDE_REQUEST_SCOPE"]
     assert result.policy.post_policy_decision_id is not None

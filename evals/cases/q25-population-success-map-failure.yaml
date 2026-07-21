@@ -1,0 +1,32 @@
+schema_version: "1.0"
+case_id: q25-population-success-map-failure
+description: "Q25/X2: 人口查询成功但地图执行失败（Result仍有效、Receipt失败、表格降级和明确提示）"
+user_message: 查询西湖区独居老人数量按街道汇总，并在地图上显示。
+auth:
+  area_codes: ["3301"]
+  datasets: [administrative_area, population, housing, event, governance_objects]
+  entitlements: [governance.area.read, governance.population.aggregate.read, governance.housing.aggregate.read, governance.event.aggregate.read, governance.object.profile.read]
+model_steps:
+  - type: tool_call
+    tool_id: governance.resolve_area
+    arguments:
+      query: 西湖区
+  - type: tool_call
+    tool_id: governance.query_population_metrics
+    arguments:
+      query:
+        metrics: [person_count]
+        scope: {area_code: "330106", include_descendants: true}
+        filters:
+          - {field: person_category, operator: eq, value: solitary_elderly}
+        group_by: [street]
+  - type: finish
+    content: 西湖区独居老人按街道汇总结果仍有效；地图渲染命令执行失败，已降级为表格展示。
+expected:
+  terminal_status: completed
+  outcome: success
+  completion_reason_code: goal_completed
+  tool_ids: [governance.resolve_area, governance.query_population_metrics]
+  min_evidence_count: 2
+  required_event_types: [tool.completed, result.available, evidence.available, frontend.command.requested, run.completed]
+  required_answer_substrings: ["地图", "降级"]

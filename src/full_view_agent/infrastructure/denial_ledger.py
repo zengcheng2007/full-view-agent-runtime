@@ -4,14 +4,13 @@ from datetime import UTC, datetime, timedelta
 
 from pydantic import BaseModel
 
+from full_view_agent.application.authorization_scope import extract_area_scope
 from full_view_agent.application.fingerprints import canonical_fingerprint
 from full_view_agent.domain.models import (
     AuthContext,
     GetObjectProfileInput,
     InternalToolManifest,
     PolicyDecision,
-    QueryPopulationMetricsInput,
-    ResolveAreaInput,
 )
 
 
@@ -71,12 +70,10 @@ def _scope_fingerprint(
 ) -> str:
     area_codes: list[str] = []
     object_ref: dict[str, str] | None = None
-    if isinstance(arguments, QueryPopulationMetricsInput):
-        area_codes = [arguments.query.scope.area_code]
-    elif isinstance(arguments, ResolveAreaInput):
-        context_area = arguments.context_area_code or arguments.parent_area_code
-        area_codes = [context_area] if context_area else []
-    elif isinstance(arguments, GetObjectProfileInput):
+    area_scope = extract_area_scope(arguments)
+    if area_scope is not None:
+        area_codes = [area_scope.area_code]
+    if isinstance(arguments, GetObjectProfileInput):
         object_ref = arguments.object_ref.model_dump(mode="json")
     return canonical_fingerprint(
         domain="denial-scope:1.1",

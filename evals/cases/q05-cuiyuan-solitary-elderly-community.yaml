@@ -1,0 +1,32 @@
+schema_version: "1.0"
+case_id: q05-cuiyuan-solitary-elderly-community
+description: "Q05/S1: 改为查看翠苑街道，按社区汇总（区划切换、下一级分组、重新鉴权）"
+user_message: 改为查看翠苑街道，按社区汇总。
+auth:
+  area_codes: ["3301"]
+  datasets: [administrative_area, population, housing, event, governance_objects]
+  entitlements: [governance.area.read, governance.population.aggregate.read, governance.housing.aggregate.read, governance.event.aggregate.read, governance.object.profile.read]
+model_steps:
+  - type: tool_call
+    tool_id: governance.resolve_area
+    arguments:
+      query: 翠苑街道
+      context_area_code: "330106"
+  - type: tool_call
+    tool_id: governance.query_population_metrics
+    arguments:
+      query:
+        metrics: [person_count]
+        scope: {area_code: "330106001", include_descendants: true}
+        filters:
+          - {field: person_category, operator: eq, value: solitary_elderly}
+        group_by: [community]
+  - type: finish
+    content: 已切换至翠苑街道，独居老人按社区汇总查询完成。
+expected:
+  terminal_status: completed
+  outcome: success
+  completion_reason_code: goal_completed
+  tool_ids: [governance.resolve_area, governance.query_population_metrics]
+  min_evidence_count: 2
+  required_event_types: [tool.completed, result.available, evidence.available, run.completed]

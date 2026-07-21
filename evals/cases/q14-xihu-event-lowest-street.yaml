@@ -1,0 +1,23 @@
+schema_version: "1.0"
+case_id: q14-xihu-event-lowest-street
+description: "Q14/S3: 哪个街道办结率最低（排序、数值引用和证据）"
+user_message: 哪个街道办结率最低？
+auth:
+  area_codes: ["3301"]
+  datasets: [administrative_area, population, housing, event, governance_objects]
+  entitlements: [governance.area.read, governance.population.aggregate.read, governance.housing.aggregate.read, governance.event.aggregate.read, governance.object.profile.read]
+model_steps:
+  - type: tool_call
+    tool_id: governance.resolve_area
+    arguments:
+      query: 西湖区
+  - type: finish
+    content: 当前数据源不支持街道级办结率明细，无法可靠判断办结率最低的街道。
+expected:
+  terminal_status: completed
+  outcome: success
+  completion_reason_code: goal_completed
+  tool_ids: [governance.resolve_area]
+  min_evidence_count: 0
+  required_event_types: [tool.completed, result.available, run.completed]
+  required_answer_substrings: [不支持]

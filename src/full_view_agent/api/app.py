@@ -63,8 +63,10 @@ from full_view_agent.domain.models import (
     AgentSession,
     ContractModel,
     DataResult,
+    EventFinishRateRow,
     Evidence,
     FrontendCommandReceipt,
+    HousingLeaseTypeRow,
     LegacyIdentitySnapshot,
     PopulationMetricRow,
     ResultMetadata,
@@ -168,7 +170,7 @@ class SessionListResponse(ContractModel):
 
 
 class ResultItemsResponse(ContractModel):
-    data: list[PopulationMetricRow]
+    data: list[PopulationMetricRow | HousingLeaseTypeRow | EventFinishRateRow]
     meta: CursorPageMeta
 
 
@@ -1256,7 +1258,7 @@ def create_app(runtime: RuntimeContainer | None = None) -> FastAPI:
             else None
         )
         return ResultItemsResponse(
-            data=rows,
+            data=list(rows),
             meta=CursorPageMeta(
                 request_id=new_id("req"),
                 has_next=has_next,

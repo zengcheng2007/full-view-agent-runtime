@@ -1,5 +1,7 @@
 from datetime import UTC, datetime
 
+import pytest
+
 from full_view_agent.application.tool_registry import ToolRegistry
 from full_view_agent.domain import models
 
@@ -67,6 +69,150 @@ def test_policy_denies_population_query_outside_authorized_area() -> None:
     assert decision.arguments_fingerprint.startswith("sha256:")
 
 
+@pytest.mark.parametrize(
+    ("tool_id", "dataset_id", "entitlement", "arguments"),
+    [
+        (
+            "governance.query_housing_metrics",
+            "housing",
+            "governance.housing.aggregate.read",
+            models.QueryHousingMetricsInput.model_validate(
+                {"query": {"scope": {"area_code": "330108"}}}
+            ),
+        ),
+        (
+            "governance.query_event_metrics",
+            "event",
+            "governance.event.aggregate.read",
+            models.QueryEventMetricsInput.model_validate(
+                {"query": {"scope": {"area_code": "330108"}}}
+            ),
+        ),
+    ],
+)
+def test_policy_denies_every_metric_query_outside_authorized_area(
+    tool_id: str,
+    dataset_id: str,
+    entitlement: str,
+    arguments: models.ContractModel,
+) -> None:
+    from full_view_agent.application.policy import MinimalPolicyAdapter
+
+    base_context = population_auth_context()
+    auth_context = base_context.model_copy(
+        update={
+            "entitlements": [entitlement],
+            "data_scopes": base_context.data_scopes.model_copy(
+                update={"datasets": [dataset_id]}
+            ),
+        }
+    )
+
+    decision = MinimalPolicyAdapter().evaluate(
+        manifest=ToolRegistry.default().get_manifest(tool_id),
+        auth_context=auth_context,
+        arguments=arguments,
+    )
+
+    assert decision.decision == "deny"
+    assert decision.reason_codes == ["AREA_OUT_OF_SCOPE"]
+
+
+def test_policy_denies_object_query_whose_declared_scope_is_unauthorized() -> None:
+    from full_view_agent.application.policy import MinimalPolicyAdapter
+
+    base_context = population_auth_context()
+    auth_context = base_context.model_copy(
+        update={
+            "entitlements": ["governance.object.profile.read"],
+            "data_scopes": base_context.data_scopes.model_copy(
+                update={"datasets": ["governance_objects"]}
+            ),
+        }
+    )
+    arguments = models.GetObjectProfileInput.model_validate(
+        {
+            "object_ref": {
+                "object_type": "building",
+                "object_id": "330108001001001000001",
+            },
+            "scope": {"area_code": "330108"},
+            "field_sets": ["summary"],
+        }
+    )
+
+    decision = MinimalPolicyAdapter().evaluate(
+        manifest=ToolRegistry.default().get_manifest(
+            "governance.get_object_profile"
+        ),
+        auth_context=auth_context,
+        arguments=arguments,
+    )
+
+    assert decision.decision == "deny"
+    assert decision.reason_codes == ["AREA_OUT_OF_SCOPE"]
+
+
+def test_policy_denies_object_result_outside_declared_request_scope() -> None:
+    from full_view_agent.application.policy import MinimalPolicyAdapter
+
+    base_context = population_auth_context()
+    auth_context = base_context.model_copy(
+        update={
+            "entitlements": ["governance.object.profile.read"],
+            "data_scopes": models.AuthDataScopes(
+                areas=[
+                    models.AuthorizedAreaScope(
+                        area_code="330106",
+                        include_descendants=True,
+                    ),
+                    models.AuthorizedAreaScope(
+                        area_code="330108",
+                        include_descendants=True,
+                    ),
+                ],
+                datasets=["governance_objects"],
+                field_policy_set="governance_analyst_v1",
+            ),
+        }
+    )
+    arguments = models.GetObjectProfileInput.model_validate(
+        {
+            "object_ref": {
+                "object_type": "building",
+                "object_id": "330108001001001000001",
+            },
+            "scope": {"area_code": "330106"},
+            "field_sets": ["summary"],
+        }
+    )
+    result = models.ObjectProfileResult.model_validate(
+        {
+            "result_id": "res-object-01",
+            "data_schema_ref": "schema://data/object-profile/1.0.0",
+            "result_fingerprint": "sha256:object-01",
+            "data": {
+                "object_ref": arguments.object_ref.model_dump(mode="json"),
+                "area_code": "330108001",
+                "title": "测试楼栋",
+                "fields": [],
+            },
+        }
+    )
+
+    decision = MinimalPolicyAdapter().evaluate_post_result(
+        manifest=ToolRegistry.default().get_manifest(
+            "governance.get_object_profile"
+        ),
+        auth_context=auth_context,
+        arguments=arguments,
+        result=result,
+    )
+
+    assert decision.decision == "deny"
+    assert decision.reason_codes == ["RESULT_AREA_OUTSIDE_REQUEST_SCOPE"]
+
+
 def test_policy_masks_contact_field_set_without_contact_entitlement() -> None:
     from full_view_agent.application.policy import MinimalPolicyAdapter
 
@@ -92,6 +238,7 @@ def test_policy_masks_contact_field_set_without_contact_entitlement() -> None:
                 "object_type": "person",
                 "object_id": "person-01",
             },
+            "scope": {"area_code": "330106"},
             "field_sets": ["summary", "contact"],
         }
     )

@@ -1,0 +1,24 @@
+schema_version: "1.0"
+case_id: q06-nonexistent-street-empty
+description: "Q06/S1: 查询一个不存在的街道独居老人情况（空候选、明确提示、不调用错误Tool）"
+user_message: 查询飞羽街道独居老人情况。
+auth:
+  area_codes: ["3301"]
+  datasets: [administrative_area, population, housing, event, governance_objects]
+  entitlements: [governance.area.read, governance.population.aggregate.read, governance.housing.aggregate.read, governance.event.aggregate.read, governance.object.profile.read]
+model_steps:
+  - type: tool_call
+    tool_id: governance.resolve_area
+    arguments:
+      query: 飞羽街道
+  - type: finish
+    content: 未找到名为“飞羽街道”的授权区划，无法继续查询；这不代表任何业务指标为零。
+expected:
+  terminal_status: completed
+  outcome: success
+  completion_reason_code: goal_completed
+  tool_ids: [governance.resolve_area]
+  min_evidence_count: 1
+  required_event_types: [tool.completed, result.available, evidence.available, run.completed]
+  required_answer_substrings: ["不代表"]
+  forbidden_answer_substrings: ["预期结果应为", "预期数量为"]

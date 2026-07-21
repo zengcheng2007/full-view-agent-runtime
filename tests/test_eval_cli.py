@@ -42,7 +42,7 @@ def test_eval_cli_runs_suite_and_replays_saved_trace(
     assert replay_exit_code == 0
     assert load_eval_trace(replay_output).passed is True
     output = capsys.readouterr().out
-    assert "8/8" in output
+    assert "pass@1=100" in output
     assert "REPLAY PASS" in output
 
 

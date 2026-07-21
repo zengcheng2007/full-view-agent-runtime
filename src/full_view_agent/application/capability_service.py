@@ -20,6 +20,8 @@ from full_view_agent.domain.models import (
     InternalToolManifest,
     ObjectProfileResult,
     PolicyDecision,
+    QueryEventMetricsInput,
+    QueryHousingMetricsInput,
     QueryPopulationMetricsInput,
     ResolveAreaInput,
     ToolResult,
@@ -83,6 +85,8 @@ class DenialLedger(Protocol):
 TOOL_INPUT_MODELS: dict[str, type[BaseModel]] = {
     "governance.resolve_area": ResolveAreaInput,
     "governance.query_population_metrics": QueryPopulationMetricsInput,
+    "governance.query_housing_metrics": QueryHousingMetricsInput,
+    "governance.query_event_metrics": QueryEventMetricsInput,
     "governance.get_object_profile": GetObjectProfileInput,
 }
 

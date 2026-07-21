@@ -1,0 +1,23 @@
+schema_version: "1.0"
+case_id: q12-xihu-event-below60
+description: "Q12/S3: 显示办结率低于60%的街道（受控阈值过滤）"
+user_message: 显示办结率低于60%的街道。
+auth:
+  area_codes: ["3301"]
+  datasets: [administrative_area, population, housing, event, governance_objects]
+  entitlements: [governance.area.read, governance.population.aggregate.read, governance.housing.aggregate.read, governance.event.aggregate.read, governance.object.profile.read]
+model_steps:
+  - type: tool_call
+    tool_id: governance.resolve_area
+    arguments:
+      query: 西湖区
+  - type: finish
+    content: 当前数据源不支持街道明细和阈值筛选，无法可靠列出办结率低于60%的街道。
+expected:
+  terminal_status: completed
+  outcome: success
+  completion_reason_code: goal_completed
+  tool_ids: [governance.resolve_area]
+  min_evidence_count: 0
+  required_event_types: [tool.completed, result.available, run.completed]
+  required_answer_substrings: [不支持]

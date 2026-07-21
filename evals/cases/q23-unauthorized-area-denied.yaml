@@ -1,0 +1,31 @@
+schema_version: "1.0"
+case_id: q23-unauthorized-area-denied
+description: "Q23/X1: 使用无权账号查询非授权区县独居老人（Policy确定性拒绝、下游零调用）"
+user_message: 查询宁波市独居老人数量，并按街道汇总。
+auth:
+  area_codes: ["3301"]
+  datasets: [administrative_area, population]
+  entitlements: [governance.area.read, governance.population.aggregate.read]
+model_steps:
+  - type: tool_call
+    tool_id: governance.resolve_area
+    arguments:
+      query: 宁波市
+  - type: tool_call
+    tool_id: governance.query_population_metrics
+    arguments:
+      query:
+        metrics: [person_count]
+        scope: {area_code: "3302", include_descendants: true}
+        filters:
+          - {field: person_category, operator: eq, value: solitary_elderly}
+        group_by: [street]
+  - type: finish
+    content: 宁波市不在当前账号授权区划范围内，无法查询独居老人数据。
+expected:
+  terminal_status: completed
+  outcome: denied
+  completion_reason_code: AREA_OUT_OF_SCOPE
+  tool_ids: [governance.resolve_area, governance.query_population_metrics]
+  min_evidence_count: 0
+  required_event_types: [tool.completed, run.completed]

@@ -28,8 +28,31 @@ def test_registry_contains_only_the_three_implemented_tools() -> None:
 
     assert registry.list_tool_ids() == [
         "governance.get_object_profile",
+        "governance.query_event_metrics",
+        "governance.query_housing_metrics",
         "governance.query_population_metrics",
         "governance.resolve_area",
     ]
     with pytest.raises(ResourceNotFound):
         registry.get_manifest("governance.query_any_table")
+
+
+def test_metric_manifests_bind_to_their_own_result_schemas() -> None:
+    from full_view_agent.application.tool_registry import ToolRegistry
+
+    registry = ToolRegistry.default()
+    expected = {
+        "governance.query_population_metrics": (
+            "schema://data/population-metric-table/1.0.0"
+        ),
+        "governance.query_housing_metrics": (
+            "schema://data/housing-lease-type-table/1.0.0"
+        ),
+        "governance.query_event_metrics": (
+            "schema://data/event-finish-rate-table/1.0.0"
+        ),
+    }
+
+    for tool_id, schema_ref in expected.items():
+        manifest = registry.get_manifest(tool_id)
+        assert manifest.result_schemas[0].data_schema_ref == schema_ref
