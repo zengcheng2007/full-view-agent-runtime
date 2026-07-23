@@ -5,6 +5,7 @@ LangGraphOrchestrator behind OrchestrationPort until the latter
 passes acceptance and becomes the default.
 """
 
+import asyncio
 import logging
 from datetime import UTC, datetime, timedelta
 from typing import Protocol
@@ -45,6 +46,7 @@ from full_view_agent.domain.models import (
     MapRenderChoroplethPayload,
     PanelShowTablePayload,
     ResultReferenceContent,
+    Steer,
     TableDataResult,
     TextContent,
     ToolResult,
@@ -135,6 +137,7 @@ class NativeOrchestrator(OrchestrationPort):
         self._registry = registry or ToolRegistry.default()
         self._planner_factory = planner_factory
         self._evidence_source_system = evidence_source_system
+        self._run_tasks: dict[str, asyncio.Task[None]] = {}
 
     async def execute(self, *, user_id: str, run_id: str) -> None:
         try:
@@ -162,6 +165,10 @@ class NativeOrchestrator(OrchestrationPort):
 
     async def _execute(self, *, user_id: str, run_id: str) -> None:
         current = await self._store.get_run(user_id=user_id, run_id=run_id)
+        if current.status in (
+            "completed", "failed", "cancelled", "expired",
+        ):
+            return  # terminal – must not resume or start tools
         was_queued = current.status == "queued"
         running = (
             await self._service.start_run(user_id=user_id, run_id=run_id)
@@ -574,6 +581,104 @@ class NativeOrchestrator(OrchestrationPort):
             run_id=run.run_id,
             data=data,
         )
+
+    # ------------------------------------------------------------------
+    # OrchestrationPort lifecycle methods
+    # ------------------------------------------------------------------
+
+    def schedule(self, *, user_id: str, run_id: str) -> None:
+        """Fire-and-forget: create an asyncio task for execute()."""
+        existing = self._run_tasks.get(run_id)
+        if existing is not None and not existing.done():
+            return
+        task = asyncio.create_task(
+            self.execute(user_id=user_id, run_id=run_id)
+        )
+        self._run_tasks[run_id] = task
+        task.add_done_callback(lambda t: self._on_task_done(run_id, t))
+
+    def _on_task_done(
+        self, run_id: str, task: asyncio.Task[None]
+    ) -> None:
+        if self._run_tasks.get(run_id) is task:
+            self._run_tasks.pop(run_id, None)
+
+    async def cancel(self, *, user_id: str, run_id: str) -> None:
+        """Cancel a Run.  No-op when already terminal."""
+        current = await self._store.get_run(
+            user_id=user_id, run_id=run_id
+        )
+        if current.status in (
+            "completed", "failed", "cancelled", "expired",
+        ):
+            return  # terminal – no events, no tool calls
+        run = await self._service.cancel_run(
+            user_id=user_id, run_id=run_id
+        )
+        task = self._run_tasks.pop(run_id, None)
+        if task is not None and not task.done():
+            task.cancel()
+        await self._publish(
+            run,
+            "run.cancelled",
+            {
+                "status": run.status,
+                "outcome": run.outcome,
+                "completion_reason_code": run.completion_reason_code,
+            },
+        )
+
+    async def resume(
+        self,
+        *,
+        user_id: str,
+        run_id: str,
+        input_request_id: str,
+        run_state_version: int,
+    ) -> None:
+        """Resume after user input / reauth.  Caller verified admission."""
+        await self._service.resume_from_input(
+            user_id=user_id,
+            run_id=run_id,
+            input_request_id=input_request_id,
+            run_state_version=run_state_version,
+        )
+        self.schedule(user_id=user_id, run_id=run_id)
+
+    async def steer(
+        self,
+        *,
+        user_id: str,
+        run_id: str,
+        client_instance_id: str,
+        content: str,
+    ) -> Steer:
+        """Record a steer instruction and publish event.  Returns Steer."""
+        steer = await self._service.steer_run(
+            user_id=user_id,
+            run_id=run_id,
+            client_instance_id=client_instance_id,
+            content=content,
+        )
+        run = await self._store.get_run(
+            user_id=user_id, run_id=run_id
+        )
+        await self._publish(
+            run,
+            "steer.accepted",
+            {
+                "steer_id": steer.steer_id,
+                "delivery": steer.delivery,
+            },
+        )
+        return steer
+
+    async def shutdown(self) -> None:
+        """Cancel all running asyncio tasks."""
+        for task in list(self._run_tasks.values()):
+            if not task.done():
+                task.cancel()
+        self._run_tasks.clear()
 
 
 def _action_area_codes(action: ToolAction) -> list[str]:

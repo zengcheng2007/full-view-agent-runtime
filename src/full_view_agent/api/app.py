@@ -19,7 +19,7 @@ from fastapi.security import APIKeyHeader
 from pydantic import Field, SecretStr, model_validator
 
 from full_view_agent.application.auth_context_refresh import RunAuthContextRefresher
-from full_view_agent.application.capability_service import CapabilityService, ToolAdapter
+from full_view_agent.application.capability_service import ToolAdapter
 from full_view_agent.application.context_builder import AgentContextBuilder
 from full_view_agent.application.cursor_codec import SignedCursorCodec
 from full_view_agent.application.errors import (
@@ -43,8 +43,7 @@ from full_view_agent.application.errors import (
 )
 from full_view_agent.application.model_planner import ModelPlannerFactory
 from full_view_agent.application.model_provider import ModelProvider
-from full_view_agent.application.native_orchestrator import NativeOrchestrator
-from full_view_agent.application.policy import MinimalPolicyAdapter
+from full_view_agent.application.orchestrator_factory import create_orchestrator
 from full_view_agent.application.ports import (
     AgentStore,
     CredentialBroker,
@@ -437,58 +436,22 @@ class RuntimeContainer:
             if self.model_provider is not None
             else None
         )
-        capability = CapabilityService(
-            registry=self.tool_registry,
-            policy=MinimalPolicyAdapter(),
-            adapter=self.governance_adapter,
-            auth_context_refresher=self.auth_context_refresher,
-            denial_ledger=self.denial_ledger,
-        )
-        self.executor: OrchestrationPort = NativeOrchestrator(
+        self.executor: OrchestrationPort = create_orchestrator(
             service=self.service,
             store=self.store,
             events=self.events,
-            capability=capability,
             auth_context_provider=self.auth_contexts,
+            governance_adapter=self.governance_adapter,
+            tool_registry=self.tool_registry,
             auth_context_refresher=self.auth_context_refresher,
             denial_ledger=self.denial_ledger,
-            registry=self.tool_registry,
+            model_provider=self.model_provider,
             planner_factory=planner_factory,
-            evidence_source_system=(
-                "geo-qxst"
-                if isinstance(self.governance_adapter, HttpGovernanceAdapter)
-                else "in_memory_fixture"
-            ),
         )
 
     def schedule_run(self, *, user_id: str, run_id: str) -> None:
-        existing = self.run_tasks.get(run_id)
-        if existing is not None and not existing.done():
-            return
-        task = asyncio.create_task(self.executor.execute(user_id=user_id, run_id=run_id))
-        self.tasks.add(task)
-        self.run_tasks[run_id] = task
-        task.add_done_callback(lambda done: self._on_task_done(run_id, done))
-
-    def cancel_execution(self, *, run_id: str) -> None:
-        task = self.run_tasks.pop(run_id, None)
-        if task is not None and not task.done():
-            task.cancel()
-
-    def _on_task_done(self, run_id: str, task: asyncio.Task) -> None:
-        self.tasks.discard(task)
-        if self.run_tasks.get(run_id) is task:
-            self.run_tasks.pop(run_id, None)
-        if task.cancelled():
-            return
-        exception = task.exception()
-        if exception is not None:
-            self.task_failures.append(repr(exception))
-            logger.error(
-                "run task failed",
-                exc_info=(type(exception), exception, exception.__traceback__),
-                extra={"run_id": run_id},
-            )
+        """Delegate scheduling to the OrchestrationPort."""
+        self.executor.schedule(user_id=user_id, run_id=run_id)
 
     async def recover_runs(self) -> int:
         assert self.store is not None
@@ -537,9 +500,7 @@ def create_app(runtime: RuntimeContainer | None = None) -> FastAPI:
     async def lifespan(_app: FastAPI):
         await runtime.recover_runs()
         yield
-        for task in list(runtime.tasks):
-            if not task.done():
-                task.cancel()
+        await runtime.executor.shutdown()
         close_governance_adapter = getattr(runtime.governance_adapter, "aclose", None)
         if close_governance_adapter is not None:
             await close_governance_adapter()
@@ -969,22 +930,12 @@ def create_app(runtime: RuntimeContainer | None = None) -> FastAPI:
         user: Annotated[CurrentUser, Depends(require_geotoken)],
     ) -> RunResponse:
         async def operation():
-            run = await app.state.runtime.service.cancel_run(
-                user_id=user.user_id,
-                run_id=run_id,
+            await app.state.runtime.executor.cancel(
+                user_id=user.user_id, run_id=run_id,
             )
-            app.state.runtime.cancel_execution(run_id=run_id)
-            await app.state.runtime.events.publish(
-                event_type="run.cancelled",
-                session_id=run.session_id,
-                run_id=run.run_id,
-                data={
-                    "status": run.status,
-                    "outcome": run.outcome,
-                    "completion_reason_code": run.completion_reason_code,
-                },
+            return await app.state.runtime.store.get_run(
+                user_id=user.user_id, run_id=run_id,
             )
-            return run
 
         scope = f"runs:{run_id}:cancel"
         run, replayed = await app.state.runtime.idempotency.execute(
@@ -1022,12 +973,6 @@ def create_app(runtime: RuntimeContainer | None = None) -> FastAPI:
                 user_id=user.user_id,
                 run_id=run_id,
             )
-            resumed = await app.state.runtime.service.resume_from_input(
-                user_id=user.user_id,
-                run_id=run_id,
-                input_request_id=body.input_request_id,
-                run_state_version=body.run_state_version,
-            )
             try:
                 await app.state.runtime.admission.admit(
                     identity=user.identity,
@@ -1063,6 +1008,16 @@ def create_app(runtime: RuntimeContainer | None = None) -> FastAPI:
                 raise
             await app.state.runtime.credentials.revoke(
                 credential_ref=previous_context.credential_ref,
+            )
+            # Port handles resume_from_input + schedule
+            await app.state.runtime.executor.resume(
+                user_id=user.user_id,
+                run_id=run_id,
+                input_request_id=body.input_request_id,
+                run_state_version=body.run_state_version,
+            )
+            resumed = await app.state.runtime.store.get_run(
+                user_id=user.user_id, run_id=run_id,
             )
             await app.state.runtime.events.publish(
                 event_type="input.received",
@@ -1106,27 +1061,12 @@ def create_app(runtime: RuntimeContainer | None = None) -> FastAPI:
         idempotency_key: Annotated[str, Header(alias="Idempotency-Key", min_length=1)],
     ) -> SteerResponse:
         async def operation():
-            steer = await app.state.runtime.service.steer_run(
+            return await app.state.runtime.executor.steer(
                 user_id=user.user_id,
                 run_id=run_id,
                 client_instance_id=body.client_instance_id,
                 content=body.content,
             )
-            run = await app.state.runtime.store.get_run(
-                user_id=user.user_id,
-                run_id=run_id,
-            )
-            await app.state.runtime.events.publish(
-                event_type="steer.accepted",
-                session_id=run.session_id,
-                run_id=run.run_id,
-                data={
-                    "steer_id": steer.steer_id,
-                    "status": steer.status,
-                    "delivery": steer.delivery,
-                },
-            )
-            return steer
 
         scope = f"runs:{run_id}:steers:create"
         steer, replayed = await app.state.runtime.idempotency.execute(

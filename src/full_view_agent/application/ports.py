@@ -201,10 +201,57 @@ class RunAuthContextStore(Protocol):
 class OrchestrationPort(Protocol):
     """Framework-neutral orchestration contract.
 
-    Implementations (Native, LangGraph, etc.) execute a Run by
-    driving the Harness loop, publishing events, and updating the
-    product ledger. The API and SessionRunService depend only on
-    this port, never on a concrete orchestrator.
+    Implementations (Native, LangGraph, etc.) drive the full Run
+    lifecycle: start/continue execution, handle user input and
+    reauthentication, accept steer instructions, and cancel runs.
+
+    Standard events and terminal states are written to the product
+    ledger (AgentStore / EventPublisher) – never through framework-
+    private channels.  The API layer depends only on this port.
     """
 
-    async def execute(self, *, user_id: str, run_id: str) -> None: ...
+    async def execute(self, *, user_id: str, run_id: str) -> None:
+        """Start or continue a Run through the harness loop."""
+        ...
+
+    async def cancel(self, *, user_id: str, run_id: str) -> None:
+        """Cancel a running or queued Run.
+
+        Must be a no-op (no events, no tool calls) when the Run is
+        already in a terminal state (completed / failed / cancelled).
+        """
+        ...
+
+    async def resume(
+        self,
+        *,
+        user_id: str,
+        run_id: str,
+        input_request_id: str,
+        run_state_version: int,
+    ) -> None:
+        """Resume a Run that is waiting for user input or reauth.
+
+        Caller (API) must have already verified admission / credentials
+        before invoking this method.
+        """
+        ...
+
+    async def steer(
+        self,
+        *,
+        user_id: str,
+        run_id: str,
+        client_instance_id: str,
+        content: str,
+    ) -> Steer:
+        """Record a steer instruction and publish event.  Returns Steer."""
+        ...
+
+    def schedule(self, *, user_id: str, run_id: str) -> None:
+        """Fire-and-forget: schedule execute() as an asyncio task."""
+        ...
+
+    async def shutdown(self) -> None:
+        """Cancel all running tasks.  Called during app shutdown."""
+        ...
