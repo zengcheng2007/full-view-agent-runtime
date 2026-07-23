@@ -1,6 +1,6 @@
 from collections.abc import AsyncIterator, Awaitable, Callable
 from datetime import datetime
-from typing import Literal, Protocol, TypeVar
+from typing import Literal, Protocol, TypeVar, runtime_checkable
 
 from pydantic import SecretStr
 
@@ -195,3 +195,16 @@ class RunAuthContextStore(Protocol):
     async def put(self, auth_context: AuthContext) -> AuthContext: ...
 
     async def get(self, *, user_id: str, run_id: str) -> AuthContext: ...
+
+
+@runtime_checkable
+class OrchestrationPort(Protocol):
+    """Framework-neutral orchestration contract.
+
+    Implementations (Native, LangGraph, etc.) execute a Run by
+    driving the Harness loop, publishing events, and updating the
+    product ledger. The API and SessionRunService depend only on
+    this port, never on a concrete orchestrator.
+    """
+
+    async def execute(self, *, user_id: str, run_id: str) -> None: ...

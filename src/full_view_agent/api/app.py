@@ -41,9 +41,9 @@ from full_view_agent.application.errors import (
     SessionActiveRunConflict,
     WorkflowNotAvailable,
 )
-from full_view_agent.application.mock_executor import MockRunExecutor
 from full_view_agent.application.model_planner import ModelPlannerFactory
 from full_view_agent.application.model_provider import ModelProvider
+from full_view_agent.application.native_orchestrator import NativeOrchestrator
 from full_view_agent.application.policy import MinimalPolicyAdapter
 from full_view_agent.application.ports import (
     AgentStore,
@@ -51,6 +51,7 @@ from full_view_agent.application.ports import (
     EventStore,
     IdempotencyStore,
     LegacyIdentityPort,
+    OrchestrationPort,
     RunAuthContextStore,
 )
 from full_view_agent.application.run_admission import RunAdmissionService
@@ -304,6 +305,14 @@ class RuntimeContainer:
             raise RuntimeError(
                 "production requires FULL_VIEW_MODEL_PROVIDER=openai_compatible"
             )
+        orchestrator_mode = os.getenv(
+            "FULL_VIEW_ORCHESTRATOR", "native"
+        ).lower()
+        if orchestrator_mode not in {"native"}:
+            raise RuntimeError(
+                "FULL_VIEW_ORCHESTRATOR must be 'native'; "
+                "'langgraph' is reserved for a future release"
+            )
         redis_url = os.getenv("FULL_VIEW_REDIS_URL")
         if database_url and redis_url and self.event_notifier is None:
             self.event_notifier = RedisEventNotifier(
@@ -435,7 +444,7 @@ class RuntimeContainer:
             auth_context_refresher=self.auth_context_refresher,
             denial_ledger=self.denial_ledger,
         )
-        self.executor = MockRunExecutor(
+        self.executor: OrchestrationPort = NativeOrchestrator(
             service=self.service,
             store=self.store,
             events=self.events,

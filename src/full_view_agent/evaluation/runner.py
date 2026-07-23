@@ -3,9 +3,9 @@ from typing import Protocol
 
 from full_view_agent.application.capability_service import CapabilityService, ToolAdapter
 from full_view_agent.application.context_builder import AgentContextBuilder
-from full_view_agent.application.mock_executor import MockRunExecutor
 from full_view_agent.application.model_planner import ModelPlannerFactory
 from full_view_agent.application.model_provider import ModelProvider
+from full_view_agent.application.native_orchestrator import NativeOrchestrator
 from full_view_agent.application.policy import MinimalPolicyAdapter
 from full_view_agent.application.session_run_service import SessionRunService, new_id
 from full_view_agent.application.tool_registry import ToolRegistry
@@ -183,7 +183,7 @@ class EvalRunner:
             adapter=adapter,
             auth_context_refresher=_NoopRefresher(),
         )
-        executor = MockRunExecutor(
+        executor = NativeOrchestrator(
             service=service,
             store=store,
             events=events,
