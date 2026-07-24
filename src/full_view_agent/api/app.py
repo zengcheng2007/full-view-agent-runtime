@@ -1,4 +1,3 @@
-import asyncio
 import base64
 import binascii
 import hashlib
@@ -260,9 +259,6 @@ class RuntimeContainer:
     auth_contexts: RunAuthContextStore | None = None
     denial_ledger: InMemoryDenialLedger = field(default_factory=InMemoryDenialLedger)
     workflow_registry: WorkflowRegistry = field(default_factory=WorkflowRegistry.default)
-    tasks: set[asyncio.Task] = field(default_factory=set)
-    run_tasks: dict[str, asyncio.Task] = field(default_factory=dict)
-    task_failures: list[str] = field(default_factory=list)
     persistence: PostgresAgentPersistence | None = field(default=None, init=False)
     event_notifier: RedisEventNotifier | None = None
     cursor_codec: SignedCursorCodec | None = None
@@ -303,14 +299,6 @@ class RuntimeContainer:
         ):
             raise RuntimeError(
                 "production requires FULL_VIEW_MODEL_PROVIDER=openai_compatible"
-            )
-        orchestrator_mode = os.getenv(
-            "FULL_VIEW_ORCHESTRATOR", "native"
-        ).lower()
-        if orchestrator_mode not in {"native"}:
-            raise RuntimeError(
-                "FULL_VIEW_ORCHESTRATOR must be 'native'; "
-                "'langgraph' is reserved for a future release"
             )
         redis_url = os.getenv("FULL_VIEW_REDIS_URL")
         if database_url and redis_url and self.event_notifier is None:
@@ -443,6 +431,11 @@ class RuntimeContainer:
             auth_context_provider=self.auth_contexts,
             governance_adapter=self.governance_adapter,
             tool_registry=self.tool_registry,
+            evidence_source_system=(
+                "geo-qxst"
+                if isinstance(self.governance_adapter, HttpGovernanceAdapter)
+                else "in_memory_fixture"
+            ),
             auth_context_refresher=self.auth_context_refresher,
             denial_ledger=self.denial_ledger,
             model_provider=self.model_provider,

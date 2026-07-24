@@ -138,6 +138,7 @@ class NativeOrchestrator(OrchestrationPort):
         self._planner_factory = planner_factory
         self._evidence_source_system = evidence_source_system
         self._run_tasks: dict[str, asyncio.Task[None]] = {}
+        self._task_failures: list[str] = []
 
     async def execute(self, *, user_id: str, run_id: str) -> None:
         try:
@@ -597,11 +598,26 @@ class NativeOrchestrator(OrchestrationPort):
         self._run_tasks[run_id] = task
         task.add_done_callback(lambda t: self._on_task_done(run_id, t))
 
+    @property
+    def task_failures(self) -> list[str]:
+        """Read-only list of non-cancelled task exceptions (for observability)."""
+        return list(self._task_failures)
+
     def _on_task_done(
         self, run_id: str, task: asyncio.Task[None]
     ) -> None:
         if self._run_tasks.get(run_id) is task:
             self._run_tasks.pop(run_id, None)
+        if task.cancelled():
+            return  # normal cancellation – not a failure
+        exc = task.exception()
+        if exc is not None:
+            self._task_failures.append(repr(exc))
+            logger.error(
+                "orchestrator task exception",
+                exc_info=exc,
+                extra={"run_id": run_id},
+            )
 
     async def cancel(self, *, user_id: str, run_id: str) -> None:
         """Cancel a Run.  No-op when already terminal."""
@@ -636,14 +652,18 @@ class NativeOrchestrator(OrchestrationPort):
         input_request_id: str,
         run_state_version: int,
     ) -> None:
-        """Resume after user input / reauth.  Caller verified admission."""
+        """Resume after user input / reauth.
+
+        Only performs the controlled state transition.  The caller (API)
+        must call ``schedule()`` after idempotency succeeds and
+        ``input.received`` is published.
+        """
         await self._service.resume_from_input(
             user_id=user_id,
             run_id=run_id,
             input_request_id=input_request_id,
             run_state_version=run_state_version,
         )
-        self.schedule(user_id=user_id, run_id=run_id)
 
     async def steer(
         self,

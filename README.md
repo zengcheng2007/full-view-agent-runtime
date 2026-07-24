@@ -97,6 +97,7 @@ $env:FULL_VIEW_REDIS_URL = "redis://127.0.0.1:16379/0"
 $env:FULL_VIEW_P0_ALLOWED_USER_IDS = "replace-with-authorized-user-id"
 $env:FULL_VIEW_GOVERNANCE_ADAPTER = "http"
 $env:FULL_VIEW_GOVERNANCE_BASE_URL = "http://127.0.0.1:9666/geo-qxst"
+$env:FULL_VIEW_ORCHESTRATOR = "native"  # 编排器选择；langgraph 在 R2 前不可用，非法值 fail-fast
 $env:FULL_VIEW_MODEL_PROVIDER = "openai_compatible"
 $env:FULL_VIEW_MODEL_BASE_URL = "https://replace-with-model-endpoint/v1"
 $env:FULL_VIEW_MODEL_NAME = "replace-with-model-name"

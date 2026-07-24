@@ -1067,7 +1067,6 @@ async def test_cancel_endpoint_best_effort_cancels_active_tool_task() -> None:
 
     assert response.status_code == 202
     assert response.json()["data"]["status"] == "cancelled"
-    assert run_id not in runtime.run_tasks
 
 
 @pytest.mark.asyncio

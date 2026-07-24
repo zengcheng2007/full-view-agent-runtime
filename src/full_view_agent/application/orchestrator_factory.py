@@ -1,8 +1,8 @@
 """Orchestrator composition factory.
 
 Selects the concrete OrchestrationPort implementation based on
-FULL_VIEW_ORCHESTRATOR config.  The API / RuntimeContainer depend
-only on OrchestrationPort – never on a concrete orchestrator class.
+``FULL_VIEW_ORCHESTRATOR``.  The API / RuntimeContainer depend only on
+OrchestrationPort – never on a concrete orchestrator class.
 """
 
 import os
@@ -35,12 +35,17 @@ def create_orchestrator(
     auth_context_provider: Any,
     governance_adapter: ToolAdapter,
     tool_registry: ToolRegistry,
+    evidence_source_system: str = "in_memory_fixture",
     auth_context_refresher: AuthContextRefresher | None = None,
     denial_ledger: DenialLedger | None = None,
     model_provider: ModelProvider | None = None,
     planner_factory: ModelPlannerFactory | None = None,
 ) -> OrchestrationPort:
-    """Build the orchestrator selected by FULL_VIEW_ORCHESTRATOR.
+    """Build the orchestrator selected by ``FULL_VIEW_ORCHESTRATOR``.
+
+    ``evidence_source_system`` must be passed explicitly by the
+    composition root (``"geo-qxst"`` for HTTP, ``"in_memory_fixture"``
+    for memory).  No class-name reflection.
 
     Currently only ``native`` is accepted.  ``langgraph`` is reserved
     for R2 and will raise ``RuntimeError`` if requested.
@@ -61,11 +66,7 @@ def create_orchestrator(
             ),
             registry=tool_registry,
             planner_factory=planner_factory,
-            evidence_source_system=(
-                "geo-qxst"
-                if _is_http_adapter(governance_adapter)
-                else "in_memory_fixture"
-            ),
+            evidence_source_system=evidence_source_system,
         )
     if mode == "langgraph":
         raise RuntimeError(
@@ -76,7 +77,3 @@ def create_orchestrator(
         f"Unknown FULL_VIEW_ORCHESTRATOR={mode!r}; "
         "expected 'native' (or 'langgraph' in R2)"
     )
-
-
-def _is_http_adapter(adapter: ToolAdapter) -> bool:
-    return type(adapter).__name__ == "HttpGovernanceAdapter"

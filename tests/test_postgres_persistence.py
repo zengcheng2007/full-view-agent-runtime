@@ -590,7 +590,7 @@ async def test_runtime_recovers_active_run_after_process_restart(monkeypatch) ->
         assert recovered_count == 1
         assert recovered.status == "completed"
         assert recovered.outcome == "success"
-        assert restarted.task_failures == []
+        assert restarted.executor.task_failures == []
         events = await restarted.events.list_events(run_id=run.run_id)
         assert events[0].type == "run.resumed"
     finally:
