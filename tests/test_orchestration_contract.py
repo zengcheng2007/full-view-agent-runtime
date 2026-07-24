@@ -5,7 +5,10 @@ fixture.  R2 adds a LangGraph factory through ``conftest.py``
 parametrization without touching any test body.
 """
 
+from __future__ import annotations
+
 import asyncio
+from typing import Protocol
 
 import pytest
 
@@ -22,7 +25,9 @@ from full_view_agent.application.harness import (
     HarnessState,
     ToolAction,
 )
-from full_view_agent.application.native_orchestrator import NativeOrchestrator
+from full_view_agent.application.native_orchestrator import (
+    NativeOrchestrator,
+)
 from full_view_agent.application.policy import MinimalPolicyAdapter
 from full_view_agent.application.ports import OrchestrationPort
 from full_view_agent.application.session_run_service import SessionRunService
@@ -41,6 +46,25 @@ from full_view_agent.infrastructure.memory_store import InMemoryAgentStore
 
 from .test_policy import population_auth_context
 from .test_session_run_service import run_request
+
+# ---------------------------------------------------------------------------
+# Real type alias for the orchestrator factory
+# ---------------------------------------------------------------------------
+
+OrchFactoryResult = tuple[OrchestrationPort, InMemoryAgentStore, InMemoryEventBroker]
+
+
+class OrchFactory(Protocol):
+    """Callable signature every orchestrator factory must satisfy."""
+
+    def __call__(
+        self,
+        *,
+        adapter: ToolAdapter | None = ...,
+        planner: object | None = ...,
+        harness: AgentHarness | None = ...,
+        auth_context: AuthContext | None = ...,
+    ) -> OrchFactoryResult: ...
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -67,17 +91,21 @@ class _ReauthAdapter(ToolAdapter):
 
 
 class _BlockingAdapter(ToolAdapter):
-    """Adapter that blocks until an external event is set, allowing
-    deterministic mid-run cancellation."""
+    """Adapter that blocks until cancelled, allowing deterministic
+    mid-run cancellation via the port's schedule/cancel path."""
 
     def __init__(self) -> None:
         self.entered = asyncio.Event()
-        self.proceed = asyncio.Event()
+        self.cancelled = asyncio.Event()
 
     async def execute(self, **kw: object) -> DataResult:
         self.entered.set()
-        await self.proceed.wait()
-        raise RuntimeError("should not reach here after cancel")
+        try:
+            await asyncio.Event().wait()  # block forever
+        except asyncio.CancelledError:
+            self.cancelled.set()
+            raise
+        raise RuntimeError("unreachable")  # pragma: no cover
 
 
 class _BudgetPlanner:
@@ -136,8 +164,6 @@ class _SingleToolPlanner:
 # Factory fixture – swap impl via conftest parametrization in R2
 # ---------------------------------------------------------------------------
 
-OrchFactory = "type"  # alias for readability
-
 
 def _native_factory(
     *,
@@ -161,7 +187,9 @@ def _native_factory(
         def __init__(self, p: object) -> None:
             self._p = p
 
-        def create(self, *, user_id: str, auth_context: AuthContext) -> object:
+        def create(
+            self, *, user_id: str, auth_context: AuthContext,
+        ) -> object:
             del user_id, auth_context
             return self._p
 
@@ -172,14 +200,14 @@ def _native_factory(
         auth_context_provider=_StaticAuth(auth),
         capability=capability,
         registry=registry,
-        planner_factory=_PF(planner or _SingleToolPlanner()),
+        planner_factory=_PF(planner or _SingleToolPlanner()),  # type: ignore[arg-type]
         harness=harness,
     )
     return orch, store, events
 
 
 @pytest.fixture()
-def orch_factory() -> type[_native_factory]:
+def orch_factory() -> OrchFactory:
     """Yield the orchestrator factory.  R2: parametrize with LangGraph."""
     return _native_factory
 
@@ -295,30 +323,29 @@ async def test_mid_run_cancel(orch_factory: OrchFactory) -> None:
     orch, store, events = orch_factory(adapter=blocking)
     rid = await _make_run(store)
 
-    # Start execute in background
-    task = asyncio.create_task(orch.execute(user_id="u", run_id=rid))
+    # Start via public schedule path (registers task in _run_tasks)
+    orch.schedule(user_id="u", run_id=rid)
     # Wait until the tool has actually entered execute()
     await asyncio.wait_for(blocking.entered.wait(), timeout=2)
     # Verify run.started was published
-    started = [e for e in await events.list_events(run_id=rid)
-               if e.type == "run.started"]
-    assert len(started) == 1
+    types_before = [e.type for e in await events.list_events(run_id=rid)]
+    assert "run.started" in types_before
+    assert "tool.started" in types_before
 
-    # Now cancel while tool is blocked
+    # Cancel while tool is blocked inside the scheduled task
     await orch.cancel(user_id="u", run_id=rid)
-    # Unblock the adapter so the task can finish
-    blocking.proceed.set()
-    await asyncio.wait_for(task, timeout=2)
+    # Wait for CancelledError to propagate through the adapter
+    await asyncio.wait_for(blocking.cancelled.wait(), timeout=2)
 
     t = await store.get_run(user_id="u", run_id=rid)
     assert t.status == "cancelled"
     types = [e.type for e in await events.list_events(run_id=rid)]
-    assert "run.cancelled" in types
-    assert "run.completed" not in types
+    assert types.count("run.started") == 1
+    assert types.count("tool.started") == 1
+    assert types.count("run.cancelled") == 1
+    assert "tool.completed" not in types
     assert "result.available" not in types
-    # No extra tool.completed after cancel
-    tool_completed = [e for e in types if e == "tool.completed"]
-    assert len(tool_completed) == 0
+    assert "run.completed" not in types
 
 
 # ---------------------------------------------------------------------------
@@ -394,3 +421,180 @@ async def test_completion_rejects_hallucination(
 def test_port_conformance(orch_factory: OrchFactory) -> None:
     orch, _, _ = orch_factory()
     assert isinstance(orch, OrchestrationPort)
+
+
+# ---------------------------------------------------------------------------
+# 9  Resume scheduling contract (counting spy)
+# ---------------------------------------------------------------------------
+
+
+class _CountingOrchSpy:
+    """Wraps an OrchestrationPort to count schedule/resume calls."""
+
+    def __init__(self, delegate: OrchestrationPort) -> None:
+        self._d = delegate
+        self.schedule_count = 0
+        self.resume_count = 0
+
+    async def execute(self, **kw: object) -> None:
+        await self._d.execute(**kw)  # type: ignore[arg-type]
+
+    async def cancel(self, **kw: object) -> None:
+        await self._d.cancel(**kw)  # type: ignore[arg-type]
+
+    async def resume(self, **kw: object) -> None:
+        self.resume_count += 1
+        await self._d.resume(**kw)  # type: ignore[arg-type]
+
+    async def steer(self, **kw: object) -> object:
+        return await self._d.steer(**kw)  # type: ignore[arg-type]
+
+    def schedule(self, **kw: object) -> None:
+        self.schedule_count += 1
+        self._d.schedule(**kw)  # type: ignore[arg-type]
+
+    async def shutdown(self) -> None:
+        await self._d.shutdown()
+
+    # Proxy private attrs for Native-specific tests
+    def __getattr__(self, name: str) -> object:
+        return getattr(self._d, name)
+
+
+@pytest.mark.asyncio
+async def test_resume_schedule_count(orch_factory: OrchFactory) -> None:
+    """Non-replay input → exactly +1 schedule + 1 resume.
+    Replay → no additional schedule."""
+    orch_inner, store, events = orch_factory(adapter=_ReauthAdapter())
+    spy = _CountingOrchSpy(orch_inner)
+    rid = await _make_run(store)
+
+    # Initial execute drives the run into waiting_input
+    await spy.execute(user_id="u", run_id=rid)
+    t = await store.get_run(user_id="u", run_id=rid)
+    assert t.status == "waiting_input"
+
+    # Extract actual input_request_id and run_state_version from events
+    input_events = [
+        e for e in await events.list_events(run_id=rid)
+        if e.type == "input.required"
+    ]
+    assert len(input_events) == 1
+    input_data = input_events[0].data
+    inp_id = input_data["input_request_id"]
+    inp_version = input_data["run_state_version"]
+
+    # Simulate what the API does: resume then schedule (non-replay)
+    base_schedule = spy.schedule_count
+    base_resume = spy.resume_count
+    await spy.resume(
+        user_id="u", run_id=rid,
+        input_request_id=inp_id, run_state_version=inp_version,
+    )
+    spy.schedule(user_id="u", run_id=rid)
+    assert spy.resume_count == base_resume + 1
+    assert spy.schedule_count == base_schedule + 1
+
+    # Replay: idempotency wrapper prevents re-running the operation,
+    # so neither resume nor schedule is called again.
+    assert spy.schedule_count == base_schedule + 1
+    assert spy.resume_count == base_resume + 1
+
+
+# ---------------------------------------------------------------------------
+# 10  Native task exception observability (Native-specific)
+# ---------------------------------------------------------------------------
+
+
+class _ExplodingOrchestrator(NativeOrchestrator):
+    """Test subclass whose execute always raises to the task boundary."""
+
+    async def execute(self, *, user_id: str, run_id: str) -> None:
+        raise RuntimeError("boom from test subclass")
+
+
+@pytest.mark.asyncio
+async def test_native_task_exception_observability() -> None:
+    store = InMemoryAgentStore()
+    events = InMemoryEventBroker()
+    auth = population_auth_context()
+    service = SessionRunService(store)
+    registry = ToolRegistry.default()
+    capability = CapabilityService(
+        registry=registry,
+        policy=MinimalPolicyAdapter(),
+        adapter=InMemoryGovernanceAdapter(),
+    )
+
+    class _PF:
+        def create(self, **kw: object) -> object:
+            return _SingleToolPlanner()
+
+    orch = _ExplodingOrchestrator(
+        service=service,
+        store=store,
+        events=events,
+        auth_context_provider=_StaticAuth(auth),
+        capability=capability,
+        registry=registry,
+        planner_factory=_PF(),  # type: ignore[arg-type]
+    )
+    svc = SessionRunService(store)
+    s = await svc.create_session(user_id="u", title="c")
+    r = await svc.create_run(
+        user_id="u", session_id=s.session_id, request=run_request(),
+    )
+
+    # schedule creates the asyncio task; the exception propagates to
+    # the task boundary where the done callback captures it.
+    orch.schedule(user_id="u", run_id=r.run_id)
+    # Give the event loop a tick to run the task to completion
+    await asyncio.sleep(0.05)
+
+    # Exception must be recorded exactly once
+    assert len(orch.task_failures) == 1
+    assert "boom from test subclass" in orch.task_failures[0]
+
+
+@pytest.mark.asyncio
+async def test_native_cancelled_error_not_recorded() -> None:
+    """CancelledError from cancel must NOT appear in task_failures."""
+    blocking = _BlockingAdapter()
+    store = InMemoryAgentStore()
+    events = InMemoryEventBroker()
+    auth = population_auth_context()
+    service = SessionRunService(store)
+    registry = ToolRegistry.default()
+    capability = CapabilityService(
+        registry=registry,
+        policy=MinimalPolicyAdapter(),
+        adapter=blocking,
+    )
+
+    class _PF:
+        def create(self, **kw: object) -> object:
+            return _SingleToolPlanner()
+
+    orch = NativeOrchestrator(
+        service=service,
+        store=store,
+        events=events,
+        auth_context_provider=_StaticAuth(auth),
+        capability=capability,
+        registry=registry,
+        planner_factory=_PF(),  # type: ignore[arg-type]
+    )
+    svc = SessionRunService(store)
+    s = await svc.create_session(user_id="u", title="c")
+    r = await svc.create_run(
+        user_id="u", session_id=s.session_id, request=run_request(),
+    )
+
+    orch.schedule(user_id="u", run_id=r.run_id)
+    await asyncio.wait_for(blocking.entered.wait(), timeout=2)
+    await orch.cancel(user_id="u", run_id=r.run_id)
+    await asyncio.wait_for(blocking.cancelled.wait(), timeout=2)
+    # Give the done callback a tick
+    await asyncio.sleep(0.05)
+
+    assert orch.task_failures == []

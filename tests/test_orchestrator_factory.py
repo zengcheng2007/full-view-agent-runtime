@@ -21,11 +21,6 @@ class _DummyAuth:
         raise NotImplementedError
 
 
-class _DummyCredentialBroker:
-    async def resolve(self, **kw: object) -> object:  # noqa: D102
-        raise NotImplementedError
-
-
 def _kwargs(**overrides: object) -> dict:
     store = InMemoryAgentStore()
     base: dict[str, object] = {
@@ -72,7 +67,7 @@ def test_evidence_source_system_passed_explicitly(
         **_kwargs(evidence_source_system="geo-qxst")
     )
     assert isinstance(orch, OrchestrationPort)
-    assert orch._evidence_source_system == "geo-qxst"  # noqa: SLF001
+    assert orch._evidence_source_system == "geo-qxst"  # noqa: SLF001  # type: ignore[attr-defined]
 
 
 def test_memory_adapter_default_evidence_source(
@@ -80,4 +75,4 @@ def test_memory_adapter_default_evidence_source(
 ) -> None:
     monkeypatch.delenv("FULL_VIEW_ORCHESTRATOR", raising=False)
     orch = create_orchestrator(**_kwargs())
-    assert orch._evidence_source_system == "in_memory_fixture"  # noqa: SLF001
+    assert orch._evidence_source_system == "in_memory_fixture"  # noqa: SLF001  # type: ignore[attr-defined]
