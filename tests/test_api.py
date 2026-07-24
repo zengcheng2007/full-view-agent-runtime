@@ -1685,6 +1685,189 @@ async def test_reauthentication_input_refreshes_credential_and_resumes_run() -> 
     assert "test-token-reauth-user" not in input_response.text
 
 
+# ---------------------------------------------------------------------------
+# Resume idempotency via real HTTP API with counting wrapper
+# ---------------------------------------------------------------------------
+
+
+class _CountingOrchPort:
+    """OrchestrationPort wrapper that counts schedule/resume calls."""
+
+    def __init__(self, delegate: object) -> None:
+        self._d = delegate
+        self.schedule_count = 0
+        self.resume_count = 0
+
+    async def execute(self, *, user_id: str, run_id: str) -> None:
+        await self._d.execute(user_id=user_id, run_id=run_id)  # type: ignore[attr-defined]
+
+    async def cancel(self, *, user_id: str, run_id: str) -> None:
+        await self._d.cancel(user_id=user_id, run_id=run_id)  # type: ignore[attr-defined]
+
+    async def resume(  # noqa: D102
+        self,
+        *,
+        user_id: str,
+        run_id: str,
+        input_request_id: str,
+        run_state_version: int,
+    ) -> None:
+        self.resume_count += 1
+        await self._d.resume(  # type: ignore[attr-defined]
+            user_id=user_id,
+            run_id=run_id,
+            input_request_id=input_request_id,
+            run_state_version=run_state_version,
+        )
+
+    async def steer(  # noqa: D102
+        self,
+        *,
+        user_id: str,
+        run_id: str,
+        client_instance_id: str,
+        content: str,
+    ) -> object:
+        return await self._d.steer(  # type: ignore[attr-defined]
+            user_id=user_id,
+            run_id=run_id,
+            client_instance_id=client_instance_id,
+            content=content,
+        )
+
+    def schedule(self, *, user_id: str, run_id: str) -> None:
+        self.schedule_count += 1
+        self._d.schedule(user_id=user_id, run_id=run_id)  # type: ignore[attr-defined]
+
+    async def shutdown(self) -> None:
+        await self._d.shutdown()  # type: ignore[attr-defined]
+
+    def __getattr__(self, name: str) -> object:
+        return getattr(self._d, name)
+
+
+@pytest.mark.asyncio
+async def test_resume_idempotency_via_http_api() -> None:
+    """Real API test: non-replay input → +1 resume +1 schedule;
+    replay → no additional calls; input.received before run.resumed."""
+    from full_view_agent.application.errors import ReauthenticationRequired
+    from full_view_agent.application.native_orchestrator import (
+        NativeOrchestrator,
+    )
+
+    class ReauthOnceCapability:
+        def __init__(self) -> None:
+            self.calls = 0
+
+        async def execute(self, **kwargs: object) -> object:
+            self.calls += 1
+            if self.calls == 1:
+                raise ReauthenticationRequired("credential expired")
+            from tests.test_mock_executor import RecordingCapability
+
+            return await RecordingCapability().execute(**kwargs)
+
+    runtime = runtime_fixture()
+    capability = ReauthOnceCapability()
+    native = NativeOrchestrator(
+        service=runtime.service,
+        store=runtime.store,
+        events=runtime.events,
+        capability=capability,
+        auth_context_provider=runtime.auth_contexts,
+    )
+    counting = _CountingOrchPort(native)
+    runtime.executor = counting  # type: ignore[assignment]
+    app = create_app(runtime)
+    auth = {"geoToken": "test-token-reauth-user"}
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=app), base_url="http://test",
+    ) as client:
+        session_resp = await client.post(
+            "/agent-api/v1/sessions",
+            headers={**auth, "Idempotency-Key": "idem-resume-session"},
+            json={"title": "resume idempotency"},
+        )
+        session_id = session_resp.json()["data"]["session_id"]
+        run_resp = await client.post(
+            f"/agent-api/v1/sessions/{session_id}/runs",
+            headers={**auth, "Idempotency-Key": "idem-resume-run"},
+            json=run_request(
+                message_id="web-msg-resume-idem",
+                client_instance_id="cli-resume-idem",
+            ).model_dump(mode="json"),
+        )
+        run_id = run_resp.json()["data"]["run_id"]
+
+        # Wait for waiting_input
+        for _ in range(100):
+            r = await client.get(
+                f"/agent-api/v1/runs/{run_id}", headers=auth,
+            )
+            if r.json()["data"]["status"] == "waiting_input":
+                break
+            await asyncio.sleep(0.001)
+        waiting = r.json()["data"]
+        events = await runtime.events.list_events(run_id=run_id)
+        req_event = next(
+            e for e in events if e.type == "reauth_required"
+        )
+
+        # Baseline after initial schedule (from run creation)
+        base_schedule = counting.schedule_count
+        base_resume = counting.resume_count
+
+        # --- First (non-replay) input ---
+        idem_key = "idem-resume-input"
+        input_body = {
+            "input_request_id": req_event.data["input_request_id"],
+            "client_instance_id": "cli-resume-idem",
+            "run_state_version": waiting["state_version"],
+            "response": {"type": "reauthenticated"},
+        }
+        input_resp = await client.post(
+            f"/agent-api/v1/runs/{run_id}/inputs",
+            headers={**auth, "Idempotency-Key": idem_key},
+            json=input_body,
+        )
+        assert input_resp.status_code == 202
+        assert input_resp.json()["meta"]["idempotency_replayed"] is not True
+
+        # Wait for completion
+        for _ in range(100):
+            cr = await client.get(
+                f"/agent-api/v1/runs/{run_id}", headers=auth,
+            )
+            if cr.json()["data"]["status"] == "completed":
+                break
+            await asyncio.sleep(0.001)
+
+        # Non-replay: exactly +1 resume, +1 schedule
+        assert counting.resume_count == base_resume + 1
+        assert counting.schedule_count == base_schedule + 1
+
+        # --- Replay with same Idempotency-Key ---
+        replay_resp = await client.post(
+            f"/agent-api/v1/runs/{run_id}/inputs",
+            headers={**auth, "Idempotency-Key": idem_key},
+            json=input_body,
+        )
+        assert replay_resp.status_code == 202
+        assert replay_resp.json()["meta"]["idempotency_replayed"] is True
+        # Replay must NOT trigger additional resume or schedule
+        assert counting.resume_count == base_resume + 1
+        assert counting.schedule_count == base_schedule + 1
+
+    # Event ordering: input.received must precede run.resumed
+    all_events = await runtime.events.list_events(run_id=run_id)
+    event_types = [e.type for e in all_events]
+    input_recv_idx = event_types.index("input.received")
+    resumed_idx = event_types.index("run.resumed")
+    assert input_recv_idx < resumed_idx
+    # Capability called exactly twice (first reauth, second success)
+    assert capability.calls == 2
+
+
 @pytest.mark.anyio
 async def test_liveness_returns_ok():
     app = create_app(runtime=runtime_fixture())
