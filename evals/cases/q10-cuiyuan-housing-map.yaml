@@ -1,6 +1,6 @@
 schema_version: "1.0"
 case_id: q10-cuiyuan-housing-map
-description: "Q10/S2: 把出租房分布显示在地图上（分色图命令和回执）"
+description: "Q10/S2: 把出租房分布显示在地图上（数据可得，地图分色命令未接线时如实说明）"
 user_message: 把出租房分布显示在地图上。
 auth:
   area_codes: ["3301"]
@@ -12,13 +12,19 @@ model_steps:
     arguments:
       query: 翠苑街道
       context_area_code: "330106"
+  - type: tool_call
+    tool_id: governance.query_housing_metrics
+    arguments:
+      query:
+        scope: {area_code: "330106001", include_descendants: true}
+        group_by: [next_area]
   - type: finish
-    content: 当前数据源不支持社区级出租房分布，不能生成可信的社区分色图。
+    content: 已取得按社区的出租房分布数据并可展示表格；出租房地图分色命令尚未接线。
 expected:
   terminal_status: completed
   outcome: success
   completion_reason_code: goal_completed
-  tool_ids: [governance.resolve_area]
-  min_evidence_count: 0
-  required_event_types: [tool.completed, result.available, run.completed]
-  required_answer_substrings: [不支持]
+  tool_ids: [governance.resolve_area, governance.query_housing_metrics]
+  min_evidence_count: 2
+  required_event_types: [tool.completed, result.available, evidence.available, run.completed]
+  required_answer_substrings: [分布]

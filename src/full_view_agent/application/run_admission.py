@@ -125,8 +125,16 @@ def _authorization_profile(
     return (
         [
             "governance.area.read",
+            "governance.event.aggregate.read",
+            "governance.housing.aggregate.read",
             "governance.population.aggregate.read",
             "governance.object.profile.read",
         ],
-        ["administrative_area", "population", "governance_objects"],
+        [
+            "administrative_area",
+            "event",
+            "housing",
+            "population",
+            "governance_objects",
+        ],
     )

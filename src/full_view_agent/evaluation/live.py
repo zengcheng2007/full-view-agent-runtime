@@ -28,6 +28,7 @@ def build_live_eval_runner(
     env_file: Path,
     *,
     environment: EvalEnvironment | None = None,
+    orchestrator: Literal["native", "langgraph"] = "native",
 ) -> EvalRunner:
     settings_factory: Any = LiveModelSettings
     settings: LiveModelSettings = settings_factory(
@@ -46,4 +47,5 @@ def build_live_eval_runner(
         model_name=settings.name,
         max_total_tokens=settings.token_budget,
         environment=environment,
+        orchestrator=orchestrator,
     )

@@ -32,6 +32,15 @@ class StaticContextBuilder:
         return self.request
 
 
+class EmptyToolContextBuilder(StaticContextBuilder):
+    def __init__(self) -> None:
+        super().__init__()
+        self.request = ModelRequest(
+            messages=(ModelMessage(role="user", content="查询业务数据"),),
+            tools=(),
+        )
+
+
 class QueueModelProvider:
     def __init__(self, *responses: ModelResponse) -> None:
         self.responses = list(responses)
@@ -95,6 +104,22 @@ async def test_model_planner_returns_finish_action_for_nonblank_text() -> None:
     action = await planner.decide(HarnessState())
 
     assert action == FinishAction(summary="人口指标查询已完成")
+
+
+@pytest.mark.asyncio
+async def test_model_planner_stops_without_calling_model_when_no_tools_are_authorized() -> None:
+    provider = QueueModelProvider()
+    planner = ModelPlanner(
+        provider=provider,
+        context_builder=EmptyToolContextBuilder(),
+        user_id="user-01",
+        auth_context=population_auth_context(),
+    )
+
+    action = await planner.decide(HarnessState())
+
+    assert action == FinishAction(summary="抱歉，当前账号没有可用于该查询的授权能力。")
+    assert provider.requests == []
 
 
 @pytest.mark.asyncio

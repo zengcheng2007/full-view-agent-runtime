@@ -22,6 +22,8 @@ from full_view_agent.domain.models import (
     EventFinishRateRow,
     EventFinishRateTable,
     GetObjectProfileInput,
+    HousingAreaGroupRow,
+    HousingAreaGroupTable,
     HousingLeaseTypeRow,
     HousingLeaseTypeTable,
     InternalToolManifest,
@@ -48,6 +50,13 @@ class InMemoryGovernanceAdapter:
                 level="district",
                 parent_area_code="330100",
                 bounds=(120.02, 30.05, 120.20, 30.35),
+            ),
+            AreaCandidate(
+                area_code="330106001",
+                area_name="翠苑街道",
+                level="street",
+                parent_area_code="330106",
+                bounds=(120.10, 30.27, 120.16, 30.31),
             ),
             AreaCandidate(
                 area_code="330105",
@@ -179,6 +188,10 @@ class InMemoryGovernanceAdapter:
     def _query_housing_metrics(
         arguments: QueryHousingMetricsInput,
     ) -> TableDataResult:
+        if arguments.query.group_by == ["next_area"]:
+            return InMemoryGovernanceAdapter._query_housing_area_distribution(
+                arguments
+            )
         rows = [
             HousingLeaseTypeRow(lease_type="住宅出租", dwelling_count=3200),
             HousingLeaseTypeRow(lease_type="商铺出租", dwelling_count=850),
@@ -192,6 +205,37 @@ class InMemoryGovernanceAdapter:
             data_schema_ref="schema://data/housing-lease-type-table/1.0.0",
             result_fingerprint=canonical_fingerprint(
                 domain="data-result:housing-metric-table:1.0.0",
+                value=data,
+            ),
+            data=data,
+            row_count=len(rows),
+        )
+
+    @staticmethod
+    def _query_housing_area_distribution(
+        arguments: QueryHousingMetricsInput,
+    ) -> TableDataResult:
+        _validate_housing_next_area_query(arguments)
+        area_code = arguments.query.scope.area_code
+        child_label = _NEXT_AREA_CHILD_LABEL[len(area_code)]
+        rows = [
+            HousingAreaGroupRow(
+                area_code=f"{area_code}001",
+                area_name=f"示例{child_label}一",
+                dwelling_count=210,
+            ),
+            HousingAreaGroupRow(
+                area_code=f"{area_code}002",
+                area_name=f"示例{child_label}二",
+                dwelling_count=168,
+            ),
+        ][: arguments.query.limit]
+        data = HousingAreaGroupTable(rows=rows)
+        return TableDataResult(
+            result_id=new_id("res"),
+            data_schema_ref="schema://data/housing-area-group-table/1.0.0",
+            result_fingerprint=canonical_fingerprint(
+                domain="data-result:housing-area-group-table:1.0.0",
                 value=data,
             ),
             data=data,
@@ -490,10 +534,21 @@ class HttpGovernanceAdapter:
         )
         raw = _unwrap_standard_result(response)
         if not isinstance(raw, dict):
-            raw = {}
-        grid_rate = raw.get("gridFinishRate", "0%")
-        community_rate = raw.get("communityFinishRate", "0%")
-        street_rate = raw.get("streetFinishRate", "0%")
+            raise UpstreamContractError(
+                "legacy event response is not an object"
+            )
+        required_rate_fields = {
+            "gridFinishRate",
+            "communityFinishRate",
+            "streetFinishRate",
+        }
+        if not required_rate_fields.issubset(raw):
+            raise UpstreamContractError(
+                "legacy event response is missing required finish rates"
+            )
+        grid_rate = raw["gridFinishRate"]
+        community_rate = raw["communityFinishRate"]
+        street_rate = raw["streetFinishRate"]
         rows = [
             EventFinishRateRow(level="grid", finish_rate=_parse_percent(grid_rate)),
             EventFinishRateRow(
@@ -522,6 +577,13 @@ class HttpGovernanceAdapter:
         timeout_seconds: float,
         max_attempts: int,
     ) -> TableDataResult:
+        if arguments.query.group_by == ["next_area"]:
+            return await self._query_housing_area_distribution_http(
+                arguments=arguments,
+                auth_context=auth_context,
+                timeout_seconds=timeout_seconds,
+                max_attempts=max_attempts,
+            )
         area_code = arguments.query.scope.area_code
         token = await self._credential_broker.resolve(
             credential_ref=auth_context.credential_ref,
@@ -563,6 +625,64 @@ class HttpGovernanceAdapter:
             data=data,
             row_count=len(rows),
             truncated=False,
+        )
+
+    async def _query_housing_area_distribution_http(
+        self,
+        *,
+        arguments: QueryHousingMetricsInput,
+        auth_context: AuthContext,
+        timeout_seconds: float,
+        max_attempts: int,
+    ) -> TableDataResult:
+        _validate_housing_next_area_query(arguments)
+        area_code = arguments.query.scope.area_code
+        token = await self._credential_broker.resolve(
+            credential_ref=auth_context.credential_ref,
+            subject_user_id=auth_context.principal.user_id,
+            app_id=auth_context.application.app_id,
+            run_id=auth_context.run_id,
+        )
+        response = await self._post(
+            "/getNextSiteData",
+            data={
+                "areaName": _area_code_column(area_code),
+                "areaCode": area_code,
+                "tableName": "base_room_lease",
+            },
+            token=token,
+            timeout_seconds=timeout_seconds,
+            max_attempts=max_attempts,
+        )
+        raw_rows = _unwrap_standard_result(response)
+        source_rows = raw_rows if isinstance(raw_rows, list) else []
+        try:
+            rows = sorted(
+                [
+                HousingAreaGroupRow(
+                    area_code=str(item["areaCode"]),
+                    area_name=str(item["areaName"]),
+                    dwelling_count=int(item["total"]),
+                )
+                for item in source_rows
+                ],
+                key=lambda row: (-row.dwelling_count, row.area_code),
+            )[: arguments.query.limit]
+        except (KeyError, TypeError, ValueError) as exc:
+            raise UpstreamContractError(
+                "legacy housing area response is malformed"
+            ) from exc
+        data = HousingAreaGroupTable(rows=rows)
+        return TableDataResult(
+            result_id=new_id("res"),
+            data_schema_ref="schema://data/housing-area-group-table/1.0.0",
+            result_fingerprint=canonical_fingerprint(
+                domain="data-result:housing-area-group-table:1.0.0",
+                value=data,
+            ),
+            data=data,
+            row_count=len(rows),
+            truncated=len(source_rows) > arguments.query.limit,
         )
 
     async def _get_object_profile_http(
@@ -795,6 +915,26 @@ def _area_code_column(area_code: str) -> str:
         17: "courtyard_code",
         21: "unifiedaddressid",
     }[len(area_code)]
+
+
+# 出租房 next_area 分组与人口独居老人同一通用下级聚合端点。
+# 支持范围：市→区县、区县→街道、街道→社区、社区→网格
+# （市级经 city_code 列聚合，qxst-sj commonUtil.paramsLoader case 4）。
+_NEXT_AREA_CHILD_LABEL = {4: "区县", 6: "街道", 9: "社区", 12: "网格"}
+
+
+def _validate_housing_next_area_query(
+    arguments: QueryHousingMetricsInput,
+) -> None:
+    if arguments.query.group_by != ["next_area"]:
+        raise SemanticValidationError(
+            "legacy housing adapter supports only group_by=['next_area']"
+        )
+    if len(arguments.query.scope.area_code) not in _NEXT_AREA_CHILD_LABEL:
+        raise SemanticValidationError(
+            "legacy housing adapter supports next_area grouping only for "
+            "city, district, street, or community scopes"
+        )
 
 
 def _parse_percent(value: object) -> float:

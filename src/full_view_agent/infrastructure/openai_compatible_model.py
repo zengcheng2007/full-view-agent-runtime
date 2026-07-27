@@ -9,6 +9,7 @@ from full_view_agent.application.errors import (
     ModelProviderUnavailable,
 )
 from full_view_agent.application.model_provider import (
+    ModelMessage,
     ModelRequest,
     ModelResponse,
     ModelToolCall,
@@ -39,8 +40,7 @@ class OpenAICompatibleModelProvider:
         payload: dict[str, object] = {
             "model": self._model,
             "messages": [
-                {"role": message.role, "content": message.content}
-                for message in request.messages
+                _serialize_message(message) for message in request.messages
             ],
         }
         if request.max_output_tokens is not None:
@@ -131,6 +131,35 @@ class OpenAICompatibleModelProvider:
             )
         except (KeyError, IndexError, TypeError, ValueError) as exc:
             raise ModelContractError("model response violated the provider contract") from exc
+
+
+def _serialize_message(message: ModelMessage) -> dict[str, object]:
+    """Serialize a ModelMessage to OpenAI-compatible format."""
+    if message.role == "tool":
+        return {
+            "role": "tool",
+            "tool_call_id": message.tool_call_id or "",
+            "content": message.content or "",
+        }
+    if message.role == "assistant" and message.tool_calls:
+        return {
+            "role": "assistant",
+            "content": message.content,
+            "tool_calls": [
+                {
+                    "id": tc.call_id or f"call_{i}",
+                    "type": "function",
+                    "function": {
+                        "name": _model_tool_name(tc.tool_id),
+                        "arguments": json.dumps(
+                            tc.arguments, ensure_ascii=False,
+                        ),
+                    },
+                }
+                for i, tc in enumerate(message.tool_calls)
+            ],
+        }
+    return {"role": message.role, "content": message.content or ""}
 
 
 def _model_tool_name(tool_id: str) -> str:

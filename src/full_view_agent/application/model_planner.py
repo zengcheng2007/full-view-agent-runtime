@@ -54,6 +54,8 @@ class ModelPlanner:
             auth_context=self._auth_context,
             state=state,
         )
+        if not request.tools and not state.tool_results:
+            return FinishAction(summary="抱歉，当前账号没有可用于该查询的授权能力。")
         remaining_tokens = self._max_total_tokens - self._total_tokens
         if remaining_tokens <= 0:
             raise BudgetExceeded("model token budget exceeded")

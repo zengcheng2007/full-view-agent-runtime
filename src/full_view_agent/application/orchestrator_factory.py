@@ -47,10 +47,10 @@ def create_orchestrator(
     composition root (``"geo-qxst"`` for HTTP, ``"in_memory_fixture"``
     for memory).  No class-name reflection.
 
-    Currently only ``native`` is accepted.  ``langgraph`` is reserved
-    for R2 and will raise ``RuntimeError`` if requested.
+    LangGraph is the R3 default. Set ``native`` explicitly only for the
+    time-limited rollback window.
     """
-    mode = os.getenv("FULL_VIEW_ORCHESTRATOR", "native").lower()
+    mode = os.getenv("FULL_VIEW_ORCHESTRATOR", "langgraph").lower()
     if mode == "native":
         return NativeOrchestrator(
             service=service,
@@ -69,11 +69,53 @@ def create_orchestrator(
             evidence_source_system=evidence_source_system,
         )
     if mode == "langgraph":
-        raise RuntimeError(
-            "FULL_VIEW_ORCHESTRATOR=langgraph is reserved for R2; "
-            "not yet implemented"
+        from full_view_agent.infrastructure.checkpoint_mapping_store import (
+            PostgresCheckpointMappingStore,
+        )
+        from full_view_agent.infrastructure.langgraph_checkpoint import (
+            LangGraphPostgresCheckpointManager,
+        )
+        from full_view_agent.infrastructure.langgraph_orchestrator import (
+            LangGraphOrchestrator,
+        )
+
+        database_url = os.getenv("FULL_VIEW_DATABASE_URL")
+        checkpoint_manager = None
+        checkpoint_mappings = None
+        if database_url:
+            checkpoint_manager = LangGraphPostgresCheckpointManager(
+                dsn=database_url,
+                schema=os.getenv(
+                    "FULL_VIEW_LANGGRAPH_POSTGRES_SCHEMA",
+                    "full_view_agent_langgraph",
+                ),
+            )
+            checkpoint_mappings = PostgresCheckpointMappingStore(
+                dsn=database_url,
+                schema=os.getenv(
+                    "FULL_VIEW_POSTGRES_SCHEMA",
+                    "full_view_agent",
+                ),
+            )
+        return LangGraphOrchestrator(
+            service=service,
+            store=store,
+            events=events,
+            auth_context_provider=auth_context_provider,
+            capability=CapabilityService(
+                registry=tool_registry,
+                policy=MinimalPolicyAdapter(),
+                adapter=governance_adapter,
+                auth_context_refresher=auth_context_refresher,
+                denial_ledger=denial_ledger,
+            ),
+            registry=tool_registry,
+            planner_factory=planner_factory,
+            evidence_source_system=evidence_source_system,
+            checkpoint_manager=checkpoint_manager,
+            checkpoint_mappings=checkpoint_mappings,
         )
     raise RuntimeError(
         f"Unknown FULL_VIEW_ORCHESTRATOR={mode!r}; "
-        "expected 'native' (or 'langgraph' in R2)"
+        "expected 'langgraph' or rollback mode 'native'"
     )

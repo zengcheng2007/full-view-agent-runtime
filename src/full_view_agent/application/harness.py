@@ -1,6 +1,6 @@
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, replace
-from time import monotonic
+from time import time
 from typing import Protocol
 
 from full_view_agent.application.errors import BudgetExceeded, LoopDetected
@@ -52,12 +52,38 @@ class HarnessState:
     consecutive_failures: int = 0
     no_progress_count: int = 0
     tool_results: tuple[ToolResult, ...] = ()
+    tool_call_ids: tuple[str, ...] = ()
+    tool_actions: tuple[ToolAction, ...] = ()
+    inherited_result_ids: tuple[str, ...] = ()
+    inherited_evidence_ids: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
 class HarnessResult:
     summary: str
     state: HarnessState
+
+
+@dataclass(frozen=True)
+class HarnessControl:
+    """Framework-neutral control state for one bounded agent iteration."""
+
+    state: HarnessState
+    started_at: float
+    previous_call_fingerprint: str | None = None
+    repeated_calls: int = 0
+    previous_observation_fingerprint: str | None = None
+
+
+@dataclass(frozen=True)
+class HarnessToolExecution:
+    """A Tool result awaiting observation and validation by the Harness."""
+
+    action: ToolAction
+    tool_call_id: str
+    result: ToolResult
+    call_fingerprint: str
+    repeated_calls: int
 
 
 class Planner(Protocol):
@@ -103,6 +129,7 @@ class DeterministicCompletionValidator:
     """
 
     import re as _re
+
     _NUMBER_RE = _re.compile(r"\d{2,}")
 
     ALLOWED_NO_RESULT_PATTERNS = (
@@ -131,9 +158,7 @@ class DeterministicCompletionValidator:
         if not summary:
             return False
 
-        success_results = [
-            r for r in state.tool_results if r.status in ("success", "partial")
-        ]
+        success_results = [r for r in state.tool_results if r.status in ("success", "partial")]
         denied_results = [r for r in state.tool_results if r.status == "denied"]
         failed_results = [r for r in state.tool_results if r.status == "failed"]
 
@@ -151,7 +176,13 @@ class DeterministicCompletionValidator:
         if failed_results:
             return not has_fabricated_number
 
-        # Case 5: no tool results at all → explicit allowlist only
+        # A follow-up may transform a result already verified and persisted in
+        # the same owned session. The orchestrator only populates these IDs
+        # after reloading both the result and its evidence from the store.
+        if state.inherited_result_ids and state.inherited_evidence_ids:
+            return True
+
+        # Case 5: no current or inherited results → explicit allowlist only
         return any(p in summary for p in self.ALLOWED_NO_RESULT_PATTERNS)
 
 
@@ -168,7 +199,7 @@ class AgentHarness:
         tool_executor: HarnessToolExecutor,
         limits: HarnessLimits | None = None,
         validator: CompletionValidator | None = None,
-        clock: Callable[[], float] = monotonic,
+        clock: Callable[[], float] = time,
         tool_call_id_factory: Callable[[], str] | None = None,
     ) -> None:
         self._tool_executor = tool_executor
@@ -176,6 +207,161 @@ class AgentHarness:
         self._validator = validator or NonEmptyCompletionValidator()
         self._clock = clock
         self._tool_call_id_factory = tool_call_id_factory or (lambda: new_id("tcl"))
+
+    def begin(
+        self,
+        *,
+        inherited_result_ids: tuple[str, ...] = (),
+        inherited_evidence_ids: tuple[str, ...] = (),
+    ) -> HarnessControl:
+        return HarnessControl(
+            state=HarnessState(
+                inherited_result_ids=inherited_result_ids,
+                inherited_evidence_ids=inherited_evidence_ids,
+            ),
+            started_at=self._clock(),
+        )
+
+    async def plan_action_once(
+        self, *, planner: Planner, control: HarnessControl
+    ) -> tuple[HarnessControl, HarnessAction]:
+        self._guard_time(control.started_at)
+        if control.state.model_turns >= self._limits.max_model_turns:
+            raise BudgetExceeded("maximum model turns exceeded")
+        action = await planner.decide(control.state)
+        state = replace(control.state, model_turns=control.state.model_turns + 1)
+        return replace(control, state=state), action
+
+    async def validate_once(
+        self,
+        *,
+        action: HarnessAction,
+        control: HarnessControl,
+    ) -> tuple[HarnessControl, str | None]:
+        if isinstance(action, FinishAction):
+            if await self._validator.validate(control.state, action):
+                return control, action.summary
+            state = replace(
+                control.state,
+                no_progress_count=control.state.no_progress_count + 1,
+            )
+            self._guard_no_progress(state)
+            return replace(control, state=state), None
+
+        state = control.state
+        if state.consecutive_failures >= self._limits.max_consecutive_failures:
+            result = state.tool_results[-1]
+            raise BudgetExceeded(
+                "maximum consecutive tool failures exceeded",
+                root_cause_code=result.warnings[0] if result.warnings else "tool_failed",
+                root_cause_message=result.summary,
+            )
+        self._guard_no_progress(state)
+        return control, None
+
+    async def plan_once(
+        self, *, planner: Planner, control: HarnessControl
+    ) -> tuple[HarnessControl, ToolAction | None, str | None]:
+        control, action = await self.plan_action_once(planner=planner, control=control)
+        if not isinstance(action, FinishAction):
+            return control, action, None
+        control, summary = await self.validate_once(action=action, control=control)
+        return control, None, summary
+
+    async def authorize_and_execute_once(
+        self,
+        *,
+        action: ToolAction,
+        auth_context: AuthContext,
+        control: HarnessControl,
+        before_tool_call: BeforeToolCall | None = None,
+        after_tool_call: AfterToolCall | None = None,
+    ) -> HarnessToolExecution:
+        if control.state.tool_calls >= self._limits.max_tool_calls:
+            raise BudgetExceeded("maximum tool calls exceeded")
+        fingerprint = canonical_fingerprint(
+            domain="harness-tool-call",
+            value={"tool_id": action.tool_id, "arguments": action.arguments},
+        )
+        repeated = (
+            control.repeated_calls + 1 if fingerprint == control.previous_call_fingerprint else 1
+        )
+        if repeated > self._limits.repeated_call_limit:
+            raise LoopDetected("same tool and arguments repeated without progress")
+        self._guard_time(control.started_at)
+        tool_call_id = self._tool_call_id_factory()
+        if before_tool_call is not None:
+            await before_tool_call(action, tool_call_id)
+        result = await self._tool_executor.execute(
+            tool_call_id=tool_call_id,
+            tool_id=action.tool_id,
+            raw_arguments=action.arguments,
+            auth_context=auth_context,
+        )
+        if after_tool_call is not None:
+            await after_tool_call(result)
+        return HarnessToolExecution(
+            action=action,
+            tool_call_id=tool_call_id,
+            result=result,
+            call_fingerprint=fingerprint,
+            repeated_calls=repeated,
+        )
+
+    def observe_once(
+        self,
+        *,
+        execution: HarnessToolExecution,
+        control: HarnessControl,
+    ) -> HarnessControl:
+        result = execution.result
+        observation = canonical_fingerprint(
+            domain="harness-tool-observation",
+            value=result.model_dump(mode="json", exclude={"tool_call_id"}),
+        )
+        no_progress = (
+            control.state.no_progress_count + 1
+            if observation == control.previous_observation_fingerprint
+            else 0
+        )
+        state = replace(
+            control.state,
+            tool_calls=control.state.tool_calls + 1,
+            consecutive_failures=control.state.consecutive_failures + 1
+            if result.status == "failed"
+            else 0,
+            no_progress_count=no_progress,
+            tool_results=(*control.state.tool_results, result),
+            tool_call_ids=(*control.state.tool_call_ids, execution.tool_call_id),
+            tool_actions=(*control.state.tool_actions, execution.action),
+        )
+        return HarnessControl(
+            state=state,
+            started_at=control.started_at,
+            previous_call_fingerprint=execution.call_fingerprint,
+            repeated_calls=execution.repeated_calls,
+            previous_observation_fingerprint=observation,
+        )
+
+    async def execute_once(
+        self,
+        *,
+        action: ToolAction,
+        auth_context: AuthContext,
+        control: HarnessControl,
+        before_tool_call: BeforeToolCall | None = None,
+        after_tool_call: AfterToolCall | None = None,
+    ) -> HarnessControl:
+        execution = await self.authorize_and_execute_once(
+            action=action,
+            auth_context=auth_context,
+            control=control,
+            before_tool_call=before_tool_call,
+            after_tool_call=after_tool_call,
+        )
+        control = self.observe_once(execution=execution, control=control)
+        control, _summary = await self.validate_once(action=action, control=control)
+        return control
 
     async def run(
         self,
@@ -185,87 +371,46 @@ class AgentHarness:
         before_tool_call: BeforeToolCall | None = None,
         after_tool_call: AfterToolCall | None = None,
         is_cancelled: Callable[[], bool] | None = None,
+        inherited_result_ids: tuple[str, ...] = (),
+        inherited_evidence_ids: tuple[str, ...] = (),
     ) -> HarnessResult:
-        state = HarnessState()
-        started_at = self._clock()
-        previous_call_fingerprint: str | None = None
-        repeated_calls = 0
-        previous_observation_fingerprint: str | None = None
-
+        control = self.begin(
+            inherited_result_ids=inherited_result_ids,
+            inherited_evidence_ids=inherited_evidence_ids,
+        )
         while True:
-            self._guard_time(started_at)
             if is_cancelled is not None and is_cancelled():
                 raise BudgetExceeded("run was cancelled before the next safe checkpoint")
-            if state.model_turns >= self._limits.max_model_turns:
-                raise BudgetExceeded("maximum model turns exceeded")
-
-            action = await planner.decide(state)
-            state = replace(state, model_turns=state.model_turns + 1)
+            control, action = await self.plan_action_once(
+                planner=planner,
+                control=control,
+            )
             if isinstance(action, FinishAction):
-                if await self._validator.validate(state, action):
-                    return HarnessResult(summary=action.summary, state=state)
-                state = replace(state, no_progress_count=state.no_progress_count + 1)
-                self._guard_no_progress(state)
-                continue
-
-            if state.tool_calls >= self._limits.max_tool_calls:
-                raise BudgetExceeded("maximum tool calls exceeded")
-            call_fingerprint = canonical_fingerprint(
-                domain="harness-tool-call",
-                value={"tool_id": action.tool_id, "arguments": action.arguments},
-            )
-            if call_fingerprint == previous_call_fingerprint:
-                repeated_calls += 1
-            else:
-                repeated_calls = 1
-            if repeated_calls > self._limits.repeated_call_limit:
-                raise LoopDetected("same tool and arguments repeated without progress")
-            previous_call_fingerprint = call_fingerprint
-
-            self._guard_time(started_at)
-            tool_call_id = self._tool_call_id_factory()
-            if before_tool_call is not None:
-                await before_tool_call(action, tool_call_id)
-            result = await self._tool_executor.execute(
-                tool_call_id=tool_call_id,
-                tool_id=action.tool_id,
-                raw_arguments=action.arguments,
-                auth_context=auth_context,
-            )
-            if after_tool_call is not None:
-                await after_tool_call(result)
-            failures = (
-                state.consecutive_failures + 1 if result.status == "failed" else 0
-            )
-            observation_fingerprint = canonical_fingerprint(
-                domain="harness-tool-observation",
-                value=result.model_dump(mode="json", exclude={"tool_call_id"}),
-            )
-            no_progress = (
-                state.no_progress_count + 1
-                if observation_fingerprint == previous_observation_fingerprint
-                else 0
-            )
-            previous_observation_fingerprint = observation_fingerprint
-            state = replace(
-                state,
-                tool_calls=state.tool_calls + 1,
-                consecutive_failures=failures,
-                no_progress_count=no_progress,
-                tool_results=(*state.tool_results, result),
-            )
-            if failures >= self._limits.max_consecutive_failures:
-                raise BudgetExceeded(
-                    "maximum consecutive tool failures exceeded",
-                    root_cause_code=(
-                        result.warnings[0] if result.warnings else "tool_failed"
-                    ),
-                    root_cause_message=result.summary,
+                control, summary = await self.validate_once(
+                    action=action,
+                    control=control,
                 )
-            self._guard_no_progress(state)
+                if summary is not None:
+                    return HarnessResult(summary=summary, state=control.state)
+                continue
+            execution = await self.authorize_and_execute_once(
+                action=action,
+                auth_context=auth_context,
+                control=control,
+                before_tool_call=before_tool_call,
+                after_tool_call=after_tool_call,
+            )
+            control = self.observe_once(execution=execution, control=control)
+            control, _summary = await self.validate_once(
+                action=action,
+                control=control,
+            )
 
     def _guard_time(self, started_at: float) -> None:
-        if self._clock() - started_at >= self._limits.max_elapsed_seconds:
+        elapsed = self._clock() - started_at
+        if elapsed < 0:
+            raise BudgetExceeded("clock moved backwards during run")
+        if elapsed >= self._limits.max_elapsed_seconds:
             raise BudgetExceeded("maximum elapsed time exceeded")
 
     def _guard_no_progress(self, state: HarnessState) -> None:

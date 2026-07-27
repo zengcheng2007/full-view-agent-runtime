@@ -36,6 +36,10 @@ async def test_run_admission_builds_and_stores_immutable_auth_context() -> None:
     assert stored == auth_context
     assert auth_context.credential_ref.startswith("cred_")
     assert "governance.population.aggregate.read" in auth_context.entitlements
+    assert "governance.housing.aggregate.read" in auth_context.entitlements
+    assert "governance.event.aggregate.read" in auth_context.entitlements
+    assert "housing" in auth_context.data_scopes.datasets
+    assert "event" in auth_context.data_scopes.datasets
     assert auth_context.data_scopes.areas[0].area_code == "330106"
     assert "admission-token-user-01" not in auth_context.model_dump_json()
     with pytest.raises(ValidationError):
@@ -76,6 +80,10 @@ async def test_run_admission_uses_explicit_p0_user_allowlist_not_numeric_role_me
     )
 
     assert "governance.population.aggregate.read" in auth_context.entitlements
+    assert "governance.housing.aggregate.read" in auth_context.entitlements
+    assert "governance.event.aggregate.read" in auth_context.entitlements
+    assert "housing" in auth_context.data_scopes.datasets
+    assert "event" in auth_context.data_scopes.datasets
     assert auth_context.data_scopes.areas[0].area_code == "330106"
 
 

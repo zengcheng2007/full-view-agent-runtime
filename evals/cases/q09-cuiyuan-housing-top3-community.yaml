@@ -1,6 +1,6 @@
 schema_version: "1.0"
 case_id: q09-cuiyuan-housing-top3-community
-description: "Q09/S2: 哪三个社区出租房最多（排序、结论与证据）"
+description: "Q09/S2: 哪三个社区出租房最多（下级区划分组后在已验证结果上排序）"
 user_message: 哪三个社区出租房最多？
 auth:
   area_codes: ["3301"]
@@ -12,13 +12,19 @@ model_steps:
     arguments:
       query: 翠苑街道
       context_area_code: "330106"
+  - type: tool_call
+    tool_id: governance.query_housing_metrics
+    arguments:
+      query:
+        scope: {area_code: "330106001", include_descendants: true}
+        group_by: [next_area]
   - type: finish
-    content: 当前数据源不支持社区级出租房明细，因此不能可靠给出前三个社区。
+    content: 已基于按社区汇总结果排序，得出出租房最多的三个社区。
 expected:
   terminal_status: completed
   outcome: success
   completion_reason_code: goal_completed
-  tool_ids: [governance.resolve_area]
-  min_evidence_count: 0
-  required_event_types: [tool.completed, result.available, run.completed]
-  required_answer_substrings: [不支持]
+  tool_ids: [governance.resolve_area, governance.query_housing_metrics]
+  min_evidence_count: 2
+  required_event_types: [tool.completed, result.available, evidence.available, run.completed]
+  required_answer_substrings: [社区]

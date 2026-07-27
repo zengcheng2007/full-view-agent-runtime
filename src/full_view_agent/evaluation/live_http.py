@@ -1,6 +1,6 @@
 import os
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 
 from pydantic import Field, SecretStr
 from pydantic_settings import BaseSettings, SettingsConfigDict
@@ -24,7 +24,11 @@ class LiveHttpEvalSettings(BaseSettings):
     p0_allowed_user_ids: str = ""
 
 
-def build_live_http_eval_runner(env_file: Path) -> EvalRunner:
+def build_live_http_eval_runner(
+    env_file: Path,
+    *,
+    orchestrator: Literal["native", "langgraph"] = "native",
+) -> EvalRunner:
     token = os.environ.get("FULL_VIEW_EVAL_GEO_TOKEN", "").strip()
     if not token:
         raise RuntimeError(
@@ -52,4 +56,8 @@ def build_live_http_eval_runner(env_file: Path) -> EvalRunner:
         governance_base_url=settings.governance_base_url,
         p0_allowed_user_ids=allowed_user_ids,
     )
-    return build_live_eval_runner(env_file, environment=environment)
+    return build_live_eval_runner(
+        env_file,
+        environment=environment,
+        orchestrator=orchestrator,
+    )

@@ -1,5 +1,5 @@
 from datetime import UTC, datetime
-from typing import Protocol
+from typing import Literal, Protocol
 
 from full_view_agent.application.capability_service import CapabilityService, ToolAdapter
 from full_view_agent.application.context_builder import AgentContextBuilder
@@ -24,6 +24,9 @@ from full_view_agent.evaluation.recording_provider import RecordingModelProvider
 from full_view_agent.evaluation.scripted_provider import ScriptedModelProvider
 from full_view_agent.infrastructure.event_broker import InMemoryEventBroker
 from full_view_agent.infrastructure.governance_adapter import InMemoryGovernanceAdapter
+from full_view_agent.infrastructure.langgraph_orchestrator import (
+    LangGraphOrchestrator,
+)
 from full_view_agent.infrastructure.memory_store import InMemoryAgentStore
 
 
@@ -95,12 +98,14 @@ class EvalRunner:
         model_name: str = "scripted",
         max_total_tokens: int = 32_000,
         environment: EvalEnvironment | None = None,
+        orchestrator: Literal["native", "langgraph"] = "native",
     ) -> None:
         self._provider = provider
         self._model_provider = model_provider
         self._model_name = model_name
         self._max_total_tokens = max_total_tokens
         self._environment = environment
+        self._orchestrator = orchestrator
 
     async def run(self, case: EvalCase) -> EvalTrace:
         return await self._run(case)
@@ -183,7 +188,12 @@ class EvalRunner:
             adapter=adapter,
             auth_context_refresher=_NoopRefresher(),
         )
-        executor = NativeOrchestrator(
+        orchestrator_type = (
+            NativeOrchestrator
+            if self._orchestrator == "native"
+            else LangGraphOrchestrator
+        )
+        executor = orchestrator_type(
             service=service,
             store=store,
             events=events,
@@ -234,7 +244,11 @@ class EvalRunner:
             model_requests=[
                 EvalModelRequestRecord(
                     messages=[
-                        EvalMessageRecord(role=message.role, content=message.content)
+                        EvalMessageRecord(
+                            role=message.role,
+                            content=message.content,
+                            tool_call_id=message.tool_call_id,
+                        )
                         for message in request.messages
                     ],
                     tool_ids=[tool.tool_id for tool in request.tools],

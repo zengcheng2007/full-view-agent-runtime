@@ -1,0 +1,24 @@
+schema_version: "1.0"
+case_id: q26-housing-city-wide-by-district
+description: "Q26: 全市按区县汇总出租房（市级经 city_code 列走通用下级聚合端点，成功）"
+user_message: 杭州全市按区县汇总出租房分布。
+auth:
+  area_codes: ["3301"]
+  datasets: [administrative_area, housing]
+  entitlements: [governance.area.read, governance.housing.aggregate.read]
+model_steps:
+  - type: tool_call
+    tool_id: governance.query_housing_metrics
+    arguments:
+      query:
+        scope: {area_code: "3301", include_descendants: true}
+        group_by: [next_area]
+  - type: finish
+    content: 杭州全市出租房按区县分布已汇总，可展示各区县数量表格。
+expected:
+  terminal_status: completed
+  outcome: success
+  completion_reason_code: goal_completed
+  tool_ids: [governance.query_housing_metrics]
+  min_evidence_count: 1
+  required_event_types: [tool.completed, result.available, evidence.available, run.completed]

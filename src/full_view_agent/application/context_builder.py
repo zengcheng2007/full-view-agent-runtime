@@ -1,9 +1,11 @@
 import json
 
+from full_view_agent.application.errors import ResourceNotFound
 from full_view_agent.application.harness import HarnessState
 from full_view_agent.application.model_provider import (
     ModelMessage,
     ModelRequest,
+    ModelToolCall,
     ModelToolDefinition,
 )
 from full_view_agent.application.ports import AgentStore
@@ -22,6 +24,7 @@ NON_RETRYABLE_TOOL_WARNINGS = {
 
 MAX_CONTEXT_MESSAGES = 20
 MAX_CONTEXT_CHARS = 8_000
+MAX_OBSERVATION_ROWS = 20
 SUMMARY_MARKER = "[会话摘要]"
 
 
@@ -57,10 +60,22 @@ class AgentContextBuilder:
             "datasets": auth_context.data_scopes.datasets,
             "entitlements": auth_context.entitlements,
         }
+        entitlements = set(auth_context.entitlements)
+        datasets = set(auth_context.data_scopes.datasets)
+        # 提示词能力清单与模型可选 Tool 共用同一授权过滤条件，
+        # 保证提示词不宣称未注册或未授权的 Tool。
+        authorized_tool_ids = tuple(
+            tool_id
+            for tool_id in self._registry.list_tool_ids()
+            if self._is_tool_authorized(tool_id, entitlements, datasets)
+        )
         messages = [
             ModelMessage(
                 role="system",
-                content=build_full_view_system_prompt(authorization),
+                content=build_full_view_system_prompt(
+                    authorization,
+                    tool_ids=authorized_tool_ids,
+                ),
             )
         ]
         session_messages = await self._store.list_messages(
@@ -70,46 +85,93 @@ class AgentContextBuilder:
         messages.extend(
             _format_messages(session_messages, self._max_messages, self._max_chars)
         )
-        if state.tool_results:
-            observations = []
-            for result in state.tool_results:
-                obs: dict[str, object] = {
-                    "tool_id": result.tool_id,
-                    "status": result.status,
-                    "summary": result.summary,
-                    "warnings": result.warnings,
-                    "evidence_ids": result.evidence_ids,
-                }
-                if result.data_result is not None:
-                    data_ref: dict[str, object] = {
-                        "result_id": result.data_result.result_id,
-                        "kind": result.data_result.kind,
-                    }
-                    row_count = getattr(result.data_result, "row_count", None)
-                    if row_count is not None:
-                        data_ref["row_count"] = row_count
-                    # Include sample rows (up to 5) so the model can answer
-                    # specific questions without needing another tool call.
-                    rows = getattr(result.data_result, "rows", None)
-                    if isinstance(rows, list) and rows:
-                        sample = rows[:5]
-                        data_ref["sample_rows"] = [
-                            row.model_dump(mode="json") if hasattr(row, "model_dump") else row
-                            for row in sample
-                        ]
-                        if len(rows) > 5:
-                            data_ref["truncated"] = True
-                    obs["data_result"] = data_ref
-                observations.append(obs)
-            messages.append(
-                ModelMessage(
-                    role="system",
-                    content=(
-                        "已验证的 Tool 观察（只能基于这些结果继续或完成）："
-                        + json.dumps(observations, ensure_ascii=False, sort_keys=True)
-                    ),
+        if state.inherited_result_ids:
+            inherited_observations: list[dict[str, object]] = []
+            for result_id in state.inherited_result_ids:
+                try:
+                    result = await self._store.get_result(
+                        user_id=user_id,
+                        result_id=result_id,
+                    )
+                except ResourceNotFound:
+                    continue
+                if getattr(result, "payload_status", "available") != "available":
+                    continue
+                inherited_observations.append(
+                    _build_inherited_result_observation(result)
                 )
-            )
+            if inherited_observations:
+                messages.append(
+                    ModelMessage(
+                        role="system",
+                        content=(
+                            "会话中已验证且仍可用的历史结果（可用于本轮排序、筛选、"
+                            "解释或展示，不得超出这些数据）："
+                            + json.dumps(
+                                inherited_observations,
+                                ensure_ascii=False,
+                                sort_keys=True,
+                            )
+                        ),
+                    )
+                )
+        if state.tool_results:
+            if state.tool_actions:
+                # Standard OpenAI format: assistant(tool_calls) + tool(result)
+                # Use real tool_call_ids so IDs match between
+                # assistant tool_calls and tool messages.
+                # A tool result must immediately follow the assistant message
+                # which requested it. Combining several sequential turns into
+                # one assistant message makes the OpenAI tool-call transcript
+                # invalid and breaks later planning turns.
+                for i, result in enumerate(state.tool_results):
+                    tc_id = (
+                        state.tool_call_ids[i]
+                        if i < len(state.tool_call_ids)
+                        else f"call_{i}"
+                    )
+                    if i < len(state.tool_actions):
+                        action = state.tool_actions[i]
+                        messages.append(
+                            ModelMessage(
+                                role="assistant",
+                                content=None,
+                                tool_calls=(
+                                    ModelToolCall(
+                                        tool_id=action.tool_id,
+                                        arguments=action.arguments,
+                                        call_id=tc_id,
+                                    ),
+                                ),
+                            )
+                        )
+                    obs = _build_observation(result)
+                    messages.append(
+                        ModelMessage(
+                            role="tool",
+                            tool_call_id=tc_id,
+                            content=json.dumps(
+                                obs, ensure_ascii=False, sort_keys=True,
+                            ),
+                        )
+                    )
+            else:
+                # Fallback for states without tool_actions (e.g. tests)
+                observations = [
+                    _build_observation(r) for r in state.tool_results
+                ]
+                messages.append(
+                    ModelMessage(
+                        role="system",
+                        content=(
+                            "已验证的 Tool 观察（只能基于这些结果继续或完成）："
+                            + json.dumps(
+                                observations, ensure_ascii=False,
+                                sort_keys=True,
+                            )
+                        ),
+                    )
+                )
 
         entitlements = set(auth_context.entitlements)
         datasets = set(auth_context.data_scopes.datasets)
@@ -126,12 +188,7 @@ class AgentContextBuilder:
         for tool_id in self._registry.list_tool_ids():
             if tool_id in terminal_tool_ids:
                 continue
-            manifest = self._registry.get_manifest(tool_id)
-            if manifest.status != "active":
-                continue
-            if not set(manifest.required_permissions).issubset(entitlements):
-                continue
-            if manifest.dataset_id not in datasets:
+            if not self._is_tool_authorized(tool_id, entitlements, datasets):
                 continue
             descriptor = self._registry.get_model_descriptor(tool_id)
             tools.append(
@@ -146,6 +203,89 @@ class AgentContextBuilder:
             tools=tuple(tools),
             prompt_version=FULL_VIEW_SYSTEM_PROMPT_VERSION,
         )
+
+    def _is_tool_authorized(
+        self,
+        tool_id: str,
+        entitlements: set[str],
+        datasets: set[str],
+    ) -> bool:
+        manifest = self._registry.get_manifest(tool_id)
+        if manifest.status != "active":
+            return False
+        if not set(manifest.required_permissions).issubset(entitlements):
+            return False
+        return manifest.dataset_id in datasets
+
+
+def _build_observation(result: object) -> dict[str, object]:
+    """Build a sanitized observation dict from a ToolResult."""
+    obs: dict[str, object] = {
+        "tool_id": result.tool_id,  # type: ignore[attr-defined]
+        "status": result.status,  # type: ignore[attr-defined]
+        "summary": result.summary,  # type: ignore[attr-defined]
+        "warnings": result.warnings,  # type: ignore[attr-defined]
+    }
+    data_result = result.data_result  # type: ignore[attr-defined]
+    if data_result is not None:
+        data_ref: dict[str, object] = {
+            "result_id": data_result.result_id,
+            "kind": data_result.kind,
+        }
+        row_count = getattr(data_result, "row_count", None)
+        if row_count is not None:
+            data_ref["row_count"] = row_count
+        result_data = getattr(data_result, "data", None)
+        rows = getattr(result_data, "rows", None)
+        if isinstance(rows, list) and rows:
+            sample = rows[:MAX_OBSERVATION_ROWS]
+            data_ref["sample_rows"] = [
+                row.model_dump(mode="json")
+                if hasattr(row, "model_dump")
+                else row
+                for row in sample
+            ]
+            if len(rows) > MAX_OBSERVATION_ROWS:
+                data_ref["truncated"] = True
+        if data_result.kind == "area_candidates":
+            area_data = data_result.data
+            data_ref["resolved_area_code"] = area_data.resolved_area_code
+            data_ref["ambiguous"] = area_data.ambiguous
+            data_ref["candidate_count"] = data_result.candidate_count
+            data_ref["candidates"] = [
+                {
+                    "area_code": candidate.area_code,
+                    "area_name": candidate.area_name,
+                    "level": candidate.level,
+                    "parent_area_code": candidate.parent_area_code,
+                }
+                for candidate in area_data.candidates
+            ]
+        obs["data_result"] = data_ref
+    return obs
+
+
+def _build_inherited_result_observation(result: object) -> dict[str, object]:
+    observation: dict[str, object] = {
+        "result_id": result.result_id,  # type: ignore[attr-defined]
+        "kind": result.kind,  # type: ignore[attr-defined]
+        "data_schema_ref": result.data_schema_ref,  # type: ignore[attr-defined]
+    }
+    row_count = getattr(result, "row_count", None)
+    if row_count is not None:
+        observation["row_count"] = row_count
+    data = getattr(result, "data", None)
+    rows = getattr(data, "rows", None)
+    if isinstance(rows, list):
+        observation["rows"] = [
+            row.model_dump(mode="json") if hasattr(row, "model_dump") else row
+            for row in rows[:MAX_OBSERVATION_ROWS]
+        ]
+        if len(rows) > MAX_OBSERVATION_ROWS:
+            observation["truncated"] = True
+    elif data is not None and hasattr(data, "model_dump"):
+        observation["data"] = data.model_dump(mode="json")
+    return observation
 
 
 def _format_messages(
@@ -174,15 +314,16 @@ def _format_messages(
 
     if latest_user_idx is not None:
         latest = formatted[latest_user_idx]
-        if len(latest.content) > effective_budget:
+        latest_text = latest.content or ""
+        if len(latest_text) > effective_budget:
             formatted[latest_user_idx] = ModelMessage(
                 role=latest.role,
-                content=latest.content[:effective_budget] + truncation_suffix,
+                content=latest_text[:effective_budget] + truncation_suffix,
             )
 
     # Trim from the front, but never remove the latest user message.
     while len(formatted) > max_messages or (
-        sum(len(m.content) for m in formatted) > effective_budget
+        sum(len(m.content or "") for m in formatted) > effective_budget
         and len(formatted) > 1
     ):
         pop_idx = 0
@@ -207,18 +348,19 @@ def _format_messages(
         result = formatted
 
     # Enforce final budget: total characters including summary must not exceed max_chars.
-    total_chars = sum(len(m.content) for m in result)
+    total_chars = sum(len(m.content or "") for m in result)
     if total_chars > max_chars:
         # Trim from the oldest non-summary, non-latest-user message
         while total_chars > max_chars and len(result) > 2:
             victim = next(
                 (i for i, m in enumerate(result)
-                 if m.role != "system" or SUMMARY_MARKER not in m.content),
+                 if m.role != "system"
+                 or SUMMARY_MARKER not in (m.content or "")),
                 None,
             )
             if victim is None or victim == len(result) - 1:
                 break
-            total_chars -= len(result[victim].content)
+            total_chars -= len(result[victim].content or "")
             result.pop(victim)
 
     return result

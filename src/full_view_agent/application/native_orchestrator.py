@@ -22,6 +22,7 @@ from full_view_agent.application.errors import (
     ModelProviderTimeout,
     ModelProviderUnavailable,
     ReauthenticationRequired,
+    ResourceNotFound,
 )
 from full_view_agent.application.fingerprints import canonical_fingerprint
 from full_view_agent.application.harness import (
@@ -191,6 +192,13 @@ class NativeOrchestrator(OrchestrationPort):
             user_id=user_id,
             run_id=run_id,
         )
+        inherited_result_ids, inherited_evidence_ids = (
+            await self._load_inherited_grounding(
+                user_id=user_id,
+                session_id=running.session_id,
+                current_run_id=run_id,
+            )
+        )
         tool_actions: dict[str, ToolAction] = {}
 
         async def before_tool_call(action: ToolAction, tool_call_id: str) -> None:
@@ -220,11 +228,16 @@ class NativeOrchestrator(OrchestrationPort):
                 if self._planner_factory is not None
                 else PopulationQueryPlanner()
             )
-            harness_result = await self._harness.run(
+            harness_result = await self._run_harness(
+                user_id=user_id,
+                run_id=run_id,
+                session_id=running.session_id,
                 planner=planner,
                 auth_context=auth_context,
                 before_tool_call=before_tool_call,
                 after_tool_call=after_tool_call,
+                inherited_result_ids=inherited_result_ids,
+                inherited_evidence_ids=inherited_evidence_ids,
             )
         except ReauthenticationRequired:
             waiting, input_request = await self._service.wait_for_reauthentication(
@@ -284,14 +297,31 @@ class NativeOrchestrator(OrchestrationPort):
         current = await self._store.get_run(user_id=user_id, run_id=run_id)
         if current.status != "running":
             return
+        # LangGraph recovery may resume after the tool node in a fresh process.
+        # Rebuild this transient lookup from checkpointed Harness state so that
+        # durable observations never require repeating a completed Tool call.
+        tool_actions.update(
+            zip(
+                harness_result.state.tool_call_ids,
+                harness_result.state.tool_actions,
+                strict=True,
+            )
+        )
         tool_results = list(harness_result.state.tool_results)
         if not tool_results:
             await self._complete_success(
                 user_id=user_id,
                 run=running,
                 summary=harness_result.summary,
-                result_references=[],
-                evidence_ids=[],
+                result_references=[
+                    ResultReferenceContent(
+                        type="result_reference",
+                        result_id=result_id,
+                        label="沿用会话中已验证的结果",
+                    )
+                    for result_id in harness_result.state.inherited_result_ids
+                ],
+                evidence_ids=list(harness_result.state.inherited_evidence_ids),
                 warning_count=0,
             )
             return
@@ -368,6 +398,86 @@ class NativeOrchestrator(OrchestrationPort):
             evidence_ids=evidence_ids,
             warning_count=sum(len(result.warnings) for result in tool_results),
         )
+
+    async def _run_harness(
+        self,
+        *,
+        user_id: str,
+        run_id: str,
+        session_id: str,
+        planner: Planner,
+        auth_context: AuthContext,
+        before_tool_call,
+        after_tool_call,
+        inherited_result_ids: tuple[str, ...] = (),
+        inherited_evidence_ids: tuple[str, ...] = (),
+    ):
+        """Native fallback: the Harness owns the loop directly."""
+        del user_id, run_id, session_id
+        return await self._harness.run(
+            planner=planner,
+            auth_context=auth_context,
+            before_tool_call=before_tool_call,
+            after_tool_call=after_tool_call,
+            inherited_result_ids=inherited_result_ids,
+            inherited_evidence_ids=inherited_evidence_ids,
+        )
+
+    async def _load_inherited_grounding(
+        self,
+        *,
+        user_id: str,
+        session_id: str,
+        current_run_id: str,
+    ) -> tuple[tuple[str, ...], tuple[str, ...]]:
+        """Reload prior result/evidence references through the owned store.
+
+        Historical assistant prose alone is never treated as trusted data.
+        A follow-up inherits grounding only when both the referenced result
+        payload and its evidence still exist for the same session owner.
+        """
+        result_ids: list[str] = []
+        evidence_ids: list[str] = []
+        messages = await self._store.list_messages(
+            user_id=user_id,
+            session_id=session_id,
+        )
+        for message in messages:
+            if (
+                message.role != "assistant"
+                or message.run_id == current_run_id
+                or not message.evidence_ids
+            ):
+                continue
+            referenced_ids = [
+                item.result_id
+                for item in message.content
+                if isinstance(item, ResultReferenceContent)
+            ]
+            if not referenced_ids:
+                continue
+            valid_results: list[str] = []
+            valid_evidence: list[str] = []
+            try:
+                for result_id in referenced_ids:
+                    result = await self._store.get_result(
+                        user_id=user_id,
+                        result_id=result_id,
+                    )
+                    if getattr(result, "payload_status", "available") == "available":
+                        valid_results.append(result_id)
+                for evidence_id in message.evidence_ids:
+                    await self._store.get_evidence(
+                        user_id=user_id,
+                        evidence_id=evidence_id,
+                    )
+                    valid_evidence.append(evidence_id)
+            except ResourceNotFound:
+                continue
+            if valid_results and valid_evidence:
+                result_ids.extend(valid_results)
+                evidence_ids.extend(valid_evidence)
+        return tuple(dict.fromkeys(result_ids)), tuple(dict.fromkeys(evidence_ids))
 
     async def _persist_tool_observation(
         self,
@@ -714,4 +824,3 @@ def _action_area_codes(action: ToolAction) -> list[str]:
 
 class MockRunExecutor(NativeOrchestrator):
     """Deprecated alias for transition. Use NativeOrchestrator."""
-

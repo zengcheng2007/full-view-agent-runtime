@@ -117,6 +117,7 @@ class QueryPopulationMetricsInput(ContractModel):
 class HousingMetricQuerySpec(ContractModel):
     schema_version: Literal["1.1"] = "1.1"
     scope: MetricQueryScope
+    group_by: list[Literal["next_area"]] = Field(default_factory=list, max_length=1)
     limit: int = Field(default=200, ge=1, le=1000)
 
 
@@ -556,6 +557,16 @@ class HousingLeaseTypeTable(ContractModel):
     rows: list[HousingLeaseTypeRow]
 
 
+class HousingAreaGroupRow(ContractModel):
+    area_code: str = Field(min_length=1, max_length=32)
+    area_name: str = Field(min_length=1, max_length=200)
+    dwelling_count: int = Field(ge=0)
+
+
+class HousingAreaGroupTable(ContractModel):
+    rows: list[HousingAreaGroupRow]
+
+
 class EventFinishRateRow(ContractModel):
     level: Literal["grid", "community", "street"]
     finish_rate: float = Field(ge=0, le=100)
@@ -577,7 +588,12 @@ class TableDataResult(ContractModel):
     )
     evidence_ids: list[str] = Field(default_factory=list)
     inline: bool = True
-    data: PopulationMetricTable | HousingLeaseTypeTable | EventFinishRateTable
+    data: (
+        PopulationMetricTable
+        | HousingLeaseTypeTable
+        | HousingAreaGroupTable
+        | EventFinishRateTable
+    )
     row_count: int = Field(ge=0)
     truncated: bool = False
 

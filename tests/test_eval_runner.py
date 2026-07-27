@@ -112,6 +112,23 @@ async def test_eval_runner_executes_real_runtime_components_and_grades_success()
 
 
 @pytest.mark.asyncio
+async def test_eval_runner_can_compare_native_and_langgraph_semantics() -> None:
+    native = await EvalRunner(orchestrator="native").run(population_case())
+    langgraph = await EvalRunner(orchestrator="langgraph").run(population_case())
+
+    assert native.passed is True
+    assert langgraph.passed is True
+    assert langgraph.terminal_status == native.terminal_status
+    assert langgraph.outcome == native.outcome
+    assert langgraph.completion_reason_code == native.completion_reason_code
+    assert langgraph.tool_ids == native.tool_ids
+    assert langgraph.event_types == native.event_types
+    assert [grade.model_dump() for grade in langgraph.grades] == [
+        grade.model_dump() for grade in native.grades
+    ]
+
+
+@pytest.mark.asyncio
 async def test_eval_runner_records_live_provider_steps_and_version_metadata() -> None:
     provider = TwoStepLiveModelProvider()
     runner = EvalRunner(
@@ -125,10 +142,16 @@ async def test_eval_runner_records_live_provider_steps_and_version_metadata() ->
     assert trace.passed is True
     assert trace.model_provider == "openai_compatible"
     assert trace.model_name == "qwen-live-test"
-    assert trace.prompt_version == "full-view-governance-readonly-v6"
+    assert trace.prompt_version == "full-view-governance-readonly-v9"
     assert [step.type for step in trace.model_steps] == ["tool_call", "finish"]
     assert trace.total_tokens == 210
     assert provider.call_count == 2
+    tool_messages = [
+        message for message in trace.model_requests[1].messages if message.role == "tool"
+    ]
+    assert len(tool_messages) == 1
+    assert tool_messages[0].tool_call_id is not None
+    assert tool_messages[0].tool_call_id.startswith("tcl_")
 
 
 @pytest.mark.asyncio

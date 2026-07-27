@@ -35,10 +35,14 @@ def _kwargs(**overrides: object) -> dict:
     return base
 
 
-def test_default_is_native(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_default_is_langgraph_after_r3_gate(monkeypatch: pytest.MonkeyPatch) -> None:
+    from full_view_agent.infrastructure.langgraph_orchestrator import (
+        LangGraphOrchestrator,
+    )
+
     monkeypatch.delenv("FULL_VIEW_ORCHESTRATOR", raising=False)
     orch = create_orchestrator(**_kwargs())
-    assert isinstance(orch, OrchestrationPort)
+    assert isinstance(orch, LangGraphOrchestrator)
 
 
 def test_explicit_native(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -47,10 +51,48 @@ def test_explicit_native(monkeypatch: pytest.MonkeyPatch) -> None:
     assert isinstance(orch, OrchestrationPort)
 
 
-def test_langgraph_raises(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_langgraph_selects_langgraph_orchestrator(monkeypatch: pytest.MonkeyPatch) -> None:
+    from full_view_agent.infrastructure.langgraph_orchestrator import (
+        LangGraphOrchestrator,
+    )
+
     monkeypatch.setenv("FULL_VIEW_ORCHESTRATOR", "langgraph")
-    with pytest.raises(RuntimeError, match="reserved for R2"):
-        create_orchestrator(**_kwargs())
+    orch = create_orchestrator(**_kwargs())
+    assert isinstance(orch, LangGraphOrchestrator)
+
+
+def test_langgraph_uses_postgres_checkpoint_dependencies_when_configured(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from full_view_agent.infrastructure.checkpoint_mapping_store import (
+        PostgresCheckpointMappingStore,
+    )
+    from full_view_agent.infrastructure.langgraph_checkpoint import (
+        LangGraphPostgresCheckpointManager,
+    )
+
+    monkeypatch.setenv("FULL_VIEW_ORCHESTRATOR", "langgraph")
+    monkeypatch.setenv(
+        "FULL_VIEW_DATABASE_URL",
+        "postgresql://agent:secret@database/agent",
+    )
+    monkeypatch.setenv("FULL_VIEW_POSTGRES_SCHEMA", "product_schema")
+    monkeypatch.setenv(
+        "FULL_VIEW_LANGGRAPH_POSTGRES_SCHEMA",
+        "framework_schema",
+    )
+
+    orch = create_orchestrator(**_kwargs())
+
+    assert isinstance(
+        orch._checkpoint_manager,  # noqa: SLF001
+        LangGraphPostgresCheckpointManager,
+    )
+    assert orch._checkpoint_manager.schema == "framework_schema"  # noqa: SLF001
+    assert isinstance(
+        orch._checkpoint_mappings,  # noqa: SLF001
+        PostgresCheckpointMappingStore,
+    )
 
 
 def test_unknown_value_raises(monkeypatch: pytest.MonkeyPatch) -> None:

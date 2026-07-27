@@ -1,11 +1,15 @@
+from __future__ import annotations
+
 from dataclasses import dataclass
 from typing import Literal, Protocol
 
 
 @dataclass(frozen=True)
 class ModelMessage:
-    role: Literal["system", "user", "assistant"]
-    content: str
+    role: Literal["system", "user", "assistant", "tool"]
+    content: str | None = None
+    tool_call_id: str | None = None
+    tool_calls: tuple[ModelToolCall, ...] | None = None
 
 
 @dataclass(frozen=True)
@@ -27,6 +31,7 @@ class ModelRequest:
 class ModelToolCall:
     tool_id: str
     arguments: dict[str, object]
+    call_id: str | None = None
 
 
 @dataclass(frozen=True)

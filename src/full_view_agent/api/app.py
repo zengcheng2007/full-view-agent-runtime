@@ -65,6 +65,7 @@ from full_view_agent.domain.models import (
     EventFinishRateRow,
     Evidence,
     FrontendCommandReceipt,
+    HousingAreaGroupRow,
     HousingLeaseTypeRow,
     LegacyIdentitySnapshot,
     PopulationMetricRow,
@@ -169,7 +170,12 @@ class SessionListResponse(ContractModel):
 
 
 class ResultItemsResponse(ContractModel):
-    data: list[PopulationMetricRow | HousingLeaseTypeRow | EventFinishRateRow]
+    data: list[
+        PopulationMetricRow
+        | HousingLeaseTypeRow
+        | HousingAreaGroupRow
+        | EventFinishRateRow
+    ]
     meta: CursorPageMeta
 
 
@@ -387,6 +393,8 @@ class RuntimeContainer:
             self.tool_registry = self.tool_registry.subset(
                 {
                     "governance.resolve_area",
+                    "governance.query_event_metrics",
+                    "governance.query_housing_metrics",
                     "governance.query_population_metrics",
                 }
             )

@@ -1,7 +1,9 @@
 import argparse
 import asyncio
 from pathlib import Path
+from typing import Literal
 
+from full_view_agent.evaluation.differential import run_differential_suite
 from full_view_agent.evaluation.live import build_live_eval_runner
 from full_view_agent.evaluation.live_http import build_live_http_eval_runner
 from full_view_agent.evaluation.loader import (
@@ -23,12 +25,20 @@ def main(argv: list[str] | None = None) -> int:
                 output_dir=arguments.output,
             )
         )
+    if arguments.command == "run-differential":
+        return asyncio.run(
+            _run_differential(
+                cases_dir=arguments.cases,
+                output_dir=arguments.output,
+            )
+        )
     if arguments.command == "run-live":
         return asyncio.run(
             _run_live(
                 case_path=arguments.case,
                 output_path=arguments.output,
                 env_file=arguments.env_file,
+                orchestrator=arguments.orchestrator,
             )
         )
     if arguments.command == "run-live-http":
@@ -37,6 +47,7 @@ def main(argv: list[str] | None = None) -> int:
                 case_path=arguments.case,
                 output_path=arguments.output,
                 env_file=arguments.env_file,
+                orchestrator=arguments.orchestrator,
             )
         )
     return asyncio.run(
@@ -58,6 +69,20 @@ async def _run_suite(*, cases_dir: Path, output_dir: Path) -> int:
     return 0 if report.failed_cases == 0 else 1
 
 
+async def _run_differential(*, cases_dir: Path, output_dir: Path) -> int:
+    report = await run_differential_suite(
+        cases_dir=cases_dir,
+        output_dir=output_dir,
+    )
+    status = "PASS" if report["gate_passed"] else "FAIL"
+    print(
+        f"DIFFERENTIAL {status}: cases={report['total_cases']} "
+        f"differences={report['different_cases']} "
+        f"report={output_dir / 'differential-report.json'}"
+    )
+    return 0 if report["gate_passed"] else 1
+
+
 async def _replay(*, case_path: Path, trace_path: Path, output_path: Path) -> int:
     case = load_eval_case(case_path)
     source_trace = load_eval_trace(trace_path)
@@ -68,9 +93,18 @@ async def _replay(*, case_path: Path, trace_path: Path, output_path: Path) -> in
     return 0 if replayed.passed else 1
 
 
-async def _run_live(*, case_path: Path, output_path: Path, env_file: Path) -> int:
+async def _run_live(
+    *,
+    case_path: Path,
+    output_path: Path,
+    env_file: Path,
+    orchestrator: Literal["native", "langgraph"],
+) -> int:
     case = load_eval_case(case_path)
-    trace = await build_live_eval_runner(env_file).run(case)
+    trace = await build_live_eval_runner(
+        env_file,
+        orchestrator=orchestrator,
+    ).run(case)
     save_eval_trace(output_path, trace)
     status = "PASS" if trace.passed else "FAIL"
     print(
@@ -85,9 +119,13 @@ async def _run_live_http(
     case_path: Path,
     output_path: Path,
     env_file: Path,
+    orchestrator: Literal["native", "langgraph"],
 ) -> int:
     case = load_eval_case(case_path)
-    trace = await build_live_http_eval_runner(env_file).run(case)
+    trace = await build_live_http_eval_runner(
+        env_file,
+        orchestrator=orchestrator,
+    ).run(case)
     save_eval_trace(output_path, trace)
     status = "PASS" if trace.passed else "FAIL"
     print(
@@ -105,6 +143,13 @@ def _parser() -> argparse.ArgumentParser:
     run_parser.add_argument("--cases", type=Path, required=True)
     run_parser.add_argument("--output", type=Path, required=True)
 
+    differential_parser = subparsers.add_parser(
+        "run-differential",
+        help="run the scripted suite through Native and LangGraph and compare",
+    )
+    differential_parser.add_argument("--cases", type=Path, required=True)
+    differential_parser.add_argument("--output", type=Path, required=True)
+
     live_parser = subparsers.add_parser(
         "run-live",
         help="run one YAML case against the configured live model",
@@ -112,6 +157,11 @@ def _parser() -> argparse.ArgumentParser:
     live_parser.add_argument("--case", type=Path, required=True)
     live_parser.add_argument("--output", type=Path, required=True)
     live_parser.add_argument("--env-file", type=Path, default=Path(".env"))
+    live_parser.add_argument(
+        "--orchestrator",
+        choices=("native", "langgraph"),
+        default="native",
+    )
 
     live_http_parser = subparsers.add_parser(
         "run-live-http",
@@ -120,6 +170,11 @@ def _parser() -> argparse.ArgumentParser:
     live_http_parser.add_argument("--case", type=Path, required=True)
     live_http_parser.add_argument("--output", type=Path, required=True)
     live_http_parser.add_argument("--env-file", type=Path, default=Path(".env"))
+    live_http_parser.add_argument(
+        "--orchestrator",
+        choices=("native", "langgraph"),
+        default="native",
+    )
 
     replay_parser = subparsers.add_parser("replay", help="replay one saved trace")
     replay_parser.add_argument("--case", type=Path, required=True)

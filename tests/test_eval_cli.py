@@ -46,6 +46,29 @@ def test_eval_cli_runs_suite_and_replays_saved_trace(
     assert "REPLAY PASS" in output
 
 
+def test_eval_cli_runs_native_langgraph_differential_gate(
+    tmp_path: Path,
+    capsys,
+) -> None:
+    project_root = Path(__file__).parents[1]
+    cases_dir = project_root / "evals" / "cases"
+    output_dir = tmp_path / "differential"
+
+    exit_code = main(
+        [
+            "run-differential",
+            "--cases",
+            str(cases_dir),
+            "--output",
+            str(output_dir),
+        ]
+    )
+
+    assert exit_code == 0
+    assert (output_dir / "differential-report.json").is_file()
+    assert "DIFFERENTIAL PASS" in capsys.readouterr().out
+
+
 def test_eval_cli_runs_one_live_case_and_records_model_metadata(
     tmp_path: Path,
     monkeypatch,
@@ -62,7 +85,7 @@ def test_eval_cli_runs_one_live_case_and_records_model_metadata(
     monkeypatch.setattr(
         eval_cli,
         "build_live_eval_runner",
-        lambda env_file: runner,
+        lambda env_file, **kwargs: runner,
         raising=False,
     )
 
@@ -101,7 +124,7 @@ def test_eval_cli_runs_one_live_http_case(
     monkeypatch.setattr(
         eval_cli,
         "build_live_http_eval_runner",
-        lambda env_file: runner,
+        lambda env_file, **kwargs: runner,
         raising=False,
     )
 

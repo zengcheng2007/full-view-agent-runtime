@@ -85,8 +85,9 @@ class EvalCase(ContractModel):
 
 
 class EvalMessageRecord(ContractModel):
-    role: Literal["system", "user", "assistant"]
-    content: str
+    role: Literal["system", "user", "assistant", "tool"]
+    content: str | None = None
+    tool_call_id: str | None = None
 
 
 class EvalModelRequestRecord(ContractModel):

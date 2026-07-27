@@ -45,6 +45,8 @@ def test_runtime_selects_http_governance_adapter_only_when_explicitly_enabled(
 
     assert isinstance(runtime.governance_adapter, HttpGovernanceAdapter)
     assert runtime.tool_registry.list_tool_ids() == [
+        "governance.query_event_metrics",
+        "governance.query_housing_metrics",
         "governance.query_population_metrics",
         "governance.resolve_area",
     ]
@@ -643,8 +645,11 @@ async def test_injected_model_provider_drives_the_runtime_agent_loop() -> None:
         "查询独居老人数量" in message.content
         for message in provider.requests[0].messages
     )
-    assert provider.requests[1].messages[-1].role == "system"
-    assert "已验证的 Tool 观察" in provider.requests[1].messages[-1].content
+    # Second request includes tool results in standard OpenAI format
+    last_msgs = provider.requests[1].messages
+    tool_msgs = [m for m in last_msgs if m.role == "tool"]
+    assert len(tool_msgs) >= 1
+    assert "governance.query_population_metrics" in tool_msgs[-1].content
 
 
 @pytest.mark.asyncio
@@ -1463,6 +1468,27 @@ async def test_result_items_returns_cursor_page_for_table_payload() -> None:
     assert second_page.json()["meta"]["has_next"] is False
     assert tampered.status_code == 422
     assert tampered.json()["error"]["code"] == "validation_error"
+
+
+def test_result_items_response_accepts_housing_area_group_rows() -> None:
+    from full_view_agent.api.app import CursorPageMeta, ResultItemsResponse
+    from full_view_agent.domain.models import HousingAreaGroupRow
+
+    response = ResultItemsResponse(
+        data=[
+            HousingAreaGroupRow(
+                area_code="330106",
+                area_name="西湖区",
+                dwelling_count=100,
+            )
+        ],
+        meta=CursorPageMeta(
+            request_id="req-housing-area-items",
+            has_next=False,
+        ),
+    )
+
+    assert response.data[0].area_name == "西湖区"
 
 
 @pytest.mark.asyncio

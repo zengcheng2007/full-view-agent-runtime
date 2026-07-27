@@ -17,7 +17,9 @@
 - Run 取消和运行中追加指令（Steer）；
 - 异步 Mock Tool 执行与强类型人口指标表格结果；
 - Tool Result 保存、`result.available` 事件和按资源归属查询；
-- `resolve_area`、`query_population_metrics`、`get_object_profile` 专用输入输出契约；
+- `resolve_area`、`query_population_metrics`、`query_housing_metrics`、
+  `query_event_metrics`、`get_object_profile` 专用输入输出契约；生产 HTTP
+  当前开放区划、人口、出租房和事件办结率快照，楼栋画像仍保持不可见；
 - Tool Registry、内部 Manifest、模型 Descriptor、最小 Policy 与 Capability Service；
 - 区划范围、数据集、Tool 权限、敏感字段集和 Policy 指纹强制校验；
 - 加密 Credential Broker、吊销/过期处理和 `waiting_input/reauth` 恢复；
@@ -87,6 +89,7 @@ uv sync
 $env:FULL_VIEW_RUNTIME_PROFILE = "production"
 $env:FULL_VIEW_DATABASE_URL = "postgresql://agent_user:password@127.0.0.1:15432/agent_db"
 $env:FULL_VIEW_POSTGRES_SCHEMA = "full_view_agent"
+$env:FULL_VIEW_LANGGRAPH_POSTGRES_SCHEMA = "full_view_agent_langgraph"
 $env:FULL_VIEW_CREDENTIAL_KEY = [Convert]::ToBase64String(
   [Security.Cryptography.RandomNumberGenerator]::GetBytes(32)
 )
@@ -97,7 +100,7 @@ $env:FULL_VIEW_REDIS_URL = "redis://127.0.0.1:16379/0"
 $env:FULL_VIEW_P0_ALLOWED_USER_IDS = "replace-with-authorized-user-id"
 $env:FULL_VIEW_GOVERNANCE_ADAPTER = "http"
 $env:FULL_VIEW_GOVERNANCE_BASE_URL = "http://127.0.0.1:9666/geo-qxst"
-$env:FULL_VIEW_ORCHESTRATOR = "native"  # 编排器选择；langgraph 在 R2 前不可用，非法值 fail-fast
+$env:FULL_VIEW_ORCHESTRATOR = "langgraph"  # R3 默认；native 仅用于限时回滚
 $env:FULL_VIEW_MODEL_PROVIDER = "openai_compatible"
 $env:FULL_VIEW_MODEL_BASE_URL = "https://replace-with-model-endpoint/v1"
 $env:FULL_VIEW_MODEL_NAME = "replace-with-model-name"
@@ -198,9 +201,19 @@ uv run python scripts/run_evals.py run-live-http `
 Remove-Item Env:FULL_VIEW_EVAL_GEO_TOKEN
 ```
 
+出租房纵向切片提供两个同类用例（按租赁类型汇总、按下级区划汇总）：
+`evals/cases/planning-housing-http-success.yaml` 与
+`evals/cases/planning-housing-next-area-http-success.yaml`，
+运行方式与上面一致，只需替换 `--case` 与 `--output`。
+
+事件办结率快照的生产路径用例为
+`evals/cases/planning-event-http-success.yaml`，开放式真实模型用例为
+`evals/cases-live/open-event-finish-rate-query.yaml`。该能力仅复用原系统当前
+三层办结率，不支持时间范围、事件总量、办结数、下级区划明细或阈值筛选。
+
 真实评测 Trace 会记录模型提供方、模型名、Prompt 版本、模型动作、Token 用量和评分，
 但不会记录模型 API Key 或下游凭据。当前 System Prompt 版本为
-`full-view-governance-readonly-v4`。模型返回的对象字段若被二次编码为 JSON 字符串，
+`full-view-governance-readonly-v9`。模型返回的对象字段若被二次编码为 JSON 字符串，
 运行时只对 Schema 明确定义为对象的字段执行一次兼容解码，随后仍须通过强类型和权限校验。
 成功、部分成功或拒绝的 Tool 不会在同一 Run 中再次暴露给模型，避免模型重复执行已经终止的
 动作；`upstream_timeout`、`upstream_unavailable` 和 `upstream_contract_error` 也会在
@@ -235,6 +248,7 @@ docker run -d --name agent-runtime \
   -e FULL_VIEW_RUNTIME_PROFILE=production \
   -e FULL_VIEW_DATABASE_URL=postgresql://agent_user:password@host:15432/agent_db \
   -e FULL_VIEW_POSTGRES_SCHEMA=full_view_agent \
+  -e FULL_VIEW_LANGGRAPH_POSTGRES_SCHEMA=full_view_agent_langgraph \
   -e FULL_VIEW_CREDENTIAL_KEY=<base64-32-bytes> \
   -e FULL_VIEW_CURSOR_KEY=<base64-32-bytes> \
   -e FULL_VIEW_REDIS_URL=redis://redis:16379/0 \
@@ -252,7 +266,13 @@ docker run -d --name agent-runtime \
 
 ```bash
 psql -U agent_user -d agent_db -f scripts/migrations/V001_initial_schema.sql
+psql -U agent_user -d agent_db -f scripts/migrations/V002_checkpoint_mapping.sql
 ```
+
+`FULL_VIEW_ORCHESTRATOR=langgraph` 首次运行时会在独立
+`FULL_VIEW_LANGGRAPH_POSTGRES_SCHEMA` 中调用官方 Checkpointer 的 `setup()`；
+产品侧只通过 V002 映射表记录 Run、线程和最新 checkpoint 的关系，不读取
+LangGraph 私有表。生产数据库账号需要具备该框架 Schema 的建表权限。
 
 ## 后续实现方向
 

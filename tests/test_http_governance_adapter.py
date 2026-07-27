@@ -623,6 +623,55 @@ async def test_http_adapter_preserves_event_finish_rate_decimals() -> None:
 
 
 @pytest.mark.asyncio
+async def test_http_adapter_rejects_missing_event_finish_rate() -> None:
+    def handler(_request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            json={
+                "state": True,
+                "code": 200,
+                "msg": "",
+                "data": {
+                    "gridFinishRate": "75.5%",
+                    "communityFinishRate": "82.25%",
+                },
+            },
+        )
+
+    auth_context = _domain_auth_context(
+        entitlement="governance.event.aggregate.read",
+        dataset_id="event",
+    )
+    arguments = models.QueryEventMetricsInput.model_validate(
+        {"query": {"scope": {"area_code": "330106"}}}
+    )
+    manifest = ToolRegistry.default().get_manifest(
+        "governance.query_event_metrics"
+    )
+    policy = MinimalPolicyAdapter().evaluate(
+        manifest=manifest,
+        auth_context=auth_context,
+        arguments=arguments,
+    )
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        adapter = governance_adapter.HttpGovernanceAdapter(
+            base_url="http://legacy.test/geo-qxst",
+            credential_broker=RecordingCredentialBroker(),
+            client=client,
+        )
+        with pytest.raises(
+            errors.UpstreamContractError,
+            match="required finish rates",
+        ):
+            await adapter.execute(
+                manifest=manifest,
+                arguments=arguments,
+                policy_decision=policy,
+                auth_context=auth_context,
+            )
+
+
+@pytest.mark.asyncio
 async def test_http_adapter_maps_building_profile_and_verifies_area_binding() -> None:
     requests: list[httpx.Request] = []
 

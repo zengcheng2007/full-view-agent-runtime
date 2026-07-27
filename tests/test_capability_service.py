@@ -275,6 +275,40 @@ async def test_resolve_area_returns_only_authorized_candidates() -> None:
 
 
 @pytest.mark.asyncio
+async def test_resolve_area_returns_authorized_street_candidate() -> None:
+    from full_view_agent.application.capability_service import CapabilityService
+    from full_view_agent.infrastructure.governance_adapter import (
+        InMemoryGovernanceAdapter,
+    )
+
+    base_context = population_auth_context()
+    auth_context = base_context.model_copy(
+        update={
+            "entitlements": ["governance.area.read"],
+            "data_scopes": base_context.data_scopes.model_copy(
+                update={"datasets": ["administrative_area"]}
+            ),
+        }
+    )
+    result = await CapabilityService(
+        registry=ToolRegistry.default(),
+        policy=MinimalPolicyAdapter(),
+        adapter=InMemoryGovernanceAdapter(),
+    ).execute(
+        tool_call_id="tcl-cuiyuan-01",
+        tool_id="governance.resolve_area",
+        raw_arguments={"query": "翠苑"},
+        auth_context=auth_context,
+    )
+
+    assert result.status == "success"
+    assert result.data_result.data.resolved_area_code == "330106001"
+    assert [
+        candidate.area_code for candidate in result.data_result.data.candidates
+    ] == ["330106001"]
+
+
+@pytest.mark.asyncio
 async def test_population_metrics_adapter_returns_typed_aggregate_table() -> None:
     from full_view_agent.application.capability_service import CapabilityService
     from full_view_agent.infrastructure.governance_adapter import (

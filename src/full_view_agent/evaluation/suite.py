@@ -1,5 +1,6 @@
 from datetime import UTC, datetime
 from pathlib import Path
+from typing import Literal
 
 from full_view_agent.application.session_run_service import new_id
 from full_view_agent.evaluation.contracts import (
@@ -10,7 +11,12 @@ from full_view_agent.evaluation.loader import load_eval_case, save_eval_trace
 from full_view_agent.evaluation.runner import EvalRunner
 
 
-async def run_eval_suite(*, cases_dir: Path, output_dir: Path) -> EvalSuiteReport:
+async def run_eval_suite(
+    *,
+    cases_dir: Path,
+    output_dir: Path,
+    orchestrator: Literal["native", "langgraph"] = "native",
+) -> EvalSuiteReport:
     started_at = datetime.now(UTC)
     case_paths = sorted(cases_dir.glob("*.yaml"))
     if not case_paths:
@@ -20,7 +26,7 @@ async def run_eval_suite(*, cases_dir: Path, output_dir: Path) -> EvalSuiteRepor
     if len(case_ids) != len(set(case_ids)):
         raise ValueError("eval suite contains duplicate case_id values")
 
-    runner = EvalRunner()
+    runner = EvalRunner(orchestrator=orchestrator)
     results: list[EvalCaseReport] = []
     for case in cases:
         trace = await runner.run(case)

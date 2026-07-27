@@ -2,6 +2,7 @@ from pathlib import Path
 
 import pytest
 
+from full_view_agent.evaluation.differential import run_differential_suite
 from full_view_agent.evaluation.loader import load_eval_trace
 from full_view_agent.evaluation.suite import load_eval_suite_report, run_eval_suite
 
@@ -40,3 +41,35 @@ async def test_versioned_baseline_suite_passes_and_writes_replayable_artifacts(
         if grade.name == "tool_lifecycle_terminal_count"
     )
     assert lifecycle_grade.passed is True
+
+
+@pytest.mark.asyncio
+async def test_versioned_baseline_suite_runs_through_langgraph(
+    tmp_path: Path,
+) -> None:
+    cases_dir = Path(__file__).parents[1] / "evals" / "cases"
+
+    report = await run_eval_suite(
+        cases_dir=cases_dir,
+        output_dir=tmp_path,
+        orchestrator="langgraph",
+    )
+
+    assert report.failed_cases == 0
+    assert report.pass_at_1 == 1.0
+
+
+@pytest.mark.asyncio
+async def test_differential_suite_reports_no_native_langgraph_drift(
+    tmp_path: Path,
+) -> None:
+    cases_dir = Path(__file__).parents[1] / "evals" / "cases"
+
+    report = await run_differential_suite(
+        cases_dir=cases_dir,
+        output_dir=tmp_path,
+    )
+
+    assert report["gate_passed"] is True
+    assert report["different_cases"] == 0
+    assert (tmp_path / "differential-report.json").is_file()

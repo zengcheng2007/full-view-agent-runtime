@@ -42,6 +42,9 @@ from full_view_agent.infrastructure.event_broker import InMemoryEventBroker
 from full_view_agent.infrastructure.governance_adapter import (
     InMemoryGovernanceAdapter,
 )
+from full_view_agent.infrastructure.langgraph_orchestrator import (
+    LangGraphOrchestrator,
+)
 from full_view_agent.infrastructure.memory_store import InMemoryAgentStore
 
 from .test_policy import population_auth_context
@@ -160,13 +163,23 @@ class _SingleToolPlanner:
         )
 
 
+class _GroundedFollowupPlanner(_SingleToolPlanner):
+    async def decide(self, state: HarnessState) -> ToolAction | FinishAction:
+        if state.inherited_result_ids:
+            return FinishAction(
+                summary="北山街道 2 人，灵隐街道 1 人，已按数量降序排列。"
+            )
+        return await super().decide(state)
+
+
 # ---------------------------------------------------------------------------
 # Factory fixture – swap impl via conftest parametrization in R2
 # ---------------------------------------------------------------------------
 
 
-def _native_factory(
+def _orchestrator_factory(
     *,
+    orchestrator_type: type[NativeOrchestrator] = NativeOrchestrator,
     adapter: ToolAdapter | None = None,
     planner: object | None = None,
     harness: AgentHarness | None = None,
@@ -193,7 +206,7 @@ def _native_factory(
             del user_id, auth_context
             return self._p
 
-    orch: OrchestrationPort = NativeOrchestrator(
+    orch: OrchestrationPort = orchestrator_type(
         service=service,
         store=store,
         events=events,
@@ -206,10 +219,68 @@ def _native_factory(
     return orch, store, events
 
 
-@pytest.fixture()
-def orch_factory() -> OrchFactory:
-    """Yield the orchestrator factory.  R2: parametrize with LangGraph."""
-    return _native_factory
+def _native_factory(**kwargs: object) -> OrchFactoryResult:
+    return _orchestrator_factory(**kwargs)
+
+
+def _langgraph_factory(**kwargs: object) -> OrchFactoryResult:
+    return _orchestrator_factory(
+        orchestrator_type=LangGraphOrchestrator,
+        **kwargs,
+    )
+
+
+@pytest.mark.asyncio
+async def test_langgraph_drives_harness_one_step_at_a_time() -> None:
+    class RecordingHarness(AgentHarness):
+        def __init__(self) -> None:
+            super().__init__(
+                tool_executor=CapabilityService(
+                    registry=ToolRegistry.default(),
+                    policy=MinimalPolicyAdapter(),
+                    adapter=InMemoryGovernanceAdapter(),
+                ),
+                validator=DeterministicCompletionValidator(),
+            )
+            self.plan_calls = 0
+            self.execute_calls = 0
+            self.observe_calls = 0
+            self.validate_calls = 0
+
+        async def plan_action_once(self, **kwargs):
+            self.plan_calls += 1
+            return await super().plan_action_once(**kwargs)
+
+        async def authorize_and_execute_once(self, **kwargs):
+            self.execute_calls += 1
+            return await super().authorize_and_execute_once(**kwargs)
+
+        def observe_once(self, **kwargs):
+            self.observe_calls += 1
+            return super().observe_once(**kwargs)
+
+        async def validate_once(self, **kwargs):
+            self.validate_calls += 1
+            return await super().validate_once(**kwargs)
+
+    harness = RecordingHarness()
+    orch, store, _events = _langgraph_factory(harness=harness)
+    run_id = await _make_run(store)
+
+    await orch.execute(user_id="u", run_id=run_id)
+
+    assert harness.plan_calls == 2
+    assert harness.execute_calls == 1
+    assert harness.observe_calls == 1
+    assert harness.validate_calls == 2
+    run = await store.get_run(user_id="u", run_id=run_id)
+    assert run.status == "completed"
+
+
+@pytest.fixture(params=[_native_factory, _langgraph_factory], ids=["native", "langgraph"])
+def orch_factory(request: pytest.FixtureRequest) -> OrchFactory:
+    """Every OrchestrationPort implementation must meet the same contract."""
+    return request.param
 
 
 async def _make_run(store: InMemoryAgentStore) -> str:
@@ -219,6 +290,44 @@ async def _make_run(store: InMemoryAgentStore) -> str:
         user_id="u", session_id=s.session_id, request=run_request(),
     )
     return r.run_id
+
+
+@pytest.mark.asyncio
+async def test_followup_can_reuse_verified_session_result_without_loop(
+    orch_factory: OrchFactory,
+) -> None:
+    orch, store, events = orch_factory(planner=_GroundedFollowupPlanner())
+    service = SessionRunService(store)
+    session = await service.create_session(user_id="u", title="多轮结果复用")
+    first = await service.create_run(
+        user_id="u",
+        session_id=session.session_id,
+        request=run_request("web-msg-grounded-first"),
+    )
+    await orch.execute(user_id="u", run_id=first.run_id)
+    first_run = await store.get_run(user_id="u", run_id=first.run_id)
+    assert first_run.status == "completed"
+
+    second = await service.create_run(
+        user_id="u",
+        session_id=session.session_id,
+        request=run_request("web-msg-grounded-followup"),
+    )
+    await orch.execute(user_id="u", run_id=second.run_id)
+
+    second_run = await store.get_run(user_id="u", run_id=second.run_id)
+    assert second_run.status == "completed"
+    assert second_run.outcome == "success"
+    second_events = await events.list_events(run_id=second.run_id)
+    assert "tool.started" not in [event.type for event in second_events]
+    messages = await store.list_messages(user_id="u", session_id=session.session_id)
+    followup_answer = next(
+        message
+        for message in messages
+        if message.role == "assistant" and message.run_id == second.run_id
+    )
+    assert followup_answer.evidence_ids
+    assert any(item.type == "result_reference" for item in followup_answer.content)
 
 
 # ---------------------------------------------------------------------------

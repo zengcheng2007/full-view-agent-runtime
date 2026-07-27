@@ -137,6 +137,38 @@ async def test_harness_finishes_after_tool_planner_returns_a_valid_summary() -> 
 
 
 @pytest.mark.asyncio
+async def test_harness_exposes_one_turn_plan_control_without_executing_tool() -> None:
+    harness = AgentHarness(tool_executor=DeniedToolExecutor())
+    control, action, summary = await harness.plan_once(
+        planner=OneToolPlanner(), control=harness.begin()
+    )
+
+    assert isinstance(action, ToolAction)
+    assert summary is None
+    assert control.state.model_turns == 1
+    assert control.state.tool_calls == 0
+
+
+@pytest.mark.asyncio
+async def test_restored_budget_fails_closed_if_wall_clock_moves_backwards() -> None:
+    original = AgentHarness(
+        tool_executor=DeniedToolExecutor(),
+        clock=lambda: 1_000.0,
+    )
+    control = original.begin()
+    restarted = AgentHarness(
+        tool_executor=DeniedToolExecutor(),
+        clock=lambda: 999.0,
+    )
+
+    with pytest.raises(BudgetExceeded, match="clock moved backwards"):
+        await restarted.plan_action_once(
+            planner=OneToolPlanner(),
+            control=control,
+        )
+
+
+@pytest.mark.asyncio
 async def test_deterministic_validator_accepts_successful_tool_result() -> None:
     validator = DeterministicCompletionValidator()
     state = HarnessState(
@@ -160,6 +192,23 @@ async def test_deterministic_validator_rejects_empty_summary() -> None:
     assert (
         await validator.validate(HarnessState(), FinishAction(summary="  "))
         is False
+    )
+
+
+@pytest.mark.asyncio
+async def test_deterministic_validator_accepts_followup_grounded_by_inherited_evidence() -> None:
+    validator = DeterministicCompletionValidator()
+    state = HarnessState(
+        inherited_result_ids=("res-prior",),
+        inherited_evidence_ids=("evd-prior",),
+    )
+
+    assert (
+        await validator.validate(
+            state,
+            FinishAction(summary="北山街道 2 人，灵隐街道 1 人。"),
+        )
+        is True
     )
 
 

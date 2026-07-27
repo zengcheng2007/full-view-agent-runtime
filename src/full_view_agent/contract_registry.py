@@ -13,6 +13,7 @@ from full_view_agent.domain.models import (
     FrontendCommand,
     FrontendCommandReceipt,
     GetObjectProfileInput,
+    HousingAreaGroupTable,
     HousingLeaseTypeTable,
     InternalToolManifest,
     ModelToolDescriptor,
@@ -60,5 +61,6 @@ SCHEMA_MODELS: dict[str, type[ContractModel]] = {
     "data/evidence.schema.json": Evidence,
     "data/tool-specific/population-metric-table.schema.json": PopulationMetricTable,
     "data/tool-specific/housing-lease-type-table.schema.json": HousingLeaseTypeTable,
+    "data/tool-specific/housing-area-group-table.schema.json": HousingAreaGroupTable,
     "data/tool-specific/event-finish-rate-table.schema.json": EventFinishRateTable,
 }

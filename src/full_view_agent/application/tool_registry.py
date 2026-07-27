@@ -81,6 +81,9 @@ class ToolRegistry:
                     data_schema_ref=(
                         "schema://data/housing-lease-type-table/1.0.0"
                     ),
+                    additional_data_schema_refs=(
+                        "schema://data/housing-area-group-table/1.0.0",
+                    ),
                     cache_enabled=True,
                     ttl_seconds=60,
                     action="governance.housing.aggregate.read",
@@ -147,8 +150,12 @@ class ToolRegistry:
                     tool_id="governance.query_housing_metrics",
                     name="查询出租房指标",
                     description=(
-                        "查询指定授权区域自身的出租房类型汇总，返回租赁类型和房屋数量。"
-                        "当前数据源不支持按街道、社区或网格分组。"
+                        "查询授权区域的出租房聚合统计，不返回个人明细。"
+                        "不传 group_by 时返回区域自身按租赁类型的汇总；"
+                        "group_by=['next_area'] 时返回直接下级区划"
+                        "（全市按区县、区县按街道、街道按社区、社区按网格）"
+                        "的出租房数量分布。"
+                        "不支持其他分组、筛选、排序。"
                     ),
                     schema_ref=(
                         "schema://tools/query-housing-metrics-input/1.0.0"
@@ -222,6 +229,7 @@ def _manifest(
     action: str,
     denial_scope: str,
     adapter_ref: str,
+    additional_data_schema_refs: tuple[str, ...] = (),
 ) -> InternalToolManifest:
     return InternalToolManifest.model_validate(
         {
@@ -234,7 +242,11 @@ def _manifest(
             "required_permissions": [permission],
             "input_schema_ref": input_schema_ref,
             "result_schemas": [
-                {"kind": result_kind, "data_schema_ref": data_schema_ref}
+                {"kind": result_kind, "data_schema_ref": data_schema_ref},
+                *[
+                    {"kind": result_kind, "data_schema_ref": extra_ref}
+                    for extra_ref in additional_data_schema_refs
+                ],
             ],
             "limits": {
                 "timeout_ms": 8000,

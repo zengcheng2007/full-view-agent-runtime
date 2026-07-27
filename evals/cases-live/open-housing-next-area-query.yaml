@@ -1,10 +1,10 @@
 # 开放式评测用例 —— 不预编排 model_steps，由真实模型自主决策
-# 运行方式：uv run python scripts/run_evals.py run-live --case evals/cases-live/open-housing-query.yaml --env-file .env
+# 运行方式：uv run python scripts/run_evals.py run-live --case evals/cases-live/open-housing-next-area-query.yaml --env-file .env
 # 断言只校验最终结果，不规定 Tool 调用顺序
 schema_version: "1.0"
-case_id: open-housing-cuiyuan
-description: "开放式：用自然语言问翠苑出租房，模型自主选 Tool"
-user_message: 翠苑那边租房的多不多？按类型给我分一下
+case_id: open-housing-next-area-cuiyuan
+description: "开放式：问翠苑街道出租房按社区分布，模型自主选 Tool 与 group_by"
+user_message: 翠苑街道哪些社区出租房最多？按社区给我分一下
 auth:
   area_codes: ["330106"]
   datasets: [administrative_area, housing]
