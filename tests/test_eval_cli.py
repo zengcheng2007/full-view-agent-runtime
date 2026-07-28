@@ -1,3 +1,4 @@
+import json
 from pathlib import Path
 
 import full_view_agent.evaluation.cli as eval_cli
@@ -65,8 +66,17 @@ def test_eval_cli_runs_native_langgraph_differential_gate(
     )
 
     assert exit_code == 0
-    assert (output_dir / "differential-report.json").is_file()
+    report_path = output_dir / "differential-report.json"
+    assert report_path.is_file()
     assert "DIFFERENTIAL PASS" in capsys.readouterr().out
+    # S1-A Native freeze：CLI 差分报告覆盖语义入口用例且零差异。
+    report = json.loads(report_path.read_text(encoding="utf-8"))
+    assert report["gate_passed"] is True
+    matched = {
+        comparison["case_id"]: comparison["matched"]
+        for comparison in report["comparisons"]
+    }
+    assert matched["planning-population-semantic-success"] is True
 
 
 def test_eval_cli_runs_one_live_case_and_records_model_metadata(

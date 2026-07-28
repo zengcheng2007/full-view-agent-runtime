@@ -73,3 +73,11 @@ async def test_differential_suite_reports_no_native_langgraph_drift(
     assert report["gate_passed"] is True
     assert report["different_cases"] == 0
     assert (tmp_path / "differential-report.json").is_file()
+    # S1-A Native freeze：语义入口脚本用例必须进入双编排器差分且零差异。
+    comparisons = {
+        comparison["case_id"]: comparison
+        for comparison in report["comparisons"]
+    }
+    semantic_comparison = comparisons["planning-population-semantic-success"]
+    assert semantic_comparison["matched"] is True
+    assert semantic_comparison["differences"] == []

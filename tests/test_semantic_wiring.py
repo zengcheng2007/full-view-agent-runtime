@@ -26,7 +26,10 @@ from full_view_agent.infrastructure.langgraph_orchestrator import (
     LangGraphOrchestrator,
 )
 from full_view_agent.infrastructure.memory_store import InMemoryAgentStore
-from full_view_agent.semantic.action_resolver import SEMANTIC_QUERY_TOOL_ID
+from full_view_agent.semantic.action_resolver import (
+    SEMANTIC_QUERY_TOOL_ID,
+    RejectedSemanticAction,
+)
 from full_view_agent.semantic.catalog import SemanticCatalog
 from full_view_agent.semantic.presenter import SemanticToolPresenter
 
@@ -93,6 +96,29 @@ class _RepeatingSemanticPlanner:
         )
 
 
+class _DirectPlanner:
+    """直接规范 Tool 规划器：承载与语义入口等价的规范调用。"""
+
+    def __init__(self, arguments: dict[str, object]) -> None:
+        self._arguments = arguments
+
+    async def decide(self, state: HarnessState) -> ToolAction | FinishAction:
+        if state.tool_results:
+            return FinishAction(summary="直接规范 Tool 查询已完成。")
+        return ToolAction(
+            tool_id="governance.query_population_metrics",
+            arguments=self._arguments,
+        )
+
+
+class _ExplodingAdapter:
+    """抛出未预期异常的 Adapter：验证语义入口 fail-closed 收敛。"""
+
+    async def execute(self, **kwargs: object) -> object:
+        del kwargs
+        raise RuntimeError("unexpected upstream failure")
+
+
 def _map_enabled_request(message_id: str = "web-semantic-01") -> RunCreateRequest:
     return RunCreateRequest.model_validate(
         {
@@ -116,6 +142,7 @@ async def _semantic_orchestrator(
     planner: object,
     auth: AuthContext | None = None,
     request: RunCreateRequest | None = None,
+    adapter: object | None = None,
 ):
     store = InMemoryAgentStore()
     events = InMemoryEventBroker()
@@ -123,7 +150,7 @@ async def _semantic_orchestrator(
     registry = ToolRegistry.default()
     stack = build_semantic_capability_stack(
         registry=registry,
-        adapter=InMemoryGovernanceAdapter(),
+        adapter=adapter or InMemoryGovernanceAdapter(),
     )
 
     class _PF:
@@ -456,3 +483,139 @@ async def test_semantic_rejection_completes_run_without_evidence(
     assert run.outcome == "denied"
     assert run.completion_reason_code == "AREA_OUT_OF_SCOPE"
     assert not store.evidence
+
+
+# ---------------------------------------------------------------------------
+# S1-A Native freeze：语义入口与等价直接 Tool 的输出契约差分（direct
+# differential）；未预期异常 fail-closed 收敛为 internal_error。
+# ---------------------------------------------------------------------------
+
+
+async def _sole_evidence(store, user_id: str):
+    evidence_ids = sorted(store.evidence)
+    assert len(evidence_ids) == 1
+    return await store.get_evidence(
+        user_id=user_id,
+        evidence_id=evidence_ids[0],
+    )
+
+
+def _command_signatures(events) -> list[tuple[str, str | None, str]]:
+    return sorted(
+        (
+            command["type"],
+            command["preconditions"]["area_code"],
+            command["preconditions"]["required_client_capability"],
+        )
+        for event in events
+        if event.type == "frontend.command.requested"
+        for command in [event.data["command"]]
+    )
+
+
+@pytest.mark.asyncio
+async def test_semantic_query_contract_matches_direct_canonical_tool(
+    orchestrator_type: type,
+) -> None:
+    # 语义入口 vs 等价直接规范 Tool：结果/Evidence/前端命令契约对齐，
+    # 语义侧仅额外携带血缘登记信息；双编排器均须满足。
+    auth = population_auth_context()
+    semantic_orch, semantic_store, semantic_events, semantic_run_id, stack = (
+        await _semantic_orchestrator(
+            orchestrator_type=orchestrator_type,
+            planner=_SemanticPlanner([_semantic_args()]),
+            auth=auth,
+        )
+    )
+    compiled = stack.resolver.compile_action(_semantic_args(), auth_context=auth)
+    assert not isinstance(compiled, RejectedSemanticAction)
+    direct_orch, direct_store, direct_events, direct_run_id, _stack = (
+        await _semantic_orchestrator(
+            orchestrator_type=orchestrator_type,
+            planner=_DirectPlanner(compiled.canonical_action.arguments),
+            auth=auth,
+        )
+    )
+
+    await semantic_orch.execute(user_id="user-semantic", run_id=semantic_run_id)
+    await direct_orch.execute(user_id="user-semantic", run_id=direct_run_id)
+
+    semantic_run = await semantic_store.get_run(
+        user_id="user-semantic", run_id=semantic_run_id
+    )
+    direct_run = await direct_store.get_run(
+        user_id="user-semantic", run_id=direct_run_id
+    )
+    assert (semantic_run.status, semantic_run.outcome) == ("completed", "success")
+    assert (direct_run.status, direct_run.outcome) == (
+        semantic_run.status,
+        semantic_run.outcome,
+    )
+    assert direct_run.completion_reason_code == semantic_run.completion_reason_code
+
+    # 事件序列一致（含 result/evidence/frontend.command 生命周期）。
+    semantic_events_list = await semantic_events.list_events(run_id=semantic_run_id)
+    direct_events_list = await direct_events.list_events(run_id=direct_run_id)
+    assert [event.type for event in semantic_events_list] == [
+        event.type for event in direct_events_list
+    ]
+
+    # 结果负载一致：同数据、同行数、同结果指纹。
+    semantic_evidence = await _sole_evidence(semantic_store, "user-semantic")
+    direct_evidence = await _sole_evidence(direct_store, "user-semantic")
+    semantic_result = await semantic_store.get_result(
+        user_id="user-semantic", result_id=semantic_evidence.result_id
+    )
+    direct_result = await direct_store.get_result(
+        user_id="user-semantic", result_id=direct_evidence.result_id
+    )
+    assert semantic_result.data.model_dump(mode="json") == direct_result.data.model_dump(
+        mode="json"
+    )
+    assert semantic_result.row_count == direct_result.row_count
+    assert semantic_result.result_fingerprint == direct_result.result_fingerprint
+
+    # Evidence：规范 Tool 字段一致；语义侧额外携带登记版本与指标口径。
+    assert semantic_evidence.dataset_id == direct_evidence.dataset_id
+    assert semantic_evidence.effective_area_codes == direct_evidence.effective_area_codes
+    assert semantic_evidence.effective_area_codes == ["330106"]
+    assert semantic_evidence.tool == direct_evidence.tool
+    assert semantic_evidence.tool.tool_id == "governance.query_population_metrics"
+    assert direct_evidence.semantic_registry_version is None
+    assert direct_evidence.metric_definitions == []
+    assert (
+        semantic_evidence.semantic_registry_version
+        == SemanticCatalog.default().catalog_version
+    )
+
+    # FrontendCommand：命令集合与契约前置条件一致（兼容现有前端契约）。
+    assert _command_signatures(semantic_events_list) == _command_signatures(
+        direct_events_list
+    )
+    assert _command_signatures(semantic_events_list) == [
+        ("map.render_choropleth", "330106", "map.render_choropleth@1.0"),
+        ("panel.show_table", "330106", "panel.show_table@1.0"),
+    ]
+
+
+@pytest.mark.asyncio
+async def test_semantic_unexpected_failure_fails_closed_as_internal_error(
+    orchestrator_type: type,
+) -> None:
+    # 语义解析成功但下游抛出未预期异常：Run 必须 fail-closed 为
+    # internal_error，不得落 Evidence，不得伪装成功。
+    orch, store, events, run_id, _stack = await _semantic_orchestrator(
+        orchestrator_type=orchestrator_type,
+        planner=_SemanticPlanner([_semantic_args()]),
+        adapter=_ExplodingAdapter(),
+    )
+
+    await orch.execute(user_id="user-semantic", run_id=run_id)
+
+    run = await store.get_run(user_id="user-semantic", run_id=run_id)
+    assert run.status == "failed"
+    assert run.completion_reason_code == "internal_error"
+    assert not store.evidence
+    published = await events.list_events(run_id=run_id)
+    failed = next(event for event in published if event.type == "run.failed")
+    assert failed.data["error_code"] == "internal_error"

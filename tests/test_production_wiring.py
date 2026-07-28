@@ -18,10 +18,15 @@ from full_view_agent.api.app import RuntimeContainer
 from full_view_agent.application.capability_service import CapabilityService
 from full_view_agent.application.context_builder import AgentContextBuilder
 from full_view_agent.application.harness import HarnessState
+from full_view_agent.application.native_orchestrator import NativeOrchestrator
 from full_view_agent.application.policy import MinimalPolicyAdapter
 from full_view_agent.application.prompt_catalog import (
     FULL_VIEW_SYSTEM_PROMPT_VERSION,
     build_full_view_system_prompt,
+)
+from full_view_agent.application.semantic_executor import (
+    SemanticToolCallFingerprinter,
+    SemanticToolExecutor,
 )
 from full_view_agent.application.session_run_service import SessionRunService
 from full_view_agent.application.tool_registry import ToolRegistry
@@ -35,6 +40,9 @@ from full_view_agent.infrastructure.credential_broker import (
 from full_view_agent.infrastructure.governance_adapter import (
     HttpGovernanceAdapter,
     InMemoryGovernanceAdapter,
+)
+from full_view_agent.infrastructure.langgraph_orchestrator import (
+    LangGraphOrchestrator,
 )
 from full_view_agent.infrastructure.legacy_identity import (
     HashedLegacyIdentityAdapter,
@@ -175,9 +183,71 @@ def test_prompt_only_lists_registered_and_authorized_capabilities() -> None:
 
 
 # ---------------------------------------------------------------------------
-# 层 3+5：生产代码路径契约测试（MockTransport，非真实网络）+
-# LangGraph 默认编排的出租房纵向切片；真实登录环境验证待办
+# S1-A Native freeze：组合根在 native 回滚模式下仍须完整接线语义栈
+# （执行器/指纹/模型上下文 Presenter），且不得借道 LangGraph 链路
 # ---------------------------------------------------------------------------
+
+
+class _StubModelProvider:
+    """仅用于触发组合根构建 ModelPlanner，不会被调用。"""
+
+    async def complete(self, request) -> object:
+        del request
+        raise NotImplementedError("stub provider must not be called in wiring tests")
+
+
+def _assert_semantic_stack_wired(container: RuntimeContainer) -> None:
+    executor = container.executor
+    assert executor._capability is container.semantic_stack.capability  # noqa: SLF001
+    harness = executor._harness  # noqa: SLF001
+    assert isinstance(harness._tool_executor, SemanticToolExecutor)  # noqa: SLF001
+    assert isinstance(  # noqa: SLF001
+        harness._call_fingerprinter,  # noqa: SLF001
+        SemanticToolCallFingerprinter,
+    )
+    # 模型上下文必须携带语义 Presenter：semantic_query 对模型可见。
+    planner_factory = executor._planner_factory  # noqa: SLF001
+    assert planner_factory is not None
+    assert (  # noqa: SLF001
+        planner_factory._context_builder._semantic_presenter  # noqa: SLF001
+        is container.semantic_stack.presenter
+    )
+
+
+def test_runtime_container_native_freeze_wires_semantic_stack(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("FULL_VIEW_ORCHESTRATOR", "native")
+
+    container = RuntimeContainer(model_provider=_StubModelProvider())
+
+    # Native 回滚路径必须是原生编排器本体，不得经由 LangGraph 子类。
+    assert type(container.executor) is NativeOrchestrator
+    assert not isinstance(container.executor, LangGraphOrchestrator)
+    _assert_semantic_stack_wired(container)
+
+
+def test_runtime_container_default_langgraph_wires_semantic_stack(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.delenv("FULL_VIEW_ORCHESTRATOR", raising=False)
+
+    container = RuntimeContainer(model_provider=_StubModelProvider())
+
+    assert isinstance(container.executor, LangGraphOrchestrator)
+    _assert_semantic_stack_wired(container)
+
+
+# ---------------------------------------------------------------------------
+# 层 3+5：生产代码路径契约测试（MockTransport，非真实网络）+
+# 双编排器（Native 冻结 / LangGraph 默认）的直连 Tool 纵向切片；
+# 真实登录环境验证待办
+# ---------------------------------------------------------------------------
+
+
+@pytest.fixture(params=["native", "langgraph"], ids=["native", "langgraph"])
+def production_orchestrator(request: pytest.FixtureRequest) -> str:
+    return request.param
 
 
 def _housing_http_environment(
@@ -247,7 +317,9 @@ def _housing_http_environment(
 
 
 @pytest.mark.asyncio
-async def test_production_wiring_housing_lease_type_over_http_langgraph() -> None:
+async def test_production_wiring_housing_lease_type_over_http(
+    production_orchestrator: str,
+) -> None:
     seen_paths: list[str] = []
     bodies: dict[str, list[dict[str, list[str]]]] = {}
     environment = _housing_http_environment(seen_paths, bodies)
@@ -255,7 +327,7 @@ async def test_production_wiring_housing_lease_type_over_http_langgraph() -> Non
 
     trace = await EvalRunner(
         environment=environment,
-        orchestrator="langgraph",
+        orchestrator=production_orchestrator,
     ).run(case)
 
     assert trace.passed is True
@@ -277,7 +349,9 @@ async def test_production_wiring_housing_lease_type_over_http_langgraph() -> Non
 
 
 @pytest.mark.asyncio
-async def test_production_wiring_housing_next_area_over_http_langgraph() -> None:
+async def test_production_wiring_housing_next_area_over_http(
+    production_orchestrator: str,
+) -> None:
     seen_paths: list[str] = []
     bodies: dict[str, list[dict[str, list[str]]]] = {}
     environment = _housing_http_environment(seen_paths, bodies)
@@ -287,7 +361,7 @@ async def test_production_wiring_housing_next_area_over_http_langgraph() -> None
 
     trace = await EvalRunner(
         environment=environment,
-        orchestrator="langgraph",
+        orchestrator=production_orchestrator,
     ).run(case)
 
     assert trace.passed is True
@@ -302,7 +376,9 @@ async def test_production_wiring_housing_next_area_over_http_langgraph() -> None
 
 
 @pytest.mark.asyncio
-async def test_production_wiring_event_finish_rate_over_http_langgraph() -> None:
+async def test_production_wiring_event_finish_rate_over_http(
+    production_orchestrator: str,
+) -> None:
     seen_paths: list[str] = []
     bodies: dict[str, list[dict[str, list[str]]]] = {}
     environment = _housing_http_environment(seen_paths, bodies)
@@ -310,7 +386,7 @@ async def test_production_wiring_event_finish_rate_over_http_langgraph() -> None
 
     trace = await EvalRunner(
         environment=environment,
-        orchestrator="langgraph",
+        orchestrator=production_orchestrator,
     ).run(case)
 
     assert trace.passed is True
@@ -329,6 +405,37 @@ async def test_production_wiring_event_finish_rate_over_http_langgraph() -> None
     serialized = trace.model_dump_json()
     assert "test-geo-token" not in serialized
     assert "getEventPropertiesAndConflictsByTotal" not in serialized
+
+
+@pytest.mark.asyncio
+async def test_production_wiring_population_resolve_and_query_over_http(
+    production_orchestrator: str,
+) -> None:
+    seen_paths: list[str] = []
+    bodies: dict[str, list[dict[str, list[str]]]] = {}
+    environment = _housing_http_environment(seen_paths, bodies)
+    case = load_eval_case(EVAL_CASES / "planning-population-http-success.yaml")
+
+    trace = await EvalRunner(
+        environment=environment,
+        orchestrator=production_orchestrator,
+    ).run(case)
+
+    assert trace.passed is True
+    assert trace.terminal_status == "completed"
+    assert seen_paths == [
+        "/getUserByToken",
+        "/geo-qxst/area/getAreaInfoByAreaName",
+        "/geo-qxst/getNextSiteData",
+    ]
+    assert trace.tool_ids == [
+        "governance.resolve_area",
+        "governance.query_population_metrics",
+    ]
+    assert len(trace.evidence_ids) >= 2
+    serialized = trace.model_dump_json()
+    assert "test-geo-token" not in serialized
+    assert "getNextSiteData" not in serialized
 
 
 # ---------------------------------------------------------------------------

@@ -158,6 +158,38 @@ async def test_eval_runner_semantic_entry_is_differential_safe() -> None:
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("orchestrator", ["native", "langgraph"])
+async def test_eval_runner_semantic_vs_direct_scripted_differential(
+    orchestrator: str,
+) -> None:
+    # S1-A Native freeze（direct scripted differential）：同一业务问题经
+    # 语义入口与直接规范 Tool 两条脚本路径，外部可观测契约一致；模型
+    # 可见的入口 Tool 不同属预期差异，规范执行链路与生命周期相同。
+    semantic_case = load_eval_case(
+        EVAL_CASES / "planning-population-semantic-success.yaml"
+    )
+    direct_case = load_eval_case(EVAL_CASES / "planning-population-success.yaml")
+
+    semantic = await EvalRunner(orchestrator=orchestrator).run(semantic_case)
+    direct = await EvalRunner(orchestrator=orchestrator).run(direct_case)
+
+    assert semantic.passed is True
+    assert direct.passed is True
+    # 模型侧入口不同：语义虚拟 Tool vs 规范 Tool（唯一预期差异）。
+    assert semantic.tool_ids == ["governance.semantic_query"]
+    assert direct.tool_ids == ["governance.query_population_metrics"]
+    # 规范执行契约对齐：终态、事件生命周期、Evidence 数量一致。
+    assert semantic.terminal_status == direct.terminal_status == "completed"
+    assert semantic.outcome == direct.outcome == "success"
+    assert semantic.completion_reason_code == direct.completion_reason_code
+    assert semantic.event_types == direct.event_types
+    assert len(semantic.evidence_ids) == len(direct.evidence_ids) == 1
+    assert semantic.event_types.count("frontend.command.requested") == direct.event_types.count(
+        "frontend.command.requested"
+    )
+
+
+@pytest.mark.asyncio
 async def test_eval_runner_records_live_provider_steps_and_version_metadata() -> None:
     provider = TwoStepLiveModelProvider()
     runner = EvalRunner(
