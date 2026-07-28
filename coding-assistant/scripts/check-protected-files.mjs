@@ -68,6 +68,20 @@ function checkBoundary(targetFile, toolName) {
     parseProjectInfoBoundary(content, allowed, blocked);
   }
 
+  // Worktree 可用一个未纳入版本控制的 scope 文件把“可读写”进一步收窄到任务文件。
+  // 全局禁止区域仍然生效，不能由子任务放开。
+  const worktreeScope = join(cwd, '.claude', 'worktree-scope.json');
+  if (existsSync(worktreeScope)) {
+    const scope = JSON.parse(readFileSync(worktreeScope, 'utf-8'));
+    if (Array.isArray(scope.writable) && scope.writable.length > 0) {
+      allowed.length = 0;
+      allowed.push(...scope.writable);
+    }
+    if (Array.isArray(scope.forbidden)) {
+      blocked.push(...scope.forbidden);
+    }
+  }
+
   if (allowed.length === 0 && blocked.length === 0) {
     return { continue: true, suppressOutput: true };
   }

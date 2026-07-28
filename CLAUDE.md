@@ -256,6 +256,7 @@ Agent 在每个阶段结束时，根据本阶段的**推进等级**决定行为�
 - `scripts/**`
 - `coding-assistant/tools/**`
 - `README.md`
+- `WORKTREE-COMPLETION.md`
 
 **可只读（理解上下文，不能改）：**
 - `pyproject.toml`（依赖、测试和静态检查配置）
@@ -423,4 +424,3 @@ uv run ruff check .        # Lint
 uv run pytest              # 测试
 uv run python -m compileall -q src  # 编译检查
 ```
-

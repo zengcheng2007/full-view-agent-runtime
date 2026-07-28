@@ -5,6 +5,7 @@ __pycache__/
 *.py[cod]
 .env
 .env.local
+.claude/worktree-scope.json
 data/
 *.db
 test_results.txt
