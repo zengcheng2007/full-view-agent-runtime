@@ -8,7 +8,11 @@ from full_view_agent.application.model_provider import (
     ModelToolCall,
     ModelUsage,
 )
-from full_view_agent.evaluation.contracts import EvalCase
+from full_view_agent.evaluation.contracts import (
+    EvalCase,
+    EvalErrorStep,
+    EvalFinishStep,
+)
 from full_view_agent.evaluation.loader import load_eval_case
 from full_view_agent.evaluation.runner import EvalRunner, StaticEvalEnvironment
 from full_view_agent.infrastructure.governance_adapter import InMemoryGovernanceAdapter
@@ -219,6 +223,154 @@ async def test_eval_runner_replays_all_follow_up_turns() -> None:
         ["governance.resolve_area", "governance.semantic_query"],
         [],
     ]
+
+
+@pytest.mark.asyncio
+async def test_eval_runner_stops_follow_ups_after_failed_turn() -> None:
+    case = load_eval_case(EVAL_CASES / "multiturn-population-followup.yaml")
+    failed_first_turn = case.model_copy(
+        update={
+            "model_steps": [
+                EvalErrorStep(
+                    type="error",
+                    error_code="model_provider_unavailable",
+                    message="provider unavailable",
+                )
+            ]
+        }
+    )
+
+    trace = await EvalRunner(orchestrator="langgraph").run(failed_first_turn)
+
+    assert trace.passed is False
+    assert len(trace.turns) == 1
+    assert trace.turns[0].terminal_status == "failed"
+    assert trace.turns[0].completion_reason_code == "model_provider_unavailable"
+
+
+@pytest.mark.asyncio
+async def test_eval_runner_replays_early_stopped_multiturn_trace() -> None:
+    case = load_eval_case(EVAL_CASES / "multiturn-population-followup.yaml")
+    failed_first_turn = case.model_copy(
+        update={
+            "model_steps": [
+                EvalErrorStep(
+                    type="error",
+                    error_code="model_provider_unavailable",
+                    message="provider unavailable",
+                )
+            ]
+        }
+    )
+    runner = EvalRunner(orchestrator="langgraph")
+    source = await runner.run(failed_first_turn)
+
+    replayed = await runner.replay(failed_first_turn, source)
+
+    assert replayed.passed is False
+    assert replayed.replayed_from_eval_run_id == source.eval_run_id
+    assert len(replayed.turns) == len(source.turns) == 1
+    assert replayed.turns[0].terminal_status == "failed"
+    assert (
+        replayed.completion_reason_code
+        == source.completion_reason_code
+        == "model_provider_unavailable"
+    )
+
+
+@pytest.mark.asyncio
+async def test_eval_runner_applies_one_token_budget_across_all_turns() -> None:
+    case = load_eval_case(EVAL_CASES / "multiturn-population-followup.yaml")
+    budget_case = case.model_copy(
+        update={
+            "model_steps": [
+                EvalFinishStep(
+                    type="finish",
+                    content="当前能力说明已完成。",
+                    total_tokens=7,
+                )
+            ],
+            "expected": case.expected.model_copy(
+                update={
+                    "tool_ids": [],
+                    "min_evidence_count": 0,
+                    "required_event_types": ["run.completed"],
+                }
+            ),
+            "follow_up_turns": [
+                case.follow_up_turns[0].model_copy(
+                    update={
+                        "model_steps": [
+                            EvalFinishStep(
+                                type="finish",
+                                content="当前能力说明已更新。",
+                                total_tokens=4,
+                            )
+                        ]
+                    }
+                )
+            ],
+        }
+    )
+
+    trace = await EvalRunner(
+        orchestrator="langgraph",
+        max_total_tokens=10,
+    ).run(budget_case)
+
+    assert trace.passed is False
+    assert len(trace.turns) == 2
+    assert trace.turns[0].terminal_status == "completed"
+    assert trace.turns[1].terminal_status == "failed"
+    assert trace.turns[1].completion_reason_code == "budget_exceeded"
+
+
+@pytest.mark.asyncio
+async def test_eval_runner_does_not_call_provider_after_budget_is_exhausted() -> None:
+    case = load_eval_case(EVAL_CASES / "multiturn-population-followup.yaml")
+    budget_case = case.model_copy(
+        update={
+            "model_steps": [
+                EvalFinishStep(
+                    type="finish",
+                    content="当前能力说明已完成。",
+                    total_tokens=10,
+                )
+            ],
+            "expected": case.expected.model_copy(
+                update={
+                    "tool_ids": [],
+                    "min_evidence_count": 0,
+                    "required_event_types": ["run.completed"],
+                }
+            ),
+            "follow_up_turns": [
+                case.follow_up_turns[0].model_copy(
+                    update={
+                        "model_steps": [
+                            EvalFinishStep(
+                                type="finish",
+                                content="这一步不应被模型执行。",
+                                total_tokens=4,
+                            )
+                        ]
+                    }
+                )
+            ],
+        }
+    )
+
+    trace = await EvalRunner(
+        orchestrator="langgraph",
+        max_total_tokens=10,
+    ).run(budget_case)
+
+    assert trace.passed is False
+    assert trace.total_tokens == 10
+    assert len(trace.model_steps) == 1
+    assert len(trace.turns) == 2
+    assert trace.turns[1].model_steps == []
+    assert trace.turns[1].completion_reason_code == "budget_exceeded"
 
 
 @pytest.mark.asyncio

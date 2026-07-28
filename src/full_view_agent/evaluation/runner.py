@@ -119,8 +119,10 @@ class EvalRunner:
             raise ValueError("eval case_id does not match replay trace case_id")
         if trace.turns:
             expected_turn_count = 1 + len(case.follow_up_turns)
-            if len(trace.turns) != expected_turn_count:
+            if len(trace.turns) > expected_turn_count:
                 raise ValueError("eval trace turn count does not match eval case")
+            # 失败轮会提前终止会话，trace 记录的轮数可能少于用例声明；
+            # 只回放实际发生过的轮次，不补跑从未执行的后续追问。
             replay_case = case.model_copy(
                 update={
                     "model_steps": trace.turns[0].model_steps,
@@ -129,7 +131,7 @@ class EvalRunner:
                             update={"model_steps": trace.turns[index].model_steps}
                         )
                         for index, follow_up in enumerate(
-                            case.follow_up_turns,
+                            case.follow_up_turns[: len(trace.turns) - 1],
                             start=1,
                         )
                     ],
@@ -256,6 +258,10 @@ class EvalRunner:
                         semantic_presenter=stack.presenter,
                     ),
                     max_total_tokens=self._max_total_tokens,
+                    initial_total_tokens=sum(
+                        getattr(step, "total_tokens", 0)
+                        for step in provider.consumed_steps
+                    ),
                 ),
                 evidence_source_system=environment.evidence_source_system,
             )
@@ -300,6 +306,11 @@ class EvalRunner:
             )
             aggregate_event_types.extend(event_types)
             aggregate_tool_ids.extend(tool_ids)
+            if terminal.status != "completed" or terminal.outcome not in {
+                "success",
+                "partial",
+            }:
+                break
         final_turn = turn_traces[-1]
         all_grades = [
             grade.model_copy(
@@ -314,6 +325,15 @@ class EvalRunner:
             for turn in turn_traces
             for grade in turn.grades
         ]
+        turn_count_passed = len(turn_traces) == len(turn_specs)
+        all_grades.append(
+            EvalGrade(
+                name="turn_count",
+                passed=turn_count_passed,
+                expected=len(turn_specs),
+                actual=len(turn_traces),
+            )
+        )
         return EvalTrace(
             eval_run_id=new_id("evl"),
             case_id=case.case_id,
@@ -353,7 +373,7 @@ class EvalRunner:
             evidence_ids=sorted(store.evidence),
             grades=all_grades,
             turns=turn_traces,
-            passed=all(turn.passed for turn in turn_traces),
+            passed=turn_count_passed and all(turn.passed for turn in turn_traces),
         )
 
 

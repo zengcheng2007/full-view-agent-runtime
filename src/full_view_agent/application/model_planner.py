@@ -34,15 +34,18 @@ class ModelPlanner:
         user_id: str,
         auth_context: AuthContext,
         max_total_tokens: int = 32_000,
+        initial_total_tokens: int = 0,
     ) -> None:
         if max_total_tokens <= 0:
             raise ValueError("max_total_tokens must be positive")
+        if initial_total_tokens < 0:
+            raise ValueError("initial_total_tokens must be non-negative")
         self._provider = provider
         self._context_builder = context_builder
         self._user_id = user_id
         self._auth_context = auth_context
         self._max_total_tokens = max_total_tokens
-        self._total_tokens = 0
+        self._total_tokens = initial_total_tokens
 
     @property
     def total_tokens(self) -> int:
@@ -106,10 +109,12 @@ class ModelPlannerFactory:
         provider: ModelProvider,
         context_builder: AgentContextBuilder,
         max_total_tokens: int = 32_000,
+        initial_total_tokens: int = 0,
     ) -> None:
         self._provider = provider
         self._context_builder = context_builder
         self._max_total_tokens = max_total_tokens
+        self._initial_total_tokens = initial_total_tokens
 
     def create(self, *, user_id: str, auth_context: AuthContext) -> Planner:
         return ModelPlanner(
@@ -118,4 +123,5 @@ class ModelPlannerFactory:
             user_id=user_id,
             auth_context=auth_context,
             max_total_tokens=self._max_total_tokens,
+            initial_total_tokens=self._initial_total_tokens,
         )
