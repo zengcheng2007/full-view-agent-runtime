@@ -1,0 +1,23 @@
+mode: worktree
+parent_task: C1-prepare-customer-demo-capability
+batch: 1
+tasks:
+  - id: C1-A
+    name: c1-capability-inventory
+    file_ranges:
+      - docs/c1/c1-capability-matrix.md
+    dependencies: []
+    verification:
+      - git diff --check
+  - id: C1-B
+    name: c1-production-contract-tests
+    file_ranges:
+      - tests/**
+    dependencies: []
+    verification:
+      - uv run ruff check .
+      - uv run pyright
+      - uv run pytest
+constraints:
+  - C1-A only writes docs/c1/c1-capability-matrix.md; C1-B writes no docs
+  - no production source, frontend, credentials, or eval run artifacts

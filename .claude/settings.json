@@ -1,0 +1,59 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(git --version)",
+      "Bash(git rev-parse *)",
+      "Bash(git status *)",
+      "Bash(git log *)",
+      "Bash(git diff *)",
+      "Bash(git add *)",
+      "Bash(git commit *)",
+      "Bash(git merge *)",
+      "Bash(git worktree *)",
+      "Bash(git branch *)",
+      "Bash(git -C *)",
+      "Bash(claude --version)",
+      "Bash(claude plugins *)",
+      "Bash(claude --list-skills *)",
+      "Bash(claude --list-plugins *)",
+      "Bash(java -version)",
+      "Bash(java --version)",
+      "Bash(mvn *)",
+      "Bash(mvnw *)",
+      "Bash(node *)",
+      "Bash(npm *)",
+      "Bash(npx *)",
+      "Bash(pnpm *)",
+      "Bash(uv *)",
+      "Bash(python *)",
+      "Bash(pytest *)",
+      "Bash(echo *)",
+      "Bash(ls *)",
+      "Bash(cat *)",
+      "Bash(grep *)",
+      "Bash(test *)",
+      "Bash(find *)",
+      "Bash(wc *)",
+      "Bash(file *)",
+      "Bash(head *)",
+      "Bash(sort *)",
+      "Bash(du *)",
+      "Bash(printf *)",
+      "Bash(mkdir *)"
+    ]
+  },
+  "hooks": {
+    "PreToolUse": [
+      {
+        "matcher": "Edit|Write",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "node coding-assistant/scripts/check-protected-files.mjs",
+            "timeout": 5
+          }
+        ]
+      }
+    ]
+  }
+}

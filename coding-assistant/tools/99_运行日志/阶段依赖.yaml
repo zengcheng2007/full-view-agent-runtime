@@ -1,0 +1,187 @@
+# 阶段依赖 — 机器可读的输入输出契约
+# Agent 进入每个 SOP 前，读取本文件验证上游产出是否就位。
+# 字段说明：
+#   required: true = 必须存在，否则停止并报缺失
+#   required: false = 可选，不存在时使用 fallback
+#   type: file = 单个文件 / dir = 目录 / cmd = 命令输出
+
+stages:
+  SOP-02:
+    name: 需求吃透
+    inputs:
+      - path: coding-assistant/tools/01_需求输入/
+        type: dir
+        required: true
+        description: 需求材料
+        fallback: 告知用户放入材料后继续
+      - path: coding-assistant/tools/00_项目配置/项目信息.md
+        type: file
+        required: true
+        description: 项目信息
+        fallback: null
+    outputs:
+      - path: coding-assistant/tools/01_需求输入/需求理解报告.md
+        description: 需求理解报告
+
+  SOP-03:
+    name: 技术方案
+    inputs:
+      - path: coding-assistant/tools/01_需求输入/需求理解报告.md
+        type: file
+        required: true
+        description: 需求理解报告
+        fallback: 告知用户先完成 SOP-02
+      - path: coding-assistant/tools/00_项目配置/项目信息.md
+        type: file
+        required: true
+        description: 技术栈和约束
+        fallback: null
+    outputs:
+      - path: coding-assistant/tools/02_技术方案/技术方案-{date}.md
+        description: 技术方案文档
+
+  SOP-04:
+    name: 接口对齐
+    inputs:
+      - path: coding-assistant/tools/02_技术方案/技术方案-{date}.md
+        type: file
+        required: true
+        description: 技术方案中的接口草案
+        fallback: B场景读已有API文档; C场景读OpenAPI/Swagger
+    outputs:
+      - path: coding-assistant/tools/03_接口契约/api.md
+        description: 一体化接口契约
+      - path: coding-assistant/tools/03_接口契约/openapi.yaml
+        description: 分离架构OpenAPI契约
+
+  SOP-05:
+    name: 任务拆分
+    inputs:
+      - path: coding-assistant/tools/02_技术方案/技术方案-{date}.md
+        type: file
+        required: false
+        description: 技术方案中的任务草案
+        fallback: B场景读设计稿; C场景读OpenAPI; D场景读原型
+      - path: coding-assistant/tools/03_接口契约/api.md
+        type: file
+        required: false
+        description: 接口字段约束
+        fallback: D场景用JSON数据映射表
+    outputs:
+      - path: coding-assistant/tools/04_任务拆分/任务清单-{date}.md
+        description: 任务清单
+      - path: coding-assistant/tools/04_任务拆分/多Agent判定.yaml
+        description: 是否启用多Agent模式
+
+  SOP-06:
+    name: 编码
+    inputs:
+      - path: coding-assistant/tools/04_任务拆分/任务清单-{date}.md
+        type: file
+        required: true
+        description: 任务清单
+        fallback: null
+      - path: coding-assistant/tools/03_接口契约/api.md
+        type: file
+        required: false
+        description: 接口字段约束
+        fallback: D场景用JSON数据文件
+      - path: coding-assistant/tools/00_项目配置/项目信息.md
+        type: file
+        required: true
+        description: 文件边界三区
+        fallback: null
+    outputs:
+      - path: coding-assistant/tools/05_编码产物/编码索引-{date}.md
+        description: 编码索引
+
+  SOP-07:
+    name: 自测
+    inputs:
+      - path: coding-assistant/tools/05_编码产物/编码索引-{date}.md
+        type: file
+        required: true
+        description: 编码索引
+        fallback: null
+      - path: coding-assistant/tools/04_任务拆分/任务清单-{date}.md
+        type: file
+        required: true
+        description: 完成标准
+        fallback: null
+    outputs:
+      - path: coding-assistant/tools/06_自测报告/自测报告-{date}.md
+        description: 自测报告
+
+  SOP-08:
+    name: 走查
+    inputs:
+      - path: coding-assistant/tools/06_自测报告/自测报告-{date}.md
+        type: file
+        required: true
+        description: 自测结果
+        fallback: null
+      - path: coding-assistant/tools/04_任务拆分/任务清单-{date}.md
+        type: file
+        required: true
+        description: 完成标准
+        fallback: null
+      - path: coding-assistant/tools/03_接口契约/api.md
+        type: file
+        required: false
+        description: 接口字段对照
+        fallback: D场景不执行契约对照
+      - path: git diff --name-only main...HEAD
+        type: cmd
+        required: true
+        description: 改动文件列表
+        fallback: null
+    outputs:
+      - path: coding-assistant/tools/07_走查记录/走查报告-{date}.md
+        description: 走查报告
+
+  SOP-09:
+    name: 联调
+    inputs:
+      - path: coding-assistant/tools/07_走查记录/走查报告-{date}.md
+        type: file
+        required: true
+        description: 走查结论
+        fallback: null
+      - path: coding-assistant/tools/03_接口契约/api.md
+        type: file
+        required: false
+        description: 接口字段对照
+        fallback: null
+    outputs:
+      - path: coding-assistant/tools/08_联调记录/联调记录-{date}.md
+        description: 联调记录
+
+  SOP-10:
+    name: 沉淀
+    inputs:
+      - path: coding-assistant/tools/05_编码产物/编码索引-{date}.md
+        type: file
+        required: false
+        description: 改动文件清单
+        fallback: null
+      - path: coding-assistant/tools/07_走查记录/走查报告-{date}.md
+        type: file
+        required: false
+        description: 走查结论
+        fallback: null
+      - path: git diff --name-only main...HEAD
+        type: cmd
+        required: true
+        description: 本轮改动文件列表
+        fallback: null
+    outputs:
+      - path: coding-assistant/tools/09_沉淀资产/沉淀清单-{date}.md
+        description: 沉淀清单
+
+# 场景裁剪 — 哪些阶段在哪些场景被跳过
+scene_cut:
+  A: { skip: [], note: "全流程" }
+  B: { skip: [SOP-03, SOP-09], note: "跳过技术方案和联调" }
+  C: { skip: [SOP-02, SOP-03, SOP-09, SOP-10], note: "接口生成精简流程" }
+  D: { skip: [SOP-02, SOP-03, SOP-04, SOP-09], note: "原型+数据重构，SOP-02/04替换为专属阶段" }
+  E: { skip: [], note: "全栈一条龙，SOP-03简化为仅架构，SOP-04增强" }

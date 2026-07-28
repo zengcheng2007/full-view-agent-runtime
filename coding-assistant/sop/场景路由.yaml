@@ -1,0 +1,48 @@
+# 场景路由.yaml — 机器可读副本
+# 权威源: 场景路由表.md
+# 版本: V1.2 (2026-05-25)
+
+version: "1.2"
+scenario_count: 4
+
+scenarios:
+  - id: A
+    name: 从0到1开发
+    sub_types:
+      - id: A-fullstack
+        name: 全栈
+        triggers: ["新功能", "从零开发", "做一个"]
+        inputs: ["需求文档", "数据样例", "原型"]
+        stage_count: "8~10"
+        estimated_hours: "4~8"
+      - id: A-frontend
+        name: 前端
+        triggers: ["前端", "设计稿转代码", "Figma", "页面"]
+        inputs: ["设计稿", "API文档"]
+        stage_count: "5~6"
+        estimated_hours: "1~3"
+        design_gate: true
+      - id: A-backend
+        name: 后端
+        triggers: ["后端", "API开发", "服务端"]
+        inputs: ["需求文档", "数据样例"]
+        stage_count: "8~9"
+        estimated_hours: "3~6"
+  - id: C
+    name: 接口代码生成
+    triggers: ["契约生成", "OpenAPI", "api.md"]
+    inputs: ["OpenAPI/Swagger/api.md"]
+    stage_count: "4~5"
+    estimated_hours: "0.5~1"
+  - id: D
+    name: 原型+数据重构页面
+    triggers: ["大屏", "数据可视化", "重构页面", "Dashboard"]
+    inputs: ["PNG原型", "Excel/CSV数据"]
+    stage_count: "4~5"
+    estimated_hours: "2~3"
+  - id: E
+    name: 设计稿→全栈一条龙
+    triggers: ["一张图", "全栈", "建库", "一条龙"]
+    inputs: ["架构图", "设计稿"]
+    stage_count: "5~7"
+    estimated_hours: "3~6"
