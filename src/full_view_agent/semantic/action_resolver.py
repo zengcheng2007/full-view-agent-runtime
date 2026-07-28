@@ -18,9 +18,9 @@ CapabilityService 之前先经本解析器把它编译为规范 ToolAction。
 6. ExecutionGuard：计划完整性 + 按真实主题 Tool 复用生产 Policy 复核
    （catalog/binding/manifest 版本一致，dataset 一致，授权通过）。
 
-解析是无状态纯函数：同一 spec 在任何进程、任何时刻编译出同一规范
-动作与指纹；恢复（resume）不携带旧计划，而是按当前 Catalog 与当前
-AuthContext 重新解析，版本漂移自然 fail closed。
+解析是无状态纯函数：同一 spec 在相同 Catalog 与授权下编译出同一规范
+动作与指纹；恢复（resume）按当前 Catalog 与当前 AuthContext 重新解析，
+并通过服务端钉扎的目录版本和内容指纹对漂移 fail closed。
 """
 
 from dataclasses import dataclass, field
@@ -80,6 +80,10 @@ AUTHORIZATION_VIOLATION_CODES: frozenset[str] = frozenset(
 class SemanticQueryInput(ContractModel):
     """模型调用 semantic_query 的输入契约：``{"spec": ...}``。"""
 
+    # 由 ModelPlanner 在模型响应被接受后、ToolAction 进入 checkpoint 前
+    # 注入；模型可见 Schema 不包含这两个字段。
+    catalog_version: str
+    catalog_fingerprint: str
     spec: SemanticQuerySpec
 
 
@@ -175,6 +179,21 @@ class SemanticActionResolver:
         except ValidationError as exc:
             return self._input_invalid(exc)
         spec = parsed.spec
+        if parsed.catalog_version != self._catalog.catalog_version:
+            return RejectedSemanticAction(
+                codes=("CATALOG_VERSION_MISMATCH",),
+                user_message=(
+                    f"语义动作目录版本 {parsed.catalog_version} 与当前目录版本"
+                    f" {self._catalog.catalog_version} 不一致，动作已过期。"
+                ),
+            )
+        if parsed.catalog_fingerprint != self._catalog.execution_fingerprint:
+            return RejectedSemanticAction(
+                codes=("CATALOG_FINGERPRINT_MISMATCH",),
+                user_message=(
+                    "语义动作所钉扎的目录内容与当前目录不一致，动作已过期。"
+                ),
+            )
 
         subject = self._catalog.subject(spec.subject)
         if subject is not None and spec.subject not in self._bindable_subjects:

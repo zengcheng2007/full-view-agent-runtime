@@ -22,6 +22,7 @@ from full_view_agent.application.harness import (
     DeterministicCompletionValidator,
 )
 from full_view_agent.application.policy import MinimalPolicyAdapter
+from full_view_agent.application.semantic_denial import SemanticDenialRecorder
 from full_view_agent.application.semantic_executor import (
     SemanticToolCallFingerprinter,
     SemanticToolExecutor,
@@ -75,11 +76,25 @@ def build_semantic_capability_stack(
         registry=registry,
         policy=effective_policy,
     )
+    denial_recorder = (
+        SemanticDenialRecorder(
+            catalog=effective_catalog,
+            registry=registry,
+            policy=effective_policy,
+            ledger=denial_ledger,
+        )
+        if denial_ledger is not None
+        else None
+    )
     return SemanticCapabilityStack(
         catalog=effective_catalog,
         resolver=resolver,
         capability=capability,
-        executor=SemanticToolExecutor(inner=capability, resolver=resolver),
+        executor=SemanticToolExecutor(
+            inner=capability,
+            resolver=resolver,
+            denial_recorder=denial_recorder,
+        ),
         fingerprinter=SemanticToolCallFingerprinter(resolver=resolver),
         presenter=SemanticToolPresenter(catalog=effective_catalog),
     )

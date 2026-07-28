@@ -27,6 +27,7 @@ from full_view_agent.application.harness import (
     ToolAction,
     default_tool_call_fingerprint,
 )
+from full_view_agent.application.semantic_denial import SemanticDenialRecorder
 from full_view_agent.domain.models import (
     AuthContext,
     TableDataResult,
@@ -64,12 +65,14 @@ class SemanticToolExecutor:
         inner: InnerToolExecutor,
         resolver: SemanticActionResolver,
         compiler: SemanticCompiler | None = None,
+        denial_recorder: SemanticDenialRecorder | None = None,
     ) -> None:
         self._inner = inner
         self._resolver = resolver
         self._compiler = compiler or SemanticCompiler(
             resolver.catalog,
         )
+        self._denial_recorder = denial_recorder
 
     async def execute(
         self,
@@ -88,13 +91,44 @@ class SemanticToolExecutor:
             )
         resolution = self._resolver.resolve(raw_arguments, auth_context=auth_context)
         if isinstance(resolution, RejectedSemanticAction):
+            recorded_decision = None
+            if (
+                resolution.is_authorization_denial
+                and self._denial_recorder is not None
+            ):
+                recorded_decision = await self._denial_recorder.record_if_denied(
+                    raw_arguments,
+                    auth_context=auth_context,
+                )
             return self._virtual_result(
                 tool_call_id=tool_call_id,
-                status="denied" if resolution.is_authorization_denial else "failed",
+                status=(
+                    "denied"
+                    if resolution.is_authorization_denial
+                    or any(
+                        code
+                        in {
+                            "CATALOG_VERSION_MISMATCH",
+                            "CATALOG_FINGERPRINT_MISMATCH",
+                        }
+                        for code in resolution.codes
+                    )
+                    else "failed"
+                ),
                 summary=resolution.user_message,
                 warnings=list(resolution.codes),
+                policy=(
+                    tool_result_policy(recorded_decision)
+                    if recorded_decision is not None
+                    else None
+                ),
             )
         if isinstance(resolution, DeniedSemanticAction):
+            if self._denial_recorder is not None:
+                await self._denial_recorder.record_if_denied(
+                    raw_arguments,
+                    auth_context=auth_context,
+                )
             policy = (
                 tool_result_policy(resolution.decisions[-1])
                 if resolution.decisions

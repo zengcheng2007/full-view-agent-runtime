@@ -73,6 +73,9 @@ async def test_openai_compatible_provider_parses_a_structured_tool_call() -> Non
                             "properties": {"query": {"type": "string"}},
                             "required": ["query"],
                         },
+                        server_arguments={
+                            "catalog_fingerprint": "server-secret-fingerprint"
+                        },
                     ),
                 ),
             )
@@ -84,6 +87,7 @@ async def test_openai_compatible_provider_parses_a_structured_tool_call() -> Non
     assert payload["parallel_tool_calls"] is False
     assert payload["max_tokens"] == 256
     assert payload["tools"][0]["function"]["name"] == "governance__resolve_area"
+    assert "server-secret-fingerprint" not in captured[0].content.decode("utf-8")
     assert response.tool_calls[0].tool_id == "governance.resolve_area"
     assert response.tool_calls[0].arguments == {"query": "西湖区"}
     assert response.usage.total_tokens == 140

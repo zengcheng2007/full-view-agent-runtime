@@ -35,6 +35,7 @@ class SemanticToolPresentation:
     tool_version: str
     description: str
     input_schema: dict[str, object]
+    server_arguments: dict[str, object]
 
 
 class SemanticToolPresenter:
@@ -57,11 +58,27 @@ class SemanticToolPresenter:
         ]
         if not bindable:
             return None
+        input_schema = SemanticQueryInput.model_json_schema(mode="validation")
+        properties = input_schema.get("properties")
+        if isinstance(properties, dict):
+            properties.pop("catalog_version", None)
+            properties.pop("catalog_fingerprint", None)
+        required = input_schema.get("required")
+        if isinstance(required, list):
+            input_schema["required"] = [
+                item
+                for item in required
+                if item not in {"catalog_version", "catalog_fingerprint"}
+            ]
         return SemanticToolPresentation(
             tool_id=SEMANTIC_QUERY_TOOL_ID,
             tool_version=SEMANTIC_QUERY_TOOL_VERSION,
             description=self._build_description(view, bindable),
-            input_schema=SemanticQueryInput.model_json_schema(mode="validation"),
+            input_schema=input_schema,
+            server_arguments={
+                "catalog_version": self._catalog.catalog_version,
+                "catalog_fingerprint": self._catalog.execution_fingerprint,
+            },
         )
 
     def _build_description(
@@ -102,11 +119,21 @@ class SemanticToolPresenter:
             )
             or "无"
         )
+        required_filters = "、".join(
+            f"{item.field} {item.operator} {item.value}"
+            for item in subject.required_filters
+        )
+        required_filter_description = (
+            f"必填筛选 {required_filters}（查询必须携带，否则拒绝执行）；"
+            if required_filters
+            else ""
+        )
         return (
             f"- {subject.subject_id}（{subject.display_name}）："
             f"scope层级 {list(subject.scope_levels)}；"
             f"指标 {list(subject.metrics)}；"
             f"group_by {group_by}；"
             f"filters {filters}；"
+            f"{required_filter_description}"
             f"输出形态 {list(subject.output_forms)}。"
         )

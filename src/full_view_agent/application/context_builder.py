@@ -233,6 +233,7 @@ class AgentContextBuilder:
                     tool_id=semantic_presentation.tool_id,
                     description=semantic_presentation.description,
                     input_schema=semantic_presentation.input_schema,
+                    server_arguments=semantic_presentation.server_arguments,
                 )
             )
         return ModelRequest(

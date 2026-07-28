@@ -40,6 +40,8 @@ def _semantic_args(
     output: str = "table",
 ) -> dict[str, object]:
     return {
+        "catalog_version": SemanticCatalog.default().catalog_version,
+        "catalog_fingerprint": SemanticCatalog.default().execution_fingerprint,
         "spec": {
             "subject": "population",
             "metrics": ["person_count"],
@@ -388,6 +390,8 @@ async def test_synonymous_spec_does_not_evade_repetition_detection(
 ) -> None:
     # 键序不同的同义 spec：规范指纹相同，仍计入重复调用。
     reordered = {
+        "catalog_version": SemanticCatalog.default().catalog_version,
+        "catalog_fingerprint": SemanticCatalog.default().execution_fingerprint,
         "spec": {
             "group_by": ["street"],
             "output": "table",

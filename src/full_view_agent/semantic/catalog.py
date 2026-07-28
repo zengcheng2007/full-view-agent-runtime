@@ -25,6 +25,7 @@ from typing import Literal
 from pydantic import Field
 
 from full_view_agent.application.authorization_scope import area_is_within_scope
+from full_view_agent.application.fingerprints import canonical_fingerprint
 from full_view_agent.domain.models import ContractModel, MetricQueryScope
 from full_view_agent.semantic.authorization import SubjectAuthorization
 from full_view_agent.semantic.errors import UnknownSubjectError
@@ -113,6 +114,14 @@ class FilterSummary(ContractModel):
     allowed_values: tuple[str, ...]
 
 
+class RequiredFilterSummary(ContractModel):
+    """模型可见的强制筛选能力事实。"""
+
+    field: str
+    operator: str
+    value: str | int | float | bool
+
+
 class GroupBySummary(ContractModel):
     """模型可见的分组维度摘要：携带适用层级，避免只看到维度名。"""
 
@@ -130,6 +139,7 @@ class SubjectCapabilityView(ContractModel):
     metrics: tuple[str, ...]
     group_by: tuple[GroupBySummary, ...]
     filters: tuple[FilterSummary, ...]
+    required_filters: tuple[RequiredFilterSummary, ...] = ()
     output_forms: tuple[str, ...]
 
 
@@ -317,6 +327,26 @@ class SemanticCatalog:
         return self._catalog_version
 
     @property
+    def execution_fingerprint(self) -> str:
+        """Fingerprint every Catalog fact that can change compiled execution."""
+
+        return canonical_fingerprint(
+            domain="semantic-catalog-execution:1.0",
+            value={
+                "catalog_version": self._catalog_version,
+                "supported_spec_versions": list(self._supported_spec_versions),
+                "subjects": {
+                    subject_id: self._subjects[subject_id].model_dump(mode="json")
+                    for subject_id in sorted(self._subjects)
+                },
+                "bindings": {
+                    subject_id: self._bindings[subject_id].model_dump(mode="json")
+                    for subject_id in sorted(self._bindings)
+                },
+            },
+        )
+
+    @property
     def supported_spec_versions(self) -> tuple[str, ...]:
         return self._supported_spec_versions
 
@@ -413,6 +443,14 @@ class SemanticCatalog:
                                 allowed_values=filter_definition.allowed_values,
                             )
                             for filter_definition in subject.filters
+                        ),
+                        required_filters=tuple(
+                            RequiredFilterSummary(
+                                field=required_filter.field,
+                                operator=required_filter.operator,
+                                value=required_filter.value,
+                            )
+                            for required_filter in subject.required_filters
                         ),
                         output_forms=tuple(subject.output_forms),
                     )

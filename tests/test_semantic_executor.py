@@ -74,7 +74,11 @@ def _semantic_args(**spec_overrides: object) -> dict[str, object]:
         "group_by": ["street"],
     }
     spec.update(spec_overrides)
-    return {"spec": spec}
+    return {
+        "catalog_version": SemanticCatalog.default().catalog_version,
+        "catalog_fingerprint": SemanticCatalog.default().execution_fingerprint,
+        "spec": spec,
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -221,6 +225,8 @@ async def test_executor_housing_subject_is_denied_entry_not_executed() -> None:
         tool_call_id="tcl-housing",
         tool_id=SEMANTIC_QUERY_TOOL_ID,
         raw_arguments={
+            "catalog_version": SemanticCatalog.default().catalog_version,
+            "catalog_fingerprint": SemanticCatalog.default().execution_fingerprint,
             "spec": {
                 "subject": "housing",
                 "metrics": ["dwelling_count"],
@@ -325,6 +331,8 @@ def test_fingerprinter_converges_synonymous_specs_to_canonical_fingerprint() -> 
     second = ToolAction(
         tool_id=SEMANTIC_QUERY_TOOL_ID,
         arguments={
+            "catalog_version": SemanticCatalog.default().catalog_version,
+            "catalog_fingerprint": SemanticCatalog.default().execution_fingerprint,
             "spec": {
                 "group_by": ["street"],
                 "filters": [

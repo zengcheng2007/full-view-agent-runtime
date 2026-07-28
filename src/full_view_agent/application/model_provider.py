@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Literal, Protocol
 
 
@@ -17,6 +17,9 @@ class ModelToolDefinition:
     tool_id: str
     description: str
     input_schema: dict[str, object]
+    # Server-owned arguments are never sent to the model. ModelPlanner injects
+    # them into the accepted ToolAction before it reaches a durable checkpoint.
+    server_arguments: dict[str, object] = field(default_factory=dict)
 
 
 @dataclass(frozen=True)

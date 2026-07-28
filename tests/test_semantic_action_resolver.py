@@ -49,7 +49,11 @@ def _population_spec(**spec_overrides: object) -> dict[str, object]:
         "group_by": ["street"],
     }
     spec.update(spec_overrides)
-    return {"spec": spec}
+    return {
+        "catalog_version": SemanticCatalog.default().catalog_version,
+        "catalog_fingerprint": SemanticCatalog.default().execution_fingerprint,
+        "spec": spec,
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -130,6 +134,8 @@ def test_resolver_fingerprints_are_deterministic_across_key_order() -> None:
     resolver = _resolver()
     first = resolver.resolve(_population_spec(), auth_context=population_auth_context())
     reordered = {
+        "catalog_version": SemanticCatalog.default().catalog_version,
+        "catalog_fingerprint": SemanticCatalog.default().execution_fingerprint,
         "spec": {
             "group_by": ["street"],
             "scope": {"include_descendants": True, "area_code": "330106"},
@@ -176,6 +182,8 @@ def test_s1a_allowlist_only_binds_population() -> None:
 def test_resolver_rejects_catalog_subjects_outside_s1a_allowlist(subject: str) -> None:
     resolution = _resolver().resolve(
         {
+            "catalog_version": SemanticCatalog.default().catalog_version,
+            "catalog_fingerprint": SemanticCatalog.default().execution_fingerprint,
             "spec": {
                 "subject": subject,
                 "metrics": ["dwelling_count"],
@@ -193,7 +201,15 @@ def test_resolver_rejects_catalog_subjects_outside_s1a_allowlist(subject: str) -
 
 def test_resolver_rejects_unknown_subject_with_catalog_violation() -> None:
     resolution = _resolver().resolve(
-        {"spec": {"subject": "traffic", "metrics": ["x"], "scope": {"area_code": "330106"}}},
+        {
+            "catalog_version": SemanticCatalog.default().catalog_version,
+            "catalog_fingerprint": SemanticCatalog.default().execution_fingerprint,
+            "spec": {
+                "subject": "traffic",
+                "metrics": ["x"],
+                "scope": {"area_code": "330106"},
+            },
+        },
         auth_context=population_auth_context(),
     )
 
@@ -428,8 +444,10 @@ def test_resolver_rejects_spec_version_not_supported_by_catalog() -> None:
         subjects=current.subjects,
         bindings=current.bindings,
     )
+    arguments = _population_spec()
+    arguments["catalog_fingerprint"] = newer.execution_fingerprint
     resolution = _resolver(catalog=newer).resolve(
-        _population_spec(), auth_context=population_auth_context()
+        arguments, auth_context=population_auth_context()
     )
 
     assert isinstance(resolution, RejectedSemanticAction)
@@ -449,8 +467,10 @@ def test_resolver_rejects_capability_version_drift_against_registry() -> None:
         subjects=catalog.subjects,
         bindings=drifted_bindings,
     )
+    arguments = _population_spec()
+    arguments["catalog_fingerprint"] = drifted.execution_fingerprint
     resolution = _resolver(catalog=drifted).resolve(
-        _population_spec(), auth_context=population_auth_context()
+        arguments, auth_context=population_auth_context()
     )
 
     assert isinstance(resolution, DeniedSemanticAction)

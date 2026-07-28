@@ -75,10 +75,23 @@ class ModelPlanner:
             raise ModelContractError("model returned more than one tool call")
         if response.tool_calls:
             call = response.tool_calls[0]
-            advertised_tool_ids = {tool.tool_id for tool in request.tools}
-            if call.tool_id not in advertised_tool_ids:
+            advertised_tools = {tool.tool_id: tool for tool in request.tools}
+            advertised = advertised_tools.get(call.tool_id)
+            if advertised is None:
                 raise ModelContractError("model selected an unavailable tool")
-            return ToolAction(tool_id=call.tool_id, arguments=call.arguments)
+            server_arguments = advertised.server_arguments
+            attempted_server_fields = sorted(
+                set(call.arguments).intersection(server_arguments)
+            )
+            if attempted_server_fields:
+                raise ModelContractError(
+                    "model attempted to set server-owned tool arguments: "
+                    + ", ".join(attempted_server_fields)
+                )
+            return ToolAction(
+                tool_id=call.tool_id,
+                arguments={**call.arguments, **server_arguments},
+            )
 
         summary = response.content.strip() if response.content is not None else ""
         if not summary:
