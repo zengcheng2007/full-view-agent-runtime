@@ -1,4 +1,4 @@
-<#!
+<#
 .SYNOPSIS
   编码-Agent模板 V3.2 的 Windows worktree 初始化器。
 
