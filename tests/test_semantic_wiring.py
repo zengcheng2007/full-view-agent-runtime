@@ -212,6 +212,9 @@ def test_presenter_derives_description_from_catalog_not_handwritten_list() -> No
 
     assert presentation is not None
     assert presentation.tool_id == SEMANTIC_QUERY_TOOL_ID
+    assert presentation.shadowed_tool_ids == (
+        "governance.query_population_metrics",
+    )
     description = presentation.description
     # 目录事实出现。
     assert catalog.catalog_version in description
@@ -252,12 +255,52 @@ async def test_context_builder_advertises_semantic_tool_and_prompt_section() -> 
     )
 
     tool_ids = [tool.tool_id for tool in request.tools]
-    assert SEMANTIC_QUERY_TOOL_ID in tool_ids
+    assert tool_ids == [SEMANTIC_QUERY_TOOL_ID]
+    assert "governance.query_population_metrics" not in tool_ids
     prompt = request.messages[0].content
     assert prompt is not None
     assert "语义查询入口说明" in prompt
     assert "semantic_query" in prompt
+    assert "governance.query_population_metrics" not in prompt
     assert request.prompt_version == "full-view-governance-readonly-v10"
+
+
+@pytest.mark.asyncio
+async def test_context_builder_keeps_unmigrated_subject_tools_visible() -> None:
+    store = InMemoryAgentStore()
+    service = SessionRunService(store)
+    session = await service.create_session(user_id="user-mixed", title="混合主题")
+    run = await service.create_run(
+        user_id="user-mixed", session_id=session.session_id, request=run_request()
+    )
+    base = population_auth_context()
+    auth = base.model_copy(
+        update={
+            "session_id": session.session_id,
+            "run_id": run.run_id,
+            "entitlements": [
+                "governance.population.aggregate.read",
+                "governance.housing.aggregate.read",
+            ],
+            "data_scopes": base.data_scopes.model_copy(
+                update={"datasets": ["population", "housing"]}
+            ),
+        }
+    )
+    request = await AgentContextBuilder(
+        store=store,
+        registry=ToolRegistry.default(),
+        semantic_presenter=SemanticToolPresenter(catalog=SemanticCatalog.default()),
+    ).build(
+        user_id="user-mixed",
+        auth_context=auth,
+        state=HarnessState(),
+    )
+
+    tool_ids = [tool.tool_id for tool in request.tools]
+    assert "governance.query_population_metrics" not in tool_ids
+    assert "governance.query_housing_metrics" in tool_ids
+    assert SEMANTIC_QUERY_TOOL_ID in tool_ids
 
 
 @pytest.mark.asyncio

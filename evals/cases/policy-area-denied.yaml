@@ -6,14 +6,19 @@ auth:
   area_codes: ["330106"]
   datasets: [population]
   entitlements: [governance.population.aggregate.read]
+  field_policy_set: governance_analyst_v1
 model_steps:
   - type: tool_call
-    tool_id: governance.query_population_metrics
+    tool_id: governance.semantic_query
     arguments:
-      query:
+      spec:
+        subject: population
         metrics: [person_count]
         scope: {area_code: "330108"}
-        filters: []
+        filters:
+          - field: person_category
+            operator: eq
+            value: solitary_elderly
         group_by: [street]
   - type: finish
     content: 当前区划不在授权范围内。
@@ -21,6 +26,6 @@ expected:
   terminal_status: completed
   outcome: denied
   completion_reason_code: AREA_OUT_OF_SCOPE
-  tool_ids: [governance.query_population_metrics]
+  tool_ids: [governance.semantic_query]
   min_evidence_count: 0
   required_event_types: [tool.completed, run.completed]

@@ -6,15 +6,17 @@ auth:
   area_codes: ["330106"]
   datasets: [administrative_area, population]
   entitlements: [governance.area.read, governance.population.aggregate.read]
+  field_policy_set: governance_analyst_v1
 model_steps:
   - type: tool_call
     tool_id: governance.resolve_area
     arguments:
       query: 西湖区
   - type: tool_call
-    tool_id: governance.query_population_metrics
+    tool_id: governance.semantic_query
     arguments:
-      query:
+      spec:
+        subject: population
         metrics: [person_count]
         scope: {area_code: "330106"}
         filters:
@@ -28,6 +30,6 @@ expected:
   terminal_status: completed
   outcome: success
   completion_reason_code: goal_completed
-  tool_ids: [governance.resolve_area, governance.query_population_metrics]
+  tool_ids: [governance.resolve_area, governance.semantic_query]
   min_evidence_count: 2
   required_event_types: [tool.completed, result.available, evidence.available, assistant.message.completed, run.completed]

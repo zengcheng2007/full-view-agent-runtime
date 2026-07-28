@@ -1,0 +1,20 @@
+# S1-B 能力评测：真实模型自主理解问法，不预编排 Tool 顺序。
+schema_version: "1.0"
+case_id: open-population-xihu-street
+description: "开放式：查询西湖区独居老人并按街道汇总"
+user_message: 帮我看看西湖区独居老人有多少，按街道汇总一下。
+auth:
+  area_codes: ["3301"]
+  datasets: [administrative_area, population]
+  entitlements: [governance.area.read, governance.population.aggregate.read]
+  field_policy_set: governance_analyst_v1
+model_steps: []
+expected:
+  terminal_status: completed
+  outcome: success
+  completion_reason_code: goal_completed
+  tool_ids: []
+  min_evidence_count: 1
+  required_event_types: [tool.completed, result.available, evidence.available, run.completed]
+  required_answer_substrings: [独居老人]
+  forbidden_answer_substrings: [无法完成, 没有可用工具]

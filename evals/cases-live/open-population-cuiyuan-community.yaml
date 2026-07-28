@@ -1,0 +1,20 @@
+# S1-B 口语化街道问法：验证区划解析和按社区粒度查询。
+schema_version: "1.0"
+case_id: open-population-cuiyuan-community
+description: "开放式：口语询问翠苑街道独居老人社区分布"
+user_message: 翠苑那边独居老人主要在哪些社区？按社区列一下。
+auth:
+  area_codes: ["330106"]
+  datasets: [administrative_area, population]
+  entitlements: [governance.area.read, governance.population.aggregate.read]
+  field_policy_set: governance_analyst_v1
+model_steps: []
+expected:
+  terminal_status: completed
+  outcome: success
+  completion_reason_code: goal_completed
+  tool_ids: []
+  min_evidence_count: 1
+  required_event_types: [tool.completed, result.available, evidence.available, run.completed]
+  required_answer_substrings: [独居老人]
+  forbidden_answer_substrings: [无法完成, 没有可用工具]

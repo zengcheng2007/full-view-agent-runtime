@@ -170,13 +170,23 @@ class QueueModelProvider:
             ModelResponse(
                 content=None,
                 tool_calls=(
+                    # S1-B：生产准入下人口规范 Tool 被语义入口遮蔽，模型
+                    # 只能调用 semantic_query；catalog_version/fingerprint
+                    # 由服务端注入，模型参数不得携带（携带即契约错误）。
                     ModelToolCall(
-                        tool_id="governance.query_population_metrics",
+                        tool_id="governance.semantic_query",
                         arguments={
-                            "query": {
+                            "spec": {
+                                "subject": "population",
                                 "metrics": ["person_count"],
                                 "scope": {"area_code": "330106"},
-                                "filters": [],
+                                "filters": [
+                                    {
+                                        "field": "person_category",
+                                        "operator": "eq",
+                                        "value": "solitary_elderly",
+                                    }
+                                ],
                                 "group_by": ["street"],
                             }
                         },
@@ -649,6 +659,18 @@ async def test_injected_model_provider_drives_the_runtime_agent_loop() -> None:
     last_msgs = provider.requests[1].messages
     tool_msgs = [m for m in last_msgs if m.role == "tool"]
     assert len(tool_msgs) >= 1
+    # S1-B：模型侧入口为语义虚拟 Tool，且回放消息中携带服务端注入的
+    # 目录版本钉扎；观察仍由规范人口 Tool 产生（语义入口执行同一规范链路）。
+    semantic_calls = [
+        call
+        for message in last_msgs
+        if message.role == "assistant"
+        for call in message.tool_calls
+        if call.tool_id == "governance.semantic_query"
+    ]
+    assert len(semantic_calls) == 1
+    assert "catalog_version" in semantic_calls[0].arguments
+    assert "catalog_fingerprint" in semantic_calls[0].arguments
     assert "governance.query_population_metrics" in tool_msgs[-1].content
 
 

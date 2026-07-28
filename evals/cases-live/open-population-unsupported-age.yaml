@@ -1,0 +1,20 @@
+# S1-B 能力边界：真实接口不支持年龄叠加筛选，模型不得编造数值。
+schema_version: "1.0"
+case_id: open-population-unsupported-age
+description: "开放式：拒绝当前人口接口不支持的年龄附加筛选"
+user_message: 查一下西湖区80岁以上的独居老人，按街道分布。
+auth:
+  area_codes: ["3301"]
+  datasets: [administrative_area, population]
+  entitlements: [governance.area.read, governance.population.aggregate.read]
+  field_policy_set: governance_analyst_v1
+model_steps: []
+expected:
+  terminal_status: completed
+  outcome: success
+  completion_reason_code: goal_completed
+  tool_ids: []
+  min_evidence_count: 0
+  required_event_types: [run.completed]
+  required_answer_substrings: [不支持]
+  forbidden_answer_substrings: ["80岁以上独居老人共有", "80岁以上独居老人数量为"]

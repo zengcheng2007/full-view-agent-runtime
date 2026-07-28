@@ -6,17 +6,20 @@ auth:
   area_codes: ["3301"]
   datasets: [administrative_area, population]
   entitlements: [governance.area.read, governance.population.aggregate.read]
+  field_policy_set: governance_analyst_v1
 model_steps:
   - type: tool_call
     tool_id: governance.resolve_area
     arguments:
       query: 宁波市
   - type: tool_call
-    tool_id: governance.query_population_metrics
+    tool_id: governance.semantic_query
     arguments:
-      query:
+      spec:
+        subject: population
         metrics: [person_count]
-        scope: {area_code: "3302", include_descendants: true}
+        # 海曙区（宁波市辖）：6 位区县层级、授权范围外，语义层确定性拒绝。
+        scope: {area_code: "330203", include_descendants: true}
         filters:
           - {field: person_category, operator: eq, value: solitary_elderly}
         group_by: [street]
@@ -26,6 +29,6 @@ expected:
   terminal_status: completed
   outcome: denied
   completion_reason_code: AREA_OUT_OF_SCOPE
-  tool_ids: [governance.resolve_area, governance.query_population_metrics]
+  tool_ids: [governance.resolve_area, governance.semantic_query]
   min_evidence_count: 0
   required_event_types: [tool.completed, run.completed]

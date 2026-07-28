@@ -6,27 +6,29 @@ auth:
   area_codes: ["3301"]
   datasets: [administrative_area, population, housing, event, governance_objects]
   entitlements: [governance.area.read, governance.population.aggregate.read, governance.housing.aggregate.read, governance.event.aggregate.read, governance.object.profile.read]
+  field_policy_set: governance_analyst_v1
 model_steps:
   - type: tool_call
     tool_id: governance.resolve_area
     arguments:
       query: 西湖区
   - type: tool_call
-    tool_id: governance.query_population_metrics
+    tool_id: governance.semantic_query
     arguments:
-      query:
+      spec:
+        subject: population
         metrics: [person_count]
         scope: {area_code: "330106", include_descendants: true}
         filters:
           - {field: person_category, operator: eq, value: solitary_elderly}
         group_by: [street]
-        presentation_hint: choropleth
+        output: choropleth
   - type: finish
     content: 已按街道生成独居老人分色图数据，地图渲染命令已下发。
 expected:
   terminal_status: completed
   outcome: success
   completion_reason_code: goal_completed
-  tool_ids: [governance.resolve_area, governance.query_population_metrics]
+  tool_ids: [governance.resolve_area, governance.semantic_query]
   min_evidence_count: 2
   required_event_types: [tool.completed, result.available, evidence.available, run.completed]

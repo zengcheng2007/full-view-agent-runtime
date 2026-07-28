@@ -428,9 +428,11 @@ async def test_production_wiring_population_resolve_and_query_over_http(
         "/geo-qxst/area/getAreaInfoByAreaName",
         "/geo-qxst/getNextSiteData",
     ]
+    # S1-B：生产准入钉扎 governance_analyst_v1，人口查询经语义入口落到
+    # 同一规范 HTTP 链路；Evidence 数量与凭据防泄漏契约保持不变。
     assert trace.tool_ids == [
         "governance.resolve_area",
-        "governance.query_population_metrics",
+        "governance.semantic_query",
     ]
     assert len(trace.evidence_ids) >= 2
     serialized = trace.model_dump_json()

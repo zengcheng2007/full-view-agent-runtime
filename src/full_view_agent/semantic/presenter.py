@@ -36,6 +36,10 @@ class SemanticToolPresentation:
     description: str
     input_schema: dict[str, object]
     server_arguments: dict[str, object]
+    # Canonical capabilities represented by this model-facing semantic Tool.
+    # They remain executable internally but must not be advertised in parallel,
+    # otherwise the model can bypass Catalog validation or execute twice.
+    shadowed_tool_ids: tuple[str, ...]
 
 
 class SemanticToolPresenter:
@@ -79,6 +83,14 @@ class SemanticToolPresenter:
                 "catalog_version": self._catalog.catalog_version,
                 "catalog_fingerprint": self._catalog.execution_fingerprint,
             },
+            shadowed_tool_ids=tuple(
+                sorted(
+                    binding.capability_id
+                    for subject in bindable
+                    if (binding := self._catalog.binding(subject.subject_id))
+                    is not None
+                )
+            ),
         )
 
     def _build_description(

@@ -1,0 +1,20 @@
+# S1-B 同义/分析问法：验证模型根据同一原子能力自主完成查询与排序总结。
+schema_version: "1.0"
+case_id: open-population-xihu-ranking
+description: "开放式：询问西湖区独居老人主要集中街道"
+user_message: 西湖区哪些街道的独居老人比较多？从高到低告诉我。
+auth:
+  area_codes: ["3301"]
+  datasets: [administrative_area, population]
+  entitlements: [governance.area.read, governance.population.aggregate.read]
+  field_policy_set: governance_analyst_v1
+model_steps: []
+expected:
+  terminal_status: completed
+  outcome: success
+  completion_reason_code: goal_completed
+  tool_ids: []
+  min_evidence_count: 1
+  required_event_types: [tool.completed, result.available, evidence.available, run.completed]
+  required_answer_substrings: [独居老人]
+  forbidden_answer_substrings: [无法完成, 没有可用工具]

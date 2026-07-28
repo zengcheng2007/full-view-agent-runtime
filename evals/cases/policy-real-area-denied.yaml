@@ -6,6 +6,7 @@ auth:
   area_codes: ["3301"]
   datasets: [population]
   entitlements: [governance.population.aggregate.read]
+  field_policy_set: governance_analyst_v1
 model_steps:
   - type: finish
     content: 宁波市不在本账号的授权范围内，无法查询。
@@ -23,4 +24,4 @@ expected:
       tool_ids: []
     - outcome: denied
       completion_reason_code: AREA_OUT_OF_SCOPE
-      tool_ids: [governance.query_population_metrics]
+      tool_ids: [governance.semantic_query]

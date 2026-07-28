@@ -74,19 +74,26 @@ class AgentContextBuilder:
         }
         entitlements = set(auth_context.entitlements)
         datasets = set(auth_context.data_scopes.datasets)
+        # S1-B：语义虚拟 Tool 的可见性与描述由授权派生。它接管的
+        # canonical Tool 仍供内部执行，但不再与语义入口同时暴露给模型，
+        # 防止绕过 Catalog 约束或对同一规范动作重复查询。
+        semantic_presentation = (
+            self._semantic_presenter.present(auth_context=auth_context)
+            if self._semantic_presenter is not None
+            else None
+        )
+        shadowed_tool_ids = (
+            frozenset(semantic_presentation.shadowed_tool_ids)
+            if semantic_presentation is not None
+            else frozenset()
+        )
         # 提示词能力清单与模型可选 Tool 共用同一授权过滤条件，
         # 保证提示词不宣称未注册或未授权的 Tool。
         authorized_tool_ids = tuple(
             tool_id
             for tool_id in self._registry.list_tool_ids()
+            if tool_id not in shadowed_tool_ids
             if self._is_tool_authorized(tool_id, entitlements, datasets)
-        )
-        # S1-A：语义虚拟 Tool 的可见性与描述同样由授权派生；
-        # presenter 未注入或授权不足时为 None（fail closed）。
-        semantic_presentation = (
-            self._semantic_presenter.present(auth_context=auth_context)
-            if self._semantic_presenter is not None
-            else None
         )
         messages = [
             ModelMessage(
@@ -210,6 +217,8 @@ class AgentContextBuilder:
         }
         tools: list[ModelToolDefinition] = []
         for tool_id in self._registry.list_tool_ids():
+            if tool_id in shadowed_tool_ids:
+                continue
             if tool_id in terminal_tool_ids:
                 continue
             if not self._is_tool_authorized(tool_id, entitlements, datasets):
@@ -222,11 +231,10 @@ class AgentContextBuilder:
                     input_schema=self._registry.get_input_schema(tool_id),
                 )
             )
-        # 语义虚拟 Tool 不与规范 Tool 互斥：canonical Tool 成功后
-        # 模型仍可发起新的 semantic_query（换区域/换形态的连续追问）。
         if (
             semantic_presentation is not None
             and semantic_presentation.tool_id not in terminal_tool_ids
+            and not shadowed_tool_ids.intersection(terminal_tool_ids)
         ):
             tools.append(
                 ModelToolDefinition(
