@@ -17,7 +17,14 @@ from full_view_agent.application.semantic_wiring import (
 )
 from full_view_agent.application.session_run_service import SessionRunService
 from full_view_agent.application.tool_registry import ToolRegistry
-from full_view_agent.domain.models import AuthContext, RunCreateRequest
+from full_view_agent.domain.models import (
+    AuthContext,
+    PopulationMetricRow,
+    PopulationMetricTable,
+    RunCreateRequest,
+    TableDataResult,
+    ToolResult,
+)
 from full_view_agent.infrastructure.event_broker import InMemoryEventBroker
 from full_view_agent.infrastructure.governance_adapter import (
     InMemoryGovernanceAdapter,
@@ -329,6 +336,94 @@ async def test_context_builder_hides_semantic_tool_without_authorization() -> No
     )
 
     assert SEMANTIC_QUERY_TOOL_ID not in [tool.tool_id for tool in request.tools]
+
+
+@pytest.mark.asyncio
+async def test_context_builder_population_takeover_fails_closed_for_unknown_policy() -> None:
+    store = InMemoryAgentStore()
+    service = SessionRunService(store)
+    session = await service.create_session(user_id="user-policy", title="字段策略")
+    run = await service.create_run(
+        user_id="user-policy", session_id=session.session_id, request=run_request()
+    )
+    base = population_auth_context()
+    auth = base.model_copy(
+        update={
+            "session_id": session.session_id,
+            "run_id": run.run_id,
+            "data_scopes": base.data_scopes.model_copy(
+                update={"field_policy_set": "unsupported_policy"}
+            ),
+        }
+    )
+
+    request = await AgentContextBuilder(
+        store=store,
+        registry=ToolRegistry.default(),
+        semantic_presenter=SemanticToolPresenter(catalog=SemanticCatalog.default()),
+    ).build(
+        user_id="user-policy",
+        auth_context=auth,
+        state=HarnessState(),
+    )
+
+    tool_ids = [tool.tool_id for tool in request.tools]
+    assert SEMANTIC_QUERY_TOOL_ID not in tool_ids
+    assert "governance.query_population_metrics" not in tool_ids
+    assert "governance.query_population_metrics" not in request.messages[0].content
+
+
+@pytest.mark.asyncio
+async def test_context_builder_keeps_semantic_entry_for_distinct_follow_up_query() -> None:
+    store = InMemoryAgentStore()
+    service = SessionRunService(store)
+    session = await service.create_session(user_id="user-followup", title="连续查询")
+    run = await service.create_run(
+        user_id="user-followup", session_id=session.session_id, request=run_request()
+    )
+    auth = population_auth_context().model_copy(
+        update={"session_id": session.session_id, "run_id": run.run_id}
+    )
+    state = HarnessState(
+        tool_results=(
+            ToolResult(
+                tool_call_id="tcl-semantic-01",
+                tool_id="governance.query_population_metrics",
+                tool_version="1.0.0",
+                status="success",
+                summary="首次人口查询完成",
+                data_result=TableDataResult(
+                    result_id="res-semantic-01",
+                    data_schema_ref="schema://data/population-metric-table/1.0.0",
+                    result_fingerprint="sha256:semantic-01",
+                    data=PopulationMetricTable(
+                        rows=[
+                            PopulationMetricRow(
+                                area_code="330106001",
+                                area_name="示例街道",
+                                person_count=128,
+                            )
+                        ]
+                    ),
+                    row_count=1,
+                ),
+            ),
+        )
+    )
+
+    request = await AgentContextBuilder(
+        store=store,
+        registry=ToolRegistry.default(),
+        semantic_presenter=SemanticToolPresenter(catalog=SemanticCatalog.default()),
+    ).build(
+        user_id="user-followup",
+        auth_context=auth,
+        state=state,
+    )
+
+    tool_ids = [tool.tool_id for tool in request.tools]
+    assert SEMANTIC_QUERY_TOOL_ID in tool_ids
+    assert "governance.query_population_metrics" not in tool_ids
 
 
 # ---------------------------------------------------------------------------

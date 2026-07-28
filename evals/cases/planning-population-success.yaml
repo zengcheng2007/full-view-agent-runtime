@@ -1,16 +1,18 @@
 schema_version: "1.0"
 case_id: planning-population-success
-description: 选择人口聚合 Tool 并完成授权范围内查询
+description: 通过人口语义入口完成授权范围内查询
 user_message: 查询西湖区独居老人数量
 auth:
   area_codes: ["330106"]
   datasets: [population]
   entitlements: [governance.population.aggregate.read]
+  field_policy_set: governance_analyst_v1
 model_steps:
   - type: tool_call
-    tool_id: governance.query_population_metrics
+    tool_id: governance.semantic_query
     arguments:
-      query:
+      spec:
+        subject: population
         metrics: [person_count]
         scope: {area_code: "330106"}
         filters:
@@ -26,6 +28,6 @@ expected:
   terminal_status: completed
   outcome: success
   completion_reason_code: goal_completed
-  tool_ids: [governance.query_population_metrics]
+  tool_ids: [governance.semantic_query]
   min_evidence_count: 1
   required_event_types: [tool.completed, result.available, evidence.available, run.completed]

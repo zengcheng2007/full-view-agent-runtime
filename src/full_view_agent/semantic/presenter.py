@@ -52,6 +52,24 @@ class SemanticToolPresenter:
         self._catalog = catalog
         self._bindable_subjects = frozenset(bindable_subjects)
 
+    @property
+    def shadowed_tool_ids(self) -> tuple[str, ...]:
+        """Canonical Tools owned by this model-facing semantic entry.
+
+        Takeover is deployment configuration, not an authorization outcome.
+        Even when the current field policy cannot produce a semantic
+        presentation, these Tools must stay hidden from the model so an
+        incomplete authorization fails closed instead of bypassing Catalog.
+        """
+
+        return tuple(
+            sorted(
+                binding.capability_id
+                for subject_id in self._bindable_subjects
+                if (binding := self._catalog.binding(subject_id)) is not None
+            )
+        )
+
     def present(self, *, auth_context: AuthContext) -> SemanticToolPresentation | None:
         authorization = SubjectAuthorization.from_auth_context(auth_context)
         view = self._catalog.model_capability_view(authorization)
@@ -83,14 +101,7 @@ class SemanticToolPresenter:
                 "catalog_version": self._catalog.catalog_version,
                 "catalog_fingerprint": self._catalog.execution_fingerprint,
             },
-            shadowed_tool_ids=tuple(
-                sorted(
-                    binding.capability_id
-                    for subject in bindable
-                    if (binding := self._catalog.binding(subject.subject_id))
-                    is not None
-                )
-            ),
+            shadowed_tool_ids=self.shadowed_tool_ids,
         )
 
     def _build_description(

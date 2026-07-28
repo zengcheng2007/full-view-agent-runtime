@@ -28,12 +28,19 @@ class TwoStepLiveModelProvider:
                 content=None,
                 tool_calls=(
                     ModelToolCall(
-                        tool_id="governance.query_population_metrics",
+                        tool_id="governance.semantic_query",
                         arguments={
-                            "query": {
+                            "spec": {
+                                "subject": "population",
                                 "metrics": ["person_count"],
                                 "scope": {"area_code": "330106"},
-                                "filters": [],
+                                "filters": [
+                                    {
+                                        "field": "person_category",
+                                        "operator": "eq",
+                                        "value": "solitary_elderly",
+                                    }
+                                ],
                                 "group_by": ["street"],
                             }
                         },
@@ -64,15 +71,28 @@ def population_case(*, area_code: str = "330106") -> EvalCase:
             "case_id": "population-success",
             "description": "授权范围内人口聚合查询",
             "user_message": "查询西湖区独居老人数量",
+            "auth": {
+                "area_codes": ["330106"],
+                "datasets": ["population"],
+                "entitlements": ["governance.population.aggregate.read"],
+                "field_policy_set": "governance_analyst_v1",
+            },
             "model_steps": [
                 {
                     "type": "tool_call",
-                    "tool_id": "governance.query_population_metrics",
+                    "tool_id": "governance.semantic_query",
                     "arguments": {
-                        "query": {
+                        "spec": {
+                            "subject": "population",
                             "metrics": ["person_count"],
                             "scope": {"area_code": area_code},
-                            "filters": [],
+                            "filters": [
+                                {
+                                    "field": "person_category",
+                                    "operator": "eq",
+                                    "value": "solitary_elderly",
+                                }
+                            ],
                             "group_by": ["street"],
                         }
                     },
@@ -88,7 +108,7 @@ def population_case(*, area_code: str = "330106") -> EvalCase:
                 "terminal_status": "completed",
                 "outcome": "success",
                 "completion_reason_code": "goal_completed",
-                "tool_ids": ["governance.query_population_metrics"],
+                "tool_ids": ["governance.semantic_query"],
                 "min_evidence_count": 1,
                 "required_event_types": [
                     "tool.completed",
@@ -106,7 +126,7 @@ async def test_eval_runner_executes_real_runtime_components_and_grades_success()
 
     assert trace.passed is True
     assert trace.terminal_status == "completed"
-    assert trace.tool_ids == ["governance.query_population_metrics"]
+    assert trace.tool_ids == ["governance.semantic_query"]
     assert len(trace.evidence_ids) == 1
     assert trace.total_tokens == 150
     assert all(grade.passed for grade in trace.grades)
@@ -155,38 +175,6 @@ async def test_eval_runner_semantic_entry_is_differential_safe() -> None:
     serialized = langgraph.model_dump_json()
     assert "governance.semantic_query" in serialized
     assert "getNextSiteData" not in serialized
-
-
-@pytest.mark.asyncio
-@pytest.mark.parametrize("orchestrator", ["native", "langgraph"])
-async def test_eval_runner_semantic_vs_direct_scripted_differential(
-    orchestrator: str,
-) -> None:
-    # S1-A Native freeze（direct scripted differential）：同一业务问题经
-    # 语义入口与直接规范 Tool 两条脚本路径，外部可观测契约一致；模型
-    # 可见的入口 Tool 不同属预期差异，规范执行链路与生命周期相同。
-    semantic_case = load_eval_case(
-        EVAL_CASES / "planning-population-semantic-success.yaml"
-    )
-    direct_case = load_eval_case(EVAL_CASES / "planning-population-success.yaml")
-
-    semantic = await EvalRunner(orchestrator=orchestrator).run(semantic_case)
-    direct = await EvalRunner(orchestrator=orchestrator).run(direct_case)
-
-    assert semantic.passed is True
-    assert direct.passed is True
-    # 模型侧入口不同：语义虚拟 Tool vs 规范 Tool（唯一预期差异）。
-    assert semantic.tool_ids == ["governance.semantic_query"]
-    assert direct.tool_ids == ["governance.query_population_metrics"]
-    # 规范执行契约对齐：终态、事件生命周期、Evidence 数量一致。
-    assert semantic.terminal_status == direct.terminal_status == "completed"
-    assert semantic.outcome == direct.outcome == "success"
-    assert semantic.completion_reason_code == direct.completion_reason_code
-    assert semantic.event_types == direct.event_types
-    assert len(semantic.evidence_ids) == len(direct.evidence_ids) == 1
-    assert semantic.event_types.count("frontend.command.requested") == direct.event_types.count(
-        "frontend.command.requested"
-    )
 
 
 @pytest.mark.asyncio
@@ -246,6 +234,12 @@ async def test_eval_runner_grades_normalized_model_failure() -> None:
             "case_id": "model-timeout",
             "description": "模型超时可靠收敛",
             "user_message": "查询人口",
+            "auth": {
+                "area_codes": ["330106"],
+                "datasets": ["population"],
+                "entitlements": ["governance.population.aggregate.read"],
+                "field_policy_set": "governance_analyst_v1",
+            },
             "model_steps": [
                 {
                     "type": "error",
@@ -313,6 +307,12 @@ async def test_eval_runner_injects_tool_timeout_before_downstream_call() -> None
             "case_id": "population-tool-timeout",
             "description": "人口 Tool 超时后可靠失败",
             "user_message": "查询西湖区独居老人数量",
+            "auth": {
+                "area_codes": ["330106"],
+                "datasets": ["population"],
+                "entitlements": ["governance.population.aggregate.read"],
+                "field_policy_set": "governance_analyst_v1",
+            },
             "fault": {
                 "type": "upstream_timeout",
                 "tool_id": "governance.query_population_metrics",
@@ -320,9 +320,10 @@ async def test_eval_runner_injects_tool_timeout_before_downstream_call() -> None
             "model_steps": [
                 {
                     "type": "tool_call",
-                    "tool_id": "governance.query_population_metrics",
+                    "tool_id": "governance.semantic_query",
                     "arguments": {
-                        "query": {
+                        "spec": {
+                            "subject": "population",
                             "metrics": ["person_count"],
                             "scope": {"area_code": "330106"},
                             "filters": [
@@ -342,7 +343,7 @@ async def test_eval_runner_injects_tool_timeout_before_downstream_call() -> None
                 "terminal_status": "failed",
                 "outcome": "failed",
                 "completion_reason_code": "upstream_timeout",
-                "tool_ids": ["governance.query_population_metrics"],
+                "tool_ids": ["governance.semantic_query"],
                 "min_evidence_count": 0,
                 "required_event_types": ["tool.failed", "run.failed"],
             },
@@ -450,7 +451,7 @@ async def test_eval_runner_accepts_one_of_multiple_complete_terminal_variants() 
                     {
                         "outcome": "denied",
                         "completion_reason_code": "AREA_OUT_OF_SCOPE",
-                        "tool_ids": ["governance.query_population_metrics"],
+                        "tool_ids": ["governance.semantic_query"],
                     },
                 ],
             },

@@ -33,6 +33,9 @@ SUMMARY_MARKER = "[会话摘要]"
 class SemanticToolPresenting(Protocol):
     """S1-A：按当前授权派生 semantic_query 虚拟 Tool（fail closed）。"""
 
+    @property
+    def shadowed_tool_ids(self) -> tuple[str, ...]: ...
+
     def present(
         self, *, auth_context: AuthContext
     ) -> SemanticToolPresentation | None: ...
@@ -83,8 +86,8 @@ class AgentContextBuilder:
             else None
         )
         shadowed_tool_ids = (
-            frozenset(semantic_presentation.shadowed_tool_ids)
-            if semantic_presentation is not None
+            frozenset(self._semantic_presenter.shadowed_tool_ids)
+            if self._semantic_presenter is not None
             else frozenset()
         )
         # 提示词能力清单与模型可选 Tool 共用同一授权过滤条件，
@@ -234,7 +237,6 @@ class AgentContextBuilder:
         if (
             semantic_presentation is not None
             and semantic_presentation.tool_id not in terminal_tool_ids
-            and not shadowed_tool_ids.intersection(terminal_tool_ids)
         ):
             tools.append(
                 ModelToolDefinition(
