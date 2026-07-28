@@ -14,11 +14,13 @@ from full_view_agent.application.tool_registry import ToolRegistry
 from full_view_agent.domain.models import AuthContext, RunCreateRequest
 from full_view_agent.evaluation.contracts import (
     EvalCase,
+    EvalExpected,
     EvalFinishStep,
     EvalGrade,
     EvalMessageRecord,
     EvalModelRequestRecord,
     EvalTrace,
+    EvalTurnTrace,
     GradeValue,
 )
 from full_view_agent.evaluation.faults import FaultInjectingEvalAdapter
@@ -115,7 +117,26 @@ class EvalRunner:
     async def replay(self, case: EvalCase, trace: EvalTrace) -> EvalTrace:
         if case.case_id != trace.case_id:
             raise ValueError("eval case_id does not match replay trace case_id")
-        replay_case = case.model_copy(update={"model_steps": trace.model_steps})
+        if trace.turns:
+            expected_turn_count = 1 + len(case.follow_up_turns)
+            if len(trace.turns) != expected_turn_count:
+                raise ValueError("eval trace turn count does not match eval case")
+            replay_case = case.model_copy(
+                update={
+                    "model_steps": trace.turns[0].model_steps,
+                    "follow_up_turns": [
+                        follow_up.model_copy(
+                            update={"model_steps": trace.turns[index].model_steps}
+                        )
+                        for index, follow_up in enumerate(
+                            case.follow_up_turns,
+                            start=1,
+                        )
+                    ],
+                }
+            )
+        else:
+            replay_case = case.model_copy(update={"model_steps": trace.model_steps})
         replayed = await self._run(replay_case, force_scripted=True)
         return replayed.model_copy(
             update={
@@ -151,11 +172,19 @@ class EvalRunner:
         service = SessionRunService(store)
         registry = ToolRegistry.default()
         use_live_provider = self._provider is not None and not force_scripted
+        scripted_steps = [
+            *case.model_steps,
+            *(
+                step
+                for follow_up in case.follow_up_turns
+                for step in follow_up.model_steps
+            ),
+        ]
         if use_live_provider:
             assert self._provider is not None
             provider = RecordingModelProvider(self._provider)
-        elif case.model_steps:
-            provider = ScriptedModelProvider(case.model_steps)
+        elif scripted_steps:
+            provider = ScriptedModelProvider(scripted_steps)
         else:
             raise ValueError(
                 f"case {case.case_id}: model_steps is empty and no live "
@@ -166,17 +195,6 @@ class EvalRunner:
         session = await service.create_session(
             user_id=user_id,
             title=case.description[:200],
-        )
-        run = await service.create_run(
-            user_id=user_id,
-            session_id=session.session_id,
-            request=_run_request(case),
-        )
-        auth_context = await environment.build_auth_context(
-            case=case,
-            user_id=user_id,
-            session_id=session.session_id,
-            run_id=run.run_id,
         )
         adapter = environment.adapter
         if case.fault is not None:
@@ -196,47 +214,106 @@ class EvalRunner:
             if self._orchestrator == "native"
             else LangGraphOrchestrator
         )
-        executor = orchestrator_type(
-            service=service,
-            store=store,
-            events=events,
-            auth_context_provider=StaticAuthContextProvider(auth_context),
-            capability=stack.capability,
-            harness=stack.build_harness(),
-            registry=registry,
-            planner_factory=ModelPlannerFactory(
-                provider=provider,
-                context_builder=AgentContextBuilder(
-                    store=store,
-                    registry=registry,
-                    semantic_presenter=stack.presenter,
-                ),
-                max_total_tokens=self._max_total_tokens,
+        turn_specs = [
+            (case.user_message, case.expected),
+            *(
+                (follow_up.user_message, follow_up.expected)
+                for follow_up in case.follow_up_turns
             ),
-            evidence_source_system=environment.evidence_source_system,
-        )
-
-        await executor.execute(user_id=user_id, run_id=run.run_id)
-
-        terminal = await store.get_run(user_id=user_id, run_id=run.run_id)
-        published = await events.list_events(run_id=run.run_id)
-        event_types = [event.type for event in published]
-        tool_ids = [
-            str(event.data["tool_id"])
-            for event in published
-            if event.type == "tool.started"
         ]
-        evidence_ids = sorted(store.evidence)
-        grades = _grade(
-            case,
-            terminal_status=terminal.status,
-            outcome=terminal.outcome,
-            completion_reason_code=terminal.completion_reason_code,
-            tool_ids=tool_ids,
-            evidence_count=len(evidence_ids),
-            event_types=event_types,
-            final_answer=_final_answer(provider.consumed_steps),
-        )
+        turn_traces: list[EvalTurnTrace] = []
+        aggregate_event_types: list[str] = []
+        aggregate_tool_ids: list[str] = []
+        for turn_index, (user_message, expected) in enumerate(turn_specs, start=1):
+            run = await service.create_run(
+                user_id=user_id,
+                session_id=session.session_id,
+                request=_run_request(
+                    case,
+                    user_message=user_message,
+                    turn_index=turn_index,
+                ),
+            )
+            auth_context = await environment.build_auth_context(
+                case=case,
+                user_id=user_id,
+                session_id=session.session_id,
+                run_id=run.run_id,
+            )
+            executor = orchestrator_type(
+                service=service,
+                store=store,
+                events=events,
+                auth_context_provider=StaticAuthContextProvider(auth_context),
+                capability=stack.capability,
+                harness=stack.build_harness(),
+                registry=registry,
+                planner_factory=ModelPlannerFactory(
+                    provider=provider,
+                    context_builder=AgentContextBuilder(
+                        store=store,
+                        registry=registry,
+                        semantic_presenter=stack.presenter,
+                    ),
+                    max_total_tokens=self._max_total_tokens,
+                ),
+                evidence_source_system=environment.evidence_source_system,
+            )
+            evidence_before = set(store.evidence)
+            model_step_start = len(provider.consumed_steps)
+            await executor.execute(user_id=user_id, run_id=run.run_id)
+
+            terminal = await store.get_run(user_id=user_id, run_id=run.run_id)
+            published = await events.list_events(run_id=run.run_id)
+            event_types = [event.type for event in published]
+            tool_ids = [
+                str(event.data["tool_id"])
+                for event in published
+                if event.type == "tool.started"
+            ]
+            evidence_ids = sorted(set(store.evidence) - evidence_before)
+            turn_model_steps = provider.consumed_steps[model_step_start:]
+            grades = _grade(
+                expected,
+                terminal_status=terminal.status,
+                outcome=terminal.outcome,
+                completion_reason_code=terminal.completion_reason_code,
+                tool_ids=tool_ids,
+                evidence_count=len(evidence_ids),
+                event_types=event_types,
+                final_answer=_final_answer(turn_model_steps),
+            )
+            turn_traces.append(
+                EvalTurnTrace(
+                    turn_index=turn_index,
+                    user_message=user_message,
+                    model_steps=turn_model_steps,
+                    event_types=event_types,
+                    terminal_status=terminal.status,
+                    outcome=terminal.outcome,
+                    completion_reason_code=terminal.completion_reason_code,
+                    tool_ids=tool_ids,
+                    evidence_ids=evidence_ids,
+                    grades=grades,
+                    passed=all(grade.passed for grade in grades),
+                )
+            )
+            aggregate_event_types.extend(event_types)
+            aggregate_tool_ids.extend(tool_ids)
+        final_turn = turn_traces[-1]
+        all_grades = [
+            grade.model_copy(
+                update={
+                    "name": (
+                        f"turn_{turn.turn_index}.{grade.name}"
+                        if len(turn_traces) > 1
+                        else grade.name
+                    )
+                }
+            )
+            for turn in turn_traces
+            for grade in turn.grades
+        ]
         return EvalTrace(
             eval_run_id=new_id("evl"),
             case_id=case.case_id,
@@ -268,23 +345,36 @@ class EvalRunner:
             total_tokens=sum(
                 getattr(step, "total_tokens", 0) for step in provider.consumed_steps
             ),
-            event_types=event_types,
-            terminal_status=terminal.status,
-            outcome=terminal.outcome,
-            completion_reason_code=terminal.completion_reason_code,
-            tool_ids=tool_ids,
-            evidence_ids=evidence_ids,
-            grades=grades,
-            passed=all(grade.passed for grade in grades),
+            event_types=aggregate_event_types,
+            terminal_status=final_turn.terminal_status,
+            outcome=final_turn.outcome,
+            completion_reason_code=final_turn.completion_reason_code,
+            tool_ids=aggregate_tool_ids,
+            evidence_ids=sorted(store.evidence),
+            grades=all_grades,
+            turns=turn_traces,
+            passed=all(turn.passed for turn in turn_traces),
         )
 
 
-def _run_request(case: EvalCase) -> RunCreateRequest:
+def _run_request(
+    case: EvalCase,
+    *,
+    user_message: str | None = None,
+    turn_index: int = 1,
+) -> RunCreateRequest:
     return RunCreateRequest.model_validate(
         {
             "input": {
-                "client_message_id": f"eval-message-{case.case_id}",
-                "content": [{"type": "text", "text": case.user_message}],
+                "client_message_id": (
+                    f"eval-message-{case.case_id}-turn-{turn_index}"
+                ),
+                "content": [
+                    {
+                        "type": "text",
+                        "text": user_message or case.user_message,
+                    }
+                ],
             },
             "client": {
                 "client_instance_id": "eval-runner",
@@ -337,7 +427,7 @@ def _auth_context(
 
 
 def _grade(
-    case: EvalCase,
+    expected: EvalExpected,
     *,
     terminal_status: str,
     outcome: str | None,
@@ -347,7 +437,6 @@ def _grade(
     event_types: list[str],
     final_answer: str,
 ) -> list[EvalGrade]:
-    expected = case.expected
     forbidden_matches = [
         substring
         for substring in expected.forbidden_answer_substrings
@@ -413,6 +502,18 @@ def _grade(
             expected.min_evidence_count,
             evidence_count,
             evidence_count >= expected.min_evidence_count,
+            ),
+            *(
+                [
+                    (
+                        "max_evidence_count",
+                        expected.max_evidence_count,
+                        evidence_count,
+                        evidence_count <= expected.max_evidence_count,
+                    )
+                ]
+                if expected.max_evidence_count is not None
+                else []
             ),
             (
             "tool_lifecycle_terminal_count",

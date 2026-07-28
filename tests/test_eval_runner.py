@@ -178,6 +178,50 @@ async def test_eval_runner_semantic_entry_is_differential_safe() -> None:
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("orchestrator", ["native", "langgraph"])
+async def test_eval_runner_executes_follow_up_in_same_grounded_session(
+    orchestrator: str,
+) -> None:
+    case = load_eval_case(EVAL_CASES / "multiturn-population-followup.yaml")
+
+    trace = await EvalRunner(orchestrator=orchestrator).run(case)
+
+    assert trace.passed is True
+    assert len(trace.turns) == 2
+    assert trace.turns[0].tool_ids == [
+        "governance.resolve_area",
+        "governance.semantic_query",
+    ]
+    assert trace.turns[1].tool_ids == []
+    assert trace.turns[1].evidence_ids == []
+    follow_up_request = trace.model_requests[-1]
+    serialized = follow_up_request.model_dump_json()
+    assert "哪个街道最多" in serialized
+    assert "会话中已验证且仍可用的历史结果" in serialized
+    assert any(
+        '"person_count": 128' in (message.content or "")
+        for message in follow_up_request.messages
+    )
+
+
+@pytest.mark.asyncio
+async def test_eval_runner_replays_all_follow_up_turns() -> None:
+    case = load_eval_case(EVAL_CASES / "multiturn-population-followup.yaml")
+    runner = EvalRunner(orchestrator="langgraph")
+    source = await runner.run(case)
+
+    replayed = await runner.replay(case, source)
+
+    assert replayed.passed is True
+    assert replayed.replayed_from_eval_run_id == source.eval_run_id
+    assert len(replayed.turns) == 2
+    assert [turn.tool_ids for turn in replayed.turns] == [
+        ["governance.resolve_area", "governance.semantic_query"],
+        [],
+    ]
+
+
+@pytest.mark.asyncio
 async def test_eval_runner_records_live_provider_steps_and_version_metadata() -> None:
     provider = TwoStepLiveModelProvider()
     runner = EvalRunner(

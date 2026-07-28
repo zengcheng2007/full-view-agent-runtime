@@ -64,6 +64,7 @@ class EvalExpected(ContractModel):
     completion_reason_code: str = Field(min_length=1, max_length=200)
     tool_ids: list[str] = Field(default_factory=list)
     min_evidence_count: int = Field(default=0, ge=0)
+    max_evidence_count: int | None = Field(default=None, ge=0)
     required_event_types: list[str] = Field(default_factory=list)
     required_answer_substrings: list[str] = Field(default_factory=list)
     forbidden_answer_substrings: list[str] = Field(default_factory=list)
@@ -71,6 +72,16 @@ class EvalExpected(ContractModel):
         default_factory=list,
         max_length=10,
     )
+
+
+class EvalFollowUpTurn(ContractModel):
+    user_message: str = Field(min_length=1, max_length=10_000)
+    model_steps: list[EvalModelStep] = Field(
+        default_factory=list,
+        max_length=20,
+        description="Scripted steps for this turn. Empty = use live provider.",
+    )
+    expected: EvalExpected
 
 
 class EvalCase(ContractModel):
@@ -85,6 +96,10 @@ class EvalCase(ContractModel):
     )
     fault: EvalFaultSpec | None = None
     expected: EvalExpected
+    follow_up_turns: list[EvalFollowUpTurn] = Field(
+        default_factory=list,
+        max_length=5,
+    )
 
 
 class EvalMessageRecord(ContractModel):
@@ -109,6 +124,20 @@ class EvalGrade(ContractModel):
     actual: GradeValue
 
 
+class EvalTurnTrace(ContractModel):
+    turn_index: int = Field(ge=1)
+    user_message: str
+    model_steps: list[EvalModelStep]
+    event_types: list[str]
+    terminal_status: RunStatus
+    outcome: RunOutcome | None
+    completion_reason_code: str | None
+    tool_ids: list[str]
+    evidence_ids: list[str]
+    grades: list[EvalGrade]
+    passed: bool
+
+
 class EvalTrace(ContractModel):
     trace_version: Literal["1.0"] = "1.0"
     eval_run_id: str
@@ -129,6 +158,7 @@ class EvalTrace(ContractModel):
     tool_ids: list[str]
     evidence_ids: list[str]
     grades: list[EvalGrade]
+    turns: list[EvalTurnTrace] = Field(default_factory=list)
     passed: bool
 
 

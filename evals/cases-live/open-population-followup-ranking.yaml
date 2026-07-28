@@ -1,0 +1,32 @@
+# S1-B 真实多轮评测：两个用户消息、两个 Run、同一个 Session。
+schema_version: "1.0"
+case_id: open-population-followup-ranking
+description: "开放式多轮：先查询西湖区独居老人，再复用可信结果回答排名追问"
+user_message: 帮我查一下西湖区独居老人按街道的分布。
+auth:
+  area_codes: ["3301"]
+  datasets: [administrative_area, population]
+  entitlements: [governance.area.read, governance.population.aggregate.read]
+  field_policy_set: governance_analyst_v1
+model_steps: []
+expected:
+  terminal_status: completed
+  outcome: success
+  completion_reason_code: goal_completed
+  tool_ids: []
+  min_evidence_count: 1
+  required_event_types: [tool.completed, result.available, evidence.available, run.completed]
+  required_answer_substrings: [独居老人]
+follow_up_turns:
+  - user_message: 哪个街道最多？不要重新查询，直接根据刚才结果回答。
+    model_steps: []
+    expected:
+      terminal_status: completed
+      outcome: success
+      completion_reason_code: goal_completed
+      tool_ids: []
+      min_evidence_count: 0
+      max_evidence_count: 0
+      required_event_types: [run.completed]
+      required_answer_substrings: [示例街道, "128"]
+      forbidden_answer_substrings: [无法确定, 需要重新查询]
