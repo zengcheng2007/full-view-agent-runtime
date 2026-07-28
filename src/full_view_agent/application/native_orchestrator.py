@@ -388,6 +388,7 @@ class NativeOrchestrator(OrchestrationPort):
                 user_id=user_id,
                 run=running,
                 action=tool_actions[observed_result.tool_call_id],
+                tool_result=observed_result,
                 data_result=data_result,
             )
         await self._complete_success(
@@ -515,6 +516,10 @@ class NativeOrchestrator(OrchestrationPort):
             )
         )
         manifest = self._registry.get_manifest(tool_result.tool_id)
+        # S1-A：语义入口执行时，Evidence 的语义登记版本、指标口径与
+        # 有效区域来自结果血缘（解析时固化的 spec/plan 版本指纹所对应的
+        # 目录与主题），规范 Tool 字段仍由生产 manifest 提供。
+        lineage = tool_result.semantic_lineage
         evidence = Evidence.model_validate(
             {
                 "evidence_id": evidence_id,
@@ -523,9 +528,21 @@ class NativeOrchestrator(OrchestrationPort):
                 "source_system": self._evidence_source_system,
                 "dataset_id": manifest.dataset_id,
                 "dataset_snapshot_version": None,
-                "semantic_registry_version": None,
-                "metric_definitions": [],
-                "effective_area_codes": _action_area_codes(action),
+                "semantic_registry_version": (
+                    lineage.catalog_version if lineage is not None else None
+                ),
+                "metric_definitions": (
+                    [
+                        definition.model_dump(mode="json")
+                        for definition in lineage.metric_definitions
+                    ]
+                    if lineage is not None
+                    else []
+                ),
+                "effective_area_codes": (
+                    _action_area_codes(action)
+                    or ([lineage.area_code] if lineage is not None else [])
+                ),
                 "time_range": None,
                 "as_of": None,
                 "retrieved_at": now,
@@ -560,6 +577,7 @@ class NativeOrchestrator(OrchestrationPort):
         user_id: str,
         run,
         action: ToolAction,
+        tool_result: ToolResult,
         data_result: DataResult,
     ) -> None:
         client = run.client_capabilities
@@ -569,6 +587,13 @@ class NativeOrchestrator(OrchestrationPort):
             return
         now = datetime.now(UTC)
         area_codes = _action_area_codes(action)
+        # S1-A：semantic_query 的前端命令按血缘中的规范 Tool 判定，
+        # 与直接调用规范 Tool 的行为完全一致（含地图分级设色）。
+        canonical_tool_id = (
+            tool_result.semantic_lineage.canonical_tool_id
+            if tool_result.semantic_lineage is not None
+            else action.tool_id
+        )
         commands: list[FrontendCommand] = []
         if "panel.show_table" in client.supported_commands:
             commands.append(
@@ -588,7 +613,7 @@ class NativeOrchestrator(OrchestrationPort):
                 )
             )
         if (
-            action.tool_id == "governance.query_population_metrics"
+            canonical_tool_id == "governance.query_population_metrics"
             and "map.render_choropleth" in client.supported_commands
         ):
             commands.append(
@@ -812,14 +837,19 @@ class NativeOrchestrator(OrchestrationPort):
 
 
 def _action_area_codes(action: ToolAction) -> list[str]:
-    query = action.arguments.get("query")
-    if not isinstance(query, dict):
-        return []
-    scope = query.get("scope")
-    if not isinstance(scope, dict):
-        return []
-    area_code = scope.get("area_code")
-    return [area_code] if isinstance(area_code, str) and area_code else []
+    # 规范 Tool 参数结构为 {"query": {"scope": ...}}；S1-A 语义入口
+    # 的原始动作为 {"spec": {"scope": ...}}，两者都能提取声明区域。
+    for key in ("query", "spec"):
+        container = action.arguments.get(key)
+        if not isinstance(container, dict):
+            continue
+        scope = container.get("scope")
+        if not isinstance(scope, dict):
+            continue
+        area_code = scope.get("area_code")
+        if isinstance(area_code, str) and area_code:
+            return [area_code]
+    return []
 
 
 class MockRunExecutor(NativeOrchestrator):

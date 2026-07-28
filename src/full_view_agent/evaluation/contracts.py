@@ -13,6 +13,9 @@ class EvalAuthSpec(ContractModel):
         default_factory=lambda: ["governance.population.aggregate.read"],
         min_length=1,
     )
+    # S1-A：语义入口按 Catalog 声明的字段策略集校验；直接 Tool 用例
+    # 不受该字段影响，保持默认评测策略集。
+    field_policy_set: str = Field(default="eval_policy_v1", min_length=1, max_length=64)
 
 
 class EvalToolCallStep(ContractModel):

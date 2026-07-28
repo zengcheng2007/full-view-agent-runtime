@@ -8,6 +8,18 @@
 - execution_guard：执行前按实际主题 Tool 复用生产 Policy 复核。
 """
 
+from full_view_agent.semantic.action_resolver import (
+    AUTHORIZATION_VIOLATION_CODES,
+    S1A_BINDABLE_SUBJECTS,
+    SEMANTIC_QUERY_TOOL_ID,
+    SEMANTIC_QUERY_TOOL_VERSION,
+    DeniedSemanticAction,
+    RejectedSemanticAction,
+    ResolvedSemanticAction,
+    SemanticActionResolver,
+    SemanticQueryInput,
+    SemanticResolution,
+)
 from full_view_agent.semantic.authorization import SubjectAuthorization
 from full_view_agent.semantic.catalog import (
     SEMANTIC_CATALOG_VERSION,
@@ -18,6 +30,7 @@ from full_view_agent.semantic.catalog import (
     GroupBySummary,
     MetricDefinition,
     ModelCapabilityView,
+    RequiredFilter,
     ResultShape,
     SemanticCatalog,
     SubjectCapabilityView,
@@ -53,9 +66,14 @@ from full_view_agent.semantic.validator import (
 )
 
 __all__ = [
+    "AUTHORIZATION_VIOLATION_CODES",
+    "S1A_BINDABLE_SUBJECTS",
     "SEMANTIC_CATALOG_VERSION",
+    "SEMANTIC_QUERY_TOOL_ID",
+    "SEMANTIC_QUERY_TOOL_VERSION",
     "SEMANTIC_SPEC_VERSION",
     "CapabilityBinding",
+    "DeniedSemanticAction",
     "EvidenceExpectation",
     "ExecutionGuard",
     "ExecutionRecheck",
@@ -68,16 +86,22 @@ __all__ = [
     "MetricDefinitionRef",
     "ModelCapabilityView",
     "PlanStep",
+    "RejectedSemanticAction",
+    "RequiredFilter",
+    "ResolvedSemanticAction",
     "ResultSchemaMismatch",
     "ResultShape",
+    "SemanticActionResolver",
     "SemanticCatalog",
     "SemanticCompiler",
     "SemanticFilter",
     "SemanticKernelError",
     "SemanticOrder",
     "SemanticPlan",
+    "SemanticQueryInput",
     "SemanticQueryRejected",
     "SemanticQuerySpec",
+    "SemanticResolution",
     "SemanticTimeRange",
     "SemanticValidator",
     "SubjectAuthorization",

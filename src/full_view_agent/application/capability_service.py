@@ -199,7 +199,7 @@ class CapabilityService:
                 tool_version=manifest.tool_version,
                 status="denied",
                 summary=decision.user_message,
-                policy=_tool_result_policy(decision),
+                policy=tool_result_policy(decision),
                 warnings=decision.reason_codes,
             )
         try:
@@ -278,7 +278,7 @@ class CapabilityService:
                     tool_version=manifest.tool_version,
                     status="denied",
                     summary=post_decision.user_message,
-                    policy=_tool_result_policy(decision, post_decision),
+                    policy=tool_result_policy(decision, post_decision),
                     warnings=post_decision.reason_codes,
                 )
         final_decision = post_decision or decision
@@ -289,7 +289,7 @@ class CapabilityService:
             status="success",
             summary="Tool 执行成功。",
             data_result=final_result,
-            policy=_tool_result_policy(decision, post_decision),
+            policy=tool_result_policy(decision, post_decision),
             warnings=final_decision.reason_codes,
         )
 
@@ -352,7 +352,7 @@ class CapabilityService:
             raise PolicyBindingMismatch("policy decision does not match tool execution")
 
 
-def _tool_result_policy(
+def tool_result_policy(
     pre_decision: PolicyDecision,
     post_decision: PolicyDecision | None = None,
 ) -> ToolResultPolicy:

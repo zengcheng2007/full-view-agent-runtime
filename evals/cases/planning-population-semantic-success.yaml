@@ -1,0 +1,34 @@
+schema_version: "1.0"
+case_id: planning-population-semantic-success
+description: 语义入口解析独居老人查询并经规范人口 Tool 完成授权范围内查询
+user_message: 查询西湖区独居老人数量，并按街道汇总
+auth:
+  area_codes: ["330106"]
+  datasets: [population]
+  entitlements: [governance.population.aggregate.read]
+  field_policy_set: governance_analyst_v1
+model_steps:
+  - type: tool_call
+    tool_id: governance.semantic_query
+    arguments:
+      spec:
+        subject: population
+        metrics: [person_count]
+        scope: {area_code: "330106", include_descendants: true}
+        filters:
+          - field: person_category
+            operator: eq
+            value: solitary_elderly
+        group_by: [street]
+    total_tokens: 110
+  - type: finish
+    content: 语义查询已完成：西湖区独居老人已按街道汇总。
+    total_tokens: 30
+expected:
+  terminal_status: completed
+  outcome: success
+  completion_reason_code: goal_completed
+  tool_ids: [governance.semantic_query]
+  min_evidence_count: 1
+  required_event_types: [tool.completed, result.available, evidence.available, run.completed]
+  required_answer_substrings: [语义查询已完成]

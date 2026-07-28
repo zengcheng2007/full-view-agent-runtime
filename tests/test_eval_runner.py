@@ -1,3 +1,5 @@
+from pathlib import Path
+
 import pytest
 
 from full_view_agent.application.model_provider import (
@@ -7,8 +9,11 @@ from full_view_agent.application.model_provider import (
     ModelUsage,
 )
 from full_view_agent.evaluation.contracts import EvalCase
+from full_view_agent.evaluation.loader import load_eval_case
 from full_view_agent.evaluation.runner import EvalRunner, StaticEvalEnvironment
 from full_view_agent.infrastructure.governance_adapter import InMemoryGovernanceAdapter
+
+EVAL_CASES = Path(__file__).parents[1] / "evals" / "cases"
 
 
 class TwoStepLiveModelProvider:
@@ -129,6 +134,30 @@ async def test_eval_runner_can_compare_native_and_langgraph_semantics() -> None:
 
 
 @pytest.mark.asyncio
+async def test_eval_runner_semantic_entry_is_differential_safe() -> None:
+    # S1-A：语义入口脚本用例在 Native 与 LangGraph 上外部行为一致。
+    case = load_eval_case(EVAL_CASES / "planning-population-semantic-success.yaml")
+    native = await EvalRunner(orchestrator="native").run(case)
+    langgraph = await EvalRunner(orchestrator="langgraph").run(case)
+
+    assert native.passed is True
+    assert langgraph.passed is True
+    assert native.tool_ids == ["governance.semantic_query"]
+    assert langgraph.tool_ids == native.tool_ids
+    assert langgraph.event_types == native.event_types
+    assert langgraph.terminal_status == native.terminal_status == "completed"
+    assert langgraph.outcome == native.outcome == "success"
+    assert len(native.evidence_ids) == len(langgraph.evidence_ids) == 1
+    assert [grade.model_dump() for grade in langgraph.grades] == [
+        grade.model_dump() for grade in native.grades
+    ]
+    # 模型可见面包含语义虚拟 Tool，且不泄漏物理实现。
+    serialized = langgraph.model_dump_json()
+    assert "governance.semantic_query" in serialized
+    assert "getNextSiteData" not in serialized
+
+
+@pytest.mark.asyncio
 async def test_eval_runner_records_live_provider_steps_and_version_metadata() -> None:
     provider = TwoStepLiveModelProvider()
     runner = EvalRunner(
@@ -142,7 +171,7 @@ async def test_eval_runner_records_live_provider_steps_and_version_metadata() ->
     assert trace.passed is True
     assert trace.model_provider == "openai_compatible"
     assert trace.model_name == "qwen-live-test"
-    assert trace.prompt_version == "full-view-governance-readonly-v9"
+    assert trace.prompt_version == "full-view-governance-readonly-v10"
     assert [step.type for step in trace.model_steps] == ["tool_call", "finish"]
     assert trace.total_tokens == 210
     assert provider.call_count == 2

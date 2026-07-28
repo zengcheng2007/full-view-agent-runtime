@@ -23,6 +23,7 @@ from full_view_agent.application.ports import (
     EventPublisher,
     OrchestrationPort,
 )
+from full_view_agent.application.semantic_wiring import SemanticCapabilityStack
 from full_view_agent.application.session_run_service import SessionRunService
 from full_view_agent.application.tool_registry import ToolRegistry
 
@@ -40,6 +41,7 @@ def create_orchestrator(
     denial_ledger: DenialLedger | None = None,
     model_provider: ModelProvider | None = None,
     planner_factory: ModelPlannerFactory | None = None,
+    semantic_stack: SemanticCapabilityStack | None = None,
 ) -> OrchestrationPort:
     """Build the orchestrator selected by ``FULL_VIEW_ORCHESTRATOR``.
 
@@ -49,21 +51,33 @@ def create_orchestrator(
 
     LangGraph is the R3 default. Set ``native`` explicitly only for the
     time-limited rollback window.
+
+    When ``semantic_stack`` is provided, both orchestrators share the
+    same S1-A semantic executor and canonical-action loop fingerprint
+    via one Harness; without it, behavior is exactly the pre-S1-A
+    direct CapabilityService wiring.
     """
     mode = os.getenv("FULL_VIEW_ORCHESTRATOR", "langgraph").lower()
+    if semantic_stack is not None:
+        capability: CapabilityService = semantic_stack.capability
+        harness = semantic_stack.build_harness()
+    else:
+        capability = CapabilityService(
+            registry=tool_registry,
+            policy=MinimalPolicyAdapter(),
+            adapter=governance_adapter,
+            auth_context_refresher=auth_context_refresher,
+            denial_ledger=denial_ledger,
+        )
+        harness = None
     if mode == "native":
         return NativeOrchestrator(
             service=service,
             store=store,
             events=events,
             auth_context_provider=auth_context_provider,
-            capability=CapabilityService(
-                registry=tool_registry,
-                policy=MinimalPolicyAdapter(),
-                adapter=governance_adapter,
-                auth_context_refresher=auth_context_refresher,
-                denial_ledger=denial_ledger,
-            ),
+            capability=capability,
+            harness=harness,
             registry=tool_registry,
             planner_factory=planner_factory,
             evidence_source_system=evidence_source_system,
@@ -102,13 +116,8 @@ def create_orchestrator(
             store=store,
             events=events,
             auth_context_provider=auth_context_provider,
-            capability=CapabilityService(
-                registry=tool_registry,
-                policy=MinimalPolicyAdapter(),
-                adapter=governance_adapter,
-                auth_context_refresher=auth_context_refresher,
-                denial_ledger=denial_ledger,
-            ),
+            capability=capability,
+            harness=harness,
             registry=tool_registry,
             planner_factory=planner_factory,
             evidence_source_system=evidence_source_system,

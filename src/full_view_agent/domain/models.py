@@ -738,6 +738,31 @@ class ToolResultPolicy(ContractModel):
     masked_fields: list[str] = Field(default_factory=list)
 
 
+class SemanticResultLineage(ContractModel):
+    """S1-A：``governance.semantic_query`` 解析执行的血缘。
+
+    记录虚拟语义入口到真实能力 Tool 的可追溯链路：语义 spec 与计划
+    的版本指纹、目录版本、主题/数据集、规范 Tool 标识与区域/输出形态。
+    只由 SemanticToolExecutor 在成功执行后附加；Evidence 持久化与前端
+    地图命令从该血缘读取规范 Tool 信息，而非解析原始模型参数。
+    """
+
+    schema_version: Literal["1.0"] = "1.0"
+    virtual_tool_id: str = Field(min_length=1, max_length=128)
+    virtual_tool_version: str = Field(min_length=1, max_length=32)
+    spec_version: str = Field(min_length=1, max_length=32)
+    catalog_version: str = Field(min_length=1, max_length=64)
+    subject: str = Field(min_length=1, max_length=64)
+    logical_dataset_id: str = Field(min_length=1, max_length=64)
+    canonical_tool_id: str = Field(min_length=1, max_length=128)
+    canonical_tool_version: str = Field(min_length=1, max_length=32)
+    spec_fingerprint: str = Field(min_length=1, max_length=200)
+    plan_fingerprint: str = Field(min_length=1, max_length=200)
+    area_code: str = Field(min_length=1, max_length=32)
+    output: str = Field(min_length=1, max_length=32)
+    metric_definitions: list[EvidenceMetricDefinition] = Field(default_factory=list)
+
+
 class ToolResult(ContractModel):
     schema_version: Literal["1.1"] = "1.1"
     tool_call_id: str
@@ -749,6 +774,7 @@ class ToolResult(ContractModel):
     evidence_ids: list[str] = Field(default_factory=list)
     policy: ToolResultPolicy | None = None
     warnings: list[str] = Field(default_factory=list)
+    semantic_lineage: SemanticResultLineage | None = None
 
     @model_validator(mode="after")
     def validate_data_result(self) -> "ToolResult":

@@ -49,6 +49,20 @@ class FilterDefinition(ContractModel):
     allowed_values: tuple[str, ...] = ()
 
 
+class RequiredFilter(ContractModel):
+    """真实数据源强制要求的筛选：缺少即不可执行。
+
+    这是能力事实而非偏好 —— 例如人口 Adapter 白名单只接受
+    ``person_category=solitary_elderly``（governance_adapter
+    ``_validate_solitary_elderly_query``）。S1-A 语义入口在编译前
+    强制校验，缺失时 fail closed，不让无筛选查询打到真实接口后才失败。
+    """
+
+    field: str = Field(min_length=1, max_length=64)
+    operator: str = Field(min_length=1, max_length=64)
+    value: str | int | float | bool
+
+
 class GroupByRule(ContractModel):
     value: str = Field(min_length=1, max_length=64)
     label: str = Field(min_length=1, max_length=100)
@@ -77,6 +91,7 @@ class SubjectDefinition(ContractModel):
     min_group_by: int = Field(default=0, ge=0, le=2)
     max_group_by: int = Field(default=0, ge=0, le=2)
     filters: tuple[FilterDefinition, ...] = ()
+    required_filters: tuple[RequiredFilter, ...] = ()
     supports_order_by: bool = False
     supports_time_range: bool = False
     output_forms: tuple[OutputForm, ...] = ("table",)
@@ -149,6 +164,15 @@ def _population() -> SubjectDefinition:
                 label="人口类别",
                 operators=("eq",),
                 allowed_values=("solitary_elderly",),
+            ),
+        ),
+        # 真实 Adapter 白名单只接受 solitary_elderly 独居老人查询；
+        # 缺失该筛选时语义入口必须 fail closed（见 action_resolver）。
+        required_filters=(
+            RequiredFilter(
+                field="person_category",
+                operator="eq",
+                value="solitary_elderly",
             ),
         ),
         output_forms=("table", "choropleth"),

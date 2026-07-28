@@ -86,6 +86,32 @@ class HarnessToolExecution:
     repeated_calls: int
 
 
+def default_tool_call_fingerprint(action: ToolAction) -> str:
+    """Canonical loop-detection fingerprint of a raw tool call."""
+    return canonical_fingerprint(
+        domain="harness-tool-call",
+        value={"tool_id": action.tool_id, "arguments": action.arguments},
+    )
+
+
+class ToolCallFingerprinter(Protocol):
+    """Strategy for computing the loop-detection fingerprint of a call.
+
+    The default keeps the historical raw-action fingerprint. The S1-A
+    semantic wiring resolves ``governance.semantic_query`` to its canonical
+    action first, so synonymous phrasings converge and direct/semantic
+    duplicates share one repeated-call counter.
+    """
+
+    def fingerprint(self, action: ToolAction, *, auth_context: AuthContext) -> str: ...
+
+
+class DefaultToolCallFingerprinter:
+    def fingerprint(self, action: ToolAction, *, auth_context: AuthContext) -> str:
+        del auth_context
+        return default_tool_call_fingerprint(action)
+
+
 class Planner(Protocol):
     async def decide(self, state: HarnessState) -> HarnessAction: ...
 
@@ -201,12 +227,14 @@ class AgentHarness:
         validator: CompletionValidator | None = None,
         clock: Callable[[], float] = time,
         tool_call_id_factory: Callable[[], str] | None = None,
+        call_fingerprinter: ToolCallFingerprinter | None = None,
     ) -> None:
         self._tool_executor = tool_executor
         self._limits = limits or HarnessLimits()
         self._validator = validator or NonEmptyCompletionValidator()
         self._clock = clock
         self._tool_call_id_factory = tool_call_id_factory or (lambda: new_id("tcl"))
+        self._call_fingerprinter = call_fingerprinter or DefaultToolCallFingerprinter()
 
     def begin(
         self,
@@ -279,9 +307,8 @@ class AgentHarness:
     ) -> HarnessToolExecution:
         if control.state.tool_calls >= self._limits.max_tool_calls:
             raise BudgetExceeded("maximum tool calls exceeded")
-        fingerprint = canonical_fingerprint(
-            domain="harness-tool-call",
-            value={"tool_id": action.tool_id, "arguments": action.arguments},
+        fingerprint = self._call_fingerprinter.fingerprint(
+            action, auth_context=auth_context
         )
         repeated = (
             control.repeated_calls + 1 if fingerprint == control.previous_call_fingerprint else 1

@@ -53,6 +53,9 @@ from full_view_agent.application.ports import (
     RunAuthContextStore,
 )
 from full_view_agent.application.run_admission import RunAdmissionService
+from full_view_agent.application.semantic_wiring import (
+    build_semantic_capability_stack,
+)
 from full_view_agent.application.session_run_service import SessionRunService, new_id
 from full_view_agent.application.tool_registry import ToolRegistry
 from full_view_agent.application.workflow_registry import WorkflowRegistry
@@ -418,12 +421,22 @@ class RuntimeContainer:
                     os.getenv("FULL_VIEW_MODEL_TIMEOUT_SECONDS", "60")
                 ),
             )
+        # S1-A：语义入口与既有能力栈共享一份接线（Catalog/Resolver/
+        # Executor/Fingerprinter/Presenter），Native 与 LangGraph 走同一
+        # Harness 包装，不改变任何既有 Tool 的行为。
+        self.semantic_stack = build_semantic_capability_stack(
+            registry=self.tool_registry,
+            adapter=self.governance_adapter,
+            auth_context_refresher=self.auth_context_refresher,
+            denial_ledger=self.denial_ledger,
+        )
         planner_factory = (
             ModelPlannerFactory(
                 provider=self.model_provider,
                 context_builder=AgentContextBuilder(
                     store=self.store,
                     registry=self.tool_registry,
+                    semantic_presenter=self.semantic_stack.presenter,
                 ),
                 max_total_tokens=int(
                     os.getenv("FULL_VIEW_MODEL_TOKEN_BUDGET", "32000")
@@ -448,6 +461,7 @@ class RuntimeContainer:
             denial_ledger=self.denial_ledger,
             model_provider=self.model_provider,
             planner_factory=planner_factory,
+            semantic_stack=self.semantic_stack,
         )
 
     def schedule_run(self, *, user_id: str, run_id: str) -> None:

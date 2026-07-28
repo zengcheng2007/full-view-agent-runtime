@@ -1,12 +1,14 @@
 from datetime import UTC, datetime
 from typing import Literal, Protocol
 
-from full_view_agent.application.capability_service import CapabilityService, ToolAdapter
+from full_view_agent.application.capability_service import ToolAdapter
 from full_view_agent.application.context_builder import AgentContextBuilder
 from full_view_agent.application.model_planner import ModelPlannerFactory
 from full_view_agent.application.model_provider import ModelProvider
 from full_view_agent.application.native_orchestrator import NativeOrchestrator
-from full_view_agent.application.policy import MinimalPolicyAdapter
+from full_view_agent.application.semantic_wiring import (
+    build_semantic_capability_stack,
+)
 from full_view_agent.application.session_run_service import SessionRunService, new_id
 from full_view_agent.application.tool_registry import ToolRegistry
 from full_view_agent.domain.models import AuthContext, RunCreateRequest
@@ -182,9 +184,10 @@ class EvalRunner:
                 delegate=adapter,
                 fault=case.fault,
             )
-        capability = CapabilityService(
+        # S1-A：评测与生产共用同一语义接线；scripted 用例直接调用规范
+        # Tool 时执行器透明直通，语义入口用例走解析—复核—规范执行链路。
+        stack = build_semantic_capability_stack(
             registry=registry,
-            policy=MinimalPolicyAdapter(),
             adapter=adapter,
             auth_context_refresher=_NoopRefresher(),
         )
@@ -198,11 +201,16 @@ class EvalRunner:
             store=store,
             events=events,
             auth_context_provider=StaticAuthContextProvider(auth_context),
-            capability=capability,
+            capability=stack.capability,
+            harness=stack.build_harness(),
             registry=registry,
             planner_factory=ModelPlannerFactory(
                 provider=provider,
-                context_builder=AgentContextBuilder(store=store, registry=registry),
+                context_builder=AgentContextBuilder(
+                    store=store,
+                    registry=registry,
+                    semantic_presenter=stack.presenter,
+                ),
                 max_total_tokens=self._max_total_tokens,
             ),
             evidence_source_system=environment.evidence_source_system,
@@ -315,7 +323,7 @@ def _auth_context(
                     for code in case.auth.area_codes
                 ],
                 "datasets": case.auth.datasets,
-                "field_policy_set": "eval_policy_v1",
+                "field_policy_set": case.auth.field_policy_set,
             },
             "purpose": "interactive_analysis",
             "session_id": session_id,

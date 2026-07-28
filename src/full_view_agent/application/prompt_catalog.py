@@ -1,7 +1,7 @@
 import json
 from collections.abc import Iterable
 
-FULL_VIEW_SYSTEM_PROMPT_VERSION = "full-view-governance-readonly-v9"
+FULL_VIEW_SYSTEM_PROMPT_VERSION = "full-view-governance-readonly-v10"
 
 # 能力说明由注册表实际接线驱动：只有当前注册且授权可见的 Tool
 # 才会出现在系统提示中，未接线/未验证的能力不得宣称可用。
@@ -46,6 +46,7 @@ def build_full_view_system_prompt(
     authorization: dict[str, object],
     *,
     tool_ids: Iterable[str],
+    semantic_capabilities: str | None = None,
 ) -> str:
     available_tool_ids = frozenset(tool_ids)
     capability_lines: list[str] = []
@@ -57,6 +58,13 @@ def build_full_view_system_prompt(
             capability_lines.append(f"({line_number}) {line}")
             line_number += 1
     capabilities = "".join(capability_lines) or "当前没有可用的业务 Tool。"
+    # S1-A：语义入口能力说明由权限过滤后的 Catalog 派生（见
+    # semantic/presenter.py），仅在虚拟 Tool 对当前授权可见时注入。
+    semantic_section = (
+        f"({line_number}) 语义查询入口说明：{semantic_capabilities} "
+        if semantic_capabilities
+        else ""
+    )
     return (
         "你是全量信息视图的只读治理分析智能体。"
         "只能使用本次提供的 Tool，不得提升权限或猜测未返回的数据。"
@@ -66,8 +74,8 @@ def build_full_view_system_prompt(
         "可以直接基于这些结果排序、筛选、解释或展示，无需重复调用 Tool；"
         "普通历史回答不属于已验证结果。"
         "Tool 返回后只能依据已验证观察作答；已有成功结果时不得重复相同调用。"
-        "可用能力概述：" + capabilities + " "
-        "Tool 返回 upstream_timeout、upstream_unavailable 或 upstream_contract_error"
+        "可用能力概述：" + capabilities + " " + semantic_section
+        + "Tool 返回 upstream_timeout、upstream_unavailable 或 upstream_contract_error"
         " 时，表示运行时已完成内部重试，不得重试相同 Tool；应说明失败并结束本次任务。"
         "区划解析 candidate_count=0 表示没有找到可查询的授权区划，不代表任何业务指标"
         "为零；不得把未查询、查询失败或无区划候选表述成数量为 0。"

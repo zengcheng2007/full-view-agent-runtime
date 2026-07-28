@@ -153,7 +153,7 @@ async def test_production_context_advertises_wired_aggregate_tools() -> None:
 
 
 def test_prompt_only_lists_registered_and_authorized_capabilities() -> None:
-    assert FULL_VIEW_SYSTEM_PROMPT_VERSION == "full-view-governance-readonly-v9"
+    assert FULL_VIEW_SYSTEM_PROMPT_VERSION == "full-view-governance-readonly-v10"
 
     population_only = build_full_view_system_prompt(
         {}, tool_ids=("governance.query_population_metrics",)

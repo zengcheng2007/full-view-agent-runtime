@@ -1,4 +1,5 @@
 import json
+from typing import Protocol
 
 from full_view_agent.application.errors import ResourceNotFound
 from full_view_agent.application.harness import HarnessState
@@ -15,6 +16,7 @@ from full_view_agent.application.prompt_catalog import (
 )
 from full_view_agent.application.tool_registry import ToolRegistry
 from full_view_agent.domain.models import AgentMessage, AuthContext, MessageContent
+from full_view_agent.semantic.presenter import SemanticToolPresentation
 
 NON_RETRYABLE_TOOL_WARNINGS = {
     "upstream_timeout",
@@ -28,6 +30,14 @@ MAX_OBSERVATION_ROWS = 20
 SUMMARY_MARKER = "[会话摘要]"
 
 
+class SemanticToolPresenting(Protocol):
+    """S1-A：按当前授权派生 semantic_query 虚拟 Tool（fail closed）。"""
+
+    def present(
+        self, *, auth_context: AuthContext
+    ) -> SemanticToolPresentation | None: ...
+
+
 class AgentContextBuilder:
     def __init__(
         self,
@@ -36,11 +46,13 @@ class AgentContextBuilder:
         registry: ToolRegistry,
         max_context_messages: int = MAX_CONTEXT_MESSAGES,
         max_context_chars: int = MAX_CONTEXT_CHARS,
+        semantic_presenter: SemanticToolPresenting | None = None,
     ) -> None:
         self._store = store
         self._registry = registry
         self._max_messages = max_context_messages
         self._max_chars = max_context_chars
+        self._semantic_presenter = semantic_presenter
 
     async def build(
         self,
@@ -69,12 +81,24 @@ class AgentContextBuilder:
             for tool_id in self._registry.list_tool_ids()
             if self._is_tool_authorized(tool_id, entitlements, datasets)
         )
+        # S1-A：语义虚拟 Tool 的可见性与描述同样由授权派生；
+        # presenter 未注入或授权不足时为 None（fail closed）。
+        semantic_presentation = (
+            self._semantic_presenter.present(auth_context=auth_context)
+            if self._semantic_presenter is not None
+            else None
+        )
         messages = [
             ModelMessage(
                 role="system",
                 content=build_full_view_system_prompt(
                     authorization,
                     tool_ids=authorized_tool_ids,
+                    semantic_capabilities=(
+                        semantic_presentation.description
+                        if semantic_presentation is not None
+                        else None
+                    ),
                 ),
             )
         ]
@@ -196,6 +220,19 @@ class AgentContextBuilder:
                     tool_id=tool_id,
                     description=descriptor.description,
                     input_schema=self._registry.get_input_schema(tool_id),
+                )
+            )
+        # 语义虚拟 Tool 不与规范 Tool 互斥：canonical Tool 成功后
+        # 模型仍可发起新的 semantic_query（换区域/换形态的连续追问）。
+        if (
+            semantic_presentation is not None
+            and semantic_presentation.tool_id not in terminal_tool_ids
+        ):
+            tools.append(
+                ModelToolDefinition(
+                    tool_id=semantic_presentation.tool_id,
+                    description=semantic_presentation.description,
+                    input_schema=semantic_presentation.input_schema,
                 )
             )
         return ModelRequest(

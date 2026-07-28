@@ -91,7 +91,7 @@ async def test_context_builder_uses_messages_and_only_authorized_tools() -> None
     assert [tool.tool_id for tool in request.tools] == [
         "governance.query_population_metrics"
     ]
-    assert request.prompt_version == "full-view-governance-readonly-v9"
+    assert request.prompt_version == "full-view-governance-readonly-v10"
     assert "需要业务数据时必须调用" in request.messages[0].content
     assert "会话中已验证且仍可用的历史结果" in request.messages[0].content
     assert "solitary_elderly" in request.messages[0].content
