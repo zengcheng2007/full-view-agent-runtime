@@ -1,6 +1,7 @@
 from datetime import UTC, datetime
 from typing import Literal, Protocol
 
+from full_view_agent.application.answer_grounding import assess_answer_grounding
 from full_view_agent.application.capability_service import ToolAdapter
 from full_view_agent.application.context_builder import AgentContextBuilder
 from full_view_agent.application.model_planner import ModelPlannerFactory
@@ -11,7 +12,7 @@ from full_view_agent.application.semantic_wiring import (
 )
 from full_view_agent.application.session_run_service import SessionRunService, new_id
 from full_view_agent.application.tool_registry import ToolRegistry
-from full_view_agent.domain.models import AuthContext, RunCreateRequest
+from full_view_agent.domain.models import AuthContext, RunCreateRequest, ToolResult
 from full_view_agent.evaluation.contracts import (
     EvalCase,
     EvalExpected,
@@ -290,6 +291,7 @@ class EvalRunner:
                 evidence_source_system=environment.evidence_source_system,
             )
             evidence_before = set(store.evidence)
+            results_before = set(store.results)
             model_step_start = len(provider.consumed_steps)
             await executor.execute(user_id=user_id, run_id=run.run_id)
 
@@ -302,7 +304,21 @@ class EvalRunner:
                 if event.type == "tool.started"
             ]
             evidence_ids = sorted(set(store.evidence) - evidence_before)
+            grounding_results = tuple(
+                ToolResult(
+                    tool_call_id=f"eval-{result_id}",
+                    tool_id="eval.result",
+                    tool_version="1.0",
+                    status="success",
+                    summary="Eval persisted result",
+                    data_result=store.results[result_id],
+                )
+                for result_id in sorted(set(store.results) - results_before)
+            )
             turn_model_steps = provider.consumed_steps[model_step_start:]
+            final_answer = _assistant_answer(published) or _final_answer(
+                turn_model_steps
+            )
             grades = _grade(
                 expected,
                 terminal_status=terminal.status,
@@ -311,7 +327,8 @@ class EvalRunner:
                 tool_ids=tool_ids,
                 evidence_count=len(evidence_ids),
                 event_types=event_types,
-                final_answer=_final_answer(turn_model_steps),
+                final_answer=final_answer,
+                grounding_results=grounding_results,
             )
             turn_traces.append(
                 EvalTurnTrace(
@@ -484,6 +501,7 @@ def _grade(
     evidence_count: int,
     event_types: list[str],
     final_answer: str,
+    grounding_results: tuple[ToolResult, ...] = (),
 ) -> list[EvalGrade]:
     forbidden_matches = [
         substring
@@ -596,6 +614,18 @@ def _grade(
             ),
         ]
     )
+    if expected.grounding_reason_code is not None:
+        actual_grounding = assess_answer_grounding(
+            final_answer, grounding_results
+        ).reason_code
+        checks.append(
+            (
+                "grounding",
+                expected.grounding_reason_code,
+                actual_grounding,
+                actual_grounding == expected.grounding_reason_code,
+            )
+        )
     return [
         EvalGrade(name=name, expected=expected_value, actual=actual, passed=passed)
         for name, expected_value, actual, passed in checks
@@ -606,6 +636,26 @@ def _final_answer(steps) -> str:
     for step in reversed(steps):
         if isinstance(step, EvalFinishStep):
             return step.content
+    return ""
+
+
+def _assistant_answer(events) -> str:
+    for event in reversed(events):
+        if event.type != "assistant.message.completed":
+            continue
+        message = event.data.get("message")
+        if not isinstance(message, dict):
+            continue
+        content = message.get("content")
+        if not isinstance(content, list):
+            continue
+        return "\n".join(
+            str(item["text"])
+            for item in content
+            if isinstance(item, dict)
+            and item.get("type") == "text"
+            and isinstance(item.get("text"), str)
+        )
     return ""
 
 

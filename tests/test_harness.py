@@ -2,6 +2,7 @@ from datetime import UTC, datetime
 
 import pytest
 
+from full_view_agent.application.answer_grounding import build_fact_ledger
 from full_view_agent.application.errors import BudgetExceeded, LoopDetected
 from full_view_agent.application.harness import (
     AgentHarness,
@@ -16,8 +17,12 @@ from full_view_agent.domain.models import (
     AreaCandidatesData,
     AreaCandidatesResult,
     AuthContext,
+    GovernanceObjectRef,
     HousingLeaseTypeRow,
     HousingLeaseTypeTable,
+    ObjectProfileData,
+    ObjectProfileField,
+    ObjectProfileResult,
     TableDataResult,
     ToolResult,
 )
@@ -128,6 +133,16 @@ class SuccessfulToolExecutor:
         return successful_housing_result(tool_call_id=tool_call_id)
 
 
+class SuccessfulAreaHousingExecutor:
+    async def execute(
+        self, *, tool_call_id, tool_id, raw_arguments, auth_context
+    ) -> ToolResult:
+        del raw_arguments, auth_context
+        if tool_id == "governance.resolve_area":
+            return successful_area_result(tool_call_id=tool_call_id)
+        return successful_housing_result(tool_call_id=tool_call_id)
+
+
 class RepeatingPlanner:
     async def decide(self, state: HarnessState):
         return ToolAction(tool_id="governance.resolve_area", arguments={"query": "西湖区"})
@@ -162,12 +177,27 @@ class RepeatingUnsupportedInferencePlanner:
                 tool_id="governance.resolve_area",
                 arguments={"query": "西湖区"},
             )
+        if len(state.tool_results) == 1:
+            return ToolAction(
+                tool_id="governance.query_housing_metrics",
+                arguments={"query": {"scope": {"area_code": "330106"}}},
+            )
         return FinishAction(
             summary=(
                 "西湖区出租房共 4420 套。\n"
                 "> 注：各类型相同，可能反映当前数据源采用固定统计口径。"
             )
         )
+
+
+class RepeatingUnsupportedAreaPlanner:
+    async def decide(self, state: HarnessState):
+        if not state.tool_results:
+            return ToolAction(
+                tool_id="governance.resolve_area",
+                arguments={"query": "西湖区"},
+            )
+        return FinishAction(summary="拱墅区查询完成。")
 
 
 @pytest.mark.asyncio
@@ -277,6 +307,7 @@ async def test_deterministic_validator_requests_revision_for_unsupported_inferen
     validator = DeterministicCompletionValidator()
     state = HarnessState(
         tool_results=(
+            successful_area_result(),
             successful_housing_result(),
         )
     )
@@ -319,13 +350,138 @@ async def test_deterministic_validator_checks_numbers_against_fact_ledger() -> N
     assert fabricated.status == "revise"
     assert fabricated.reason_code == "unsupported_number"
     assert "4,999" not in (fabricated.safe_summary or "")
+    ledger = build_fact_ledger(state.tool_results)
+    assert ledger.sources["number:4420"] == {"res-housing"}
+
+
+@pytest.mark.asyncio
+async def test_deterministic_validator_checks_area_and_object_facts() -> None:
+    validator = DeterministicCompletionValidator()
+    object_result = ToolResult(
+        tool_call_id="tc-object",
+        tool_id="governance.get_object_profile",
+        tool_version="1.0",
+        status="success",
+        summary="查询成功",
+        data_result=ObjectProfileResult(
+            result_id="res-object",
+            data_schema_ref="schema://data/object-profile/1.0.0",
+            result_fingerprint="sha256:object",
+            data=ObjectProfileData(
+                object_ref=GovernanceObjectRef(
+                    object_type="building",
+                    object_id="building-12",
+                ),
+                area_code="330106",
+                title="翠苑一区12幢",
+                fields=[
+                    ObjectProfileField(
+                        field_id="address",
+                        label="地址",
+                        value="翠苑一区12幢",
+                        classification="public",
+                    )
+                ],
+            ),
+        ),
+    )
+    state = HarnessState(tool_results=(successful_area_result(), object_result))
+
+    grounded = await validator.assess(
+        state, FinishAction(summary="西湖区的翠苑一区12幢查询完成。")
+    )
+    wrong_area = await validator.assess(
+        state, FinishAction(summary="拱墅区的翠苑一区12幢查询完成。")
+    )
+    wrong_object = await validator.assess(
+        state, FinishAction(summary="西湖区的翠苑一区13幢查询完成。")
+    )
+
+    assert grounded.status == "accept"
+    assert wrong_area.reason_code == "unsupported_area"
+    assert wrong_object.reason_code == "unsupported_object"
+
+
+@pytest.mark.asyncio
+async def test_deterministic_validator_does_not_treat_area_dimensions_as_names() -> None:
+    validator = DeterministicCompletionValidator()
+    state = HarnessState(tool_results=(successful_housing_result(),))
+
+    assessment = await validator.assess(
+        state,
+        FinishAction(
+            summary="杭州全市已按区县汇总，可查看各区县和排名靠前的几个街道。"
+        ),
+    )
+
+    assert assessment.status == "accept"
+
+
+@pytest.mark.asyncio
+async def test_deterministic_validator_checks_comparative_judgements() -> None:
+    validator = DeterministicCompletionValidator()
+    result = successful_housing_result().model_copy(
+        update={
+            "data_result": TableDataResult(
+                result_id="res-ranked",
+                data_schema_ref="schema://data/housing-lease-type-table/1.0.0",
+                result_fingerprint="sha256:ranked",
+                data=HousingLeaseTypeTable(
+                    rows=[
+                        HousingLeaseTypeRow(
+                            lease_type="住宅出租", dwelling_count=100
+                        ),
+                        HousingLeaseTypeRow(
+                            lease_type="商铺出租", dwelling_count=80
+                        ),
+                        HousingLeaseTypeRow(
+                            lease_type="公寓出租", dwelling_count=80
+                        ),
+                    ]
+                ),
+                row_count=3,
+            )
+        }
+    )
+    state = HarnessState(tool_results=(result,))
+
+    maximum = await validator.assess(
+        state, FinishAction(summary="住宅出租最多，为 100 套。")
+    )
+    tied = await validator.assess(
+        state, FinishAction(summary="商铺出租和公寓出租并列最少，均为 80 套。")
+    )
+    false_maximum = await validator.assess(
+        state, FinishAction(summary="商铺出租最多，为 80 套。")
+    )
+    false_same = await validator.assess(
+        state, FinishAction(summary="三类出租房数量全部相同。")
+    )
+
+    assert maximum.status == "accept"
+    assert tied.status == "accept"
+    assert false_maximum.reason_code == "unsupported_judgement"
+    assert false_same.reason_code == "unsupported_judgement"
+
+
+@pytest.mark.asyncio
+async def test_deterministic_validator_accepts_all_same_and_derived_percentages() -> None:
+    validator = DeterministicCompletionValidator()
+    assessment = await validator.assess(
+        HarnessState(tool_results=(successful_housing_result(),)),
+        FinishAction(
+            summary="5 类出租房数量全部相同，每类 884 套，各占 20%。"
+        ),
+    )
+
+    assert assessment.status == "accept"
 
 
 @pytest.mark.asyncio
 async def test_harness_revises_once_then_uses_safe_summary_without_loop() -> None:
     planner = RepeatingUnsupportedInferencePlanner()
     harness = AgentHarness(
-        tool_executor=SuccessfulToolExecutor(),
+        tool_executor=SuccessfulAreaHousingExecutor(),
         validator=DeterministicCompletionValidator(),
     )
 
@@ -337,8 +493,28 @@ async def test_harness_revises_once_then_uses_safe_summary_without_loop() -> Non
     assert planner.seen_feedback == [
         None,
         None,
+        None,
         "回答包含无证据推断；请仅保留已验证事实和可复算计算。",
     ]
+
+
+@pytest.mark.asyncio
+async def test_harness_second_failed_revision_ends_with_stable_safe_summary() -> None:
+    harness = AgentHarness(
+        tool_executor=SuccessfulToolExecutor(),
+        validator=DeterministicCompletionValidator(),
+    )
+
+    result = await harness.run(
+        planner=RepeatingUnsupportedAreaPlanner(),
+        auth_context=auth_context(),
+    )
+
+    assert result.summary == (
+        "抱歉，当前回答仍包含无法由查询结果核验的内容，已停止生成结论。"
+    )
+    assert result.state.completion_revision_count == 1
+    assert result.state.completion_feedback_code == "unsupported_area"
 
 
 @pytest.mark.asyncio

@@ -72,6 +72,13 @@ class EvalExpected(ContractModel):
     required_event_types: list[str] = Field(default_factory=list)
     required_answer_substrings: list[str] = Field(default_factory=list)
     forbidden_answer_substrings: list[str] = Field(default_factory=list)
+    grounding_reason_code: Literal[
+        "grounded",
+        "unsupported_number",
+        "unsupported_area",
+        "unsupported_object",
+        "unsupported_judgement",
+    ] | None = None
     acceptable_terminal_variants: list[EvalTerminalVariant] = Field(
         default_factory=list,
         max_length=10,

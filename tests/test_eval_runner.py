@@ -717,3 +717,22 @@ async def test_eval_runner_accepts_one_of_multiple_complete_terminal_variants() 
         grade for grade in trace.grades if grade.name == "terminal_variant"
     )
     assert terminal_grade.passed is True
+
+
+@pytest.mark.asyncio
+async def test_eval_runner_uses_deterministic_grounding_grader() -> None:
+    original = population_case()
+    case = original.model_copy(
+        update={
+            "case_id": "population-grounding-grade",
+            "expected": original.expected.model_copy(
+                update={"grounding_reason_code": "grounded"}
+            ),
+        }
+    )
+
+    trace = await EvalRunner().run(case)
+
+    grounding = next(grade for grade in trace.grades if grade.name == "grounding")
+    assert grounding.passed is True
+    assert grounding.actual == "grounded"

@@ -210,11 +210,17 @@ class AgentContextBuilder:
                     )
                 )
         if state.completion_feedback:
+            feedback_code = (
+                f"（原因码：{state.completion_feedback_code}）"
+                if state.completion_feedback_code
+                else ""
+            )
             messages.append(
                 ModelMessage(
                     role="system",
                     content=(
                         "上一版最终回答未通过可信回答校验。"
+                        + feedback_code
                         + state.completion_feedback
                         + "不得重复原来的无证据表述。"
                     ),

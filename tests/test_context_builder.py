@@ -127,6 +127,7 @@ async def test_context_builder_exposes_completion_revision_feedback() -> None:
             completion_feedback=(
                 "回答包含无证据推断；请仅保留已验证事实和可复算计算。"
             ),
+            completion_feedback_code="unsupported_inference",
             completion_revision_count=1,
         ),
     )
@@ -134,6 +135,7 @@ async def test_context_builder_exposes_completion_revision_feedback() -> None:
     assert any(
         message.role == "system"
         and "回答包含无证据推断" in (message.content or "")
+        and "unsupported_inference" in (message.content or "")
         for message in request.messages
     )
 

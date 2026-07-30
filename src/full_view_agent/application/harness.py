@@ -4,8 +4,9 @@ from time import time
 from typing import Literal, Protocol
 
 from full_view_agent.application.answer_grounding import (
+    assess_answer_grounding,
     remove_lines_with_numbers,
-    unsupported_answer_numbers,
+    remove_lines_with_values,
 )
 from full_view_agent.application.errors import BudgetExceeded, LoopDetected
 from full_view_agent.application.fingerprints import canonical_fingerprint
@@ -61,6 +62,7 @@ class HarnessState:
     inherited_result_ids: tuple[str, ...] = ()
     inherited_evidence_ids: tuple[str, ...] = ()
     completion_feedback: str | None = None
+    completion_feedback_code: str | None = None
     completion_revision_count: int = 0
 
 
@@ -189,6 +191,17 @@ class DeterministicCompletionValidator:
     _UNSUPPORTED_NUMBER_FEEDBACK = (
         "回答包含无法回指 Result 的数字；请只引用原始事实或可复算计算。"
     )
+    _GROUNDING_FEEDBACK = {
+        "unsupported_number": _UNSUPPORTED_NUMBER_FEEDBACK,
+        "unsupported_area": "回答包含无法回指 Result 的区域；请仅引用查询结果中的区域。",
+        "unsupported_object": "回答包含无法回指 Result 的对象；请仅引用查询结果中的对象。",
+        "unsupported_judgement": (
+            "回答中的最大、最小、并列或相同判断无法由 Result 复算；请修正判断。"
+        ),
+    }
+    _SAFE_STOP_SUMMARY = (
+        "抱歉，当前回答仍包含无法由查询结果核验的内容，已停止生成结论。"
+    )
 
     ALLOWED_NO_RESULT_PATTERNS = (
         "我可以",
@@ -228,16 +241,22 @@ class DeterministicCompletionValidator:
         # Successful data does not authorize unsupported causal or
         # source-quality inferences.
         if success_results:
-            unsupported_numbers = unsupported_answer_numbers(
-                summary, tuple(success_results)
-            )
-            if unsupported_numbers:
+            grounding = assess_answer_grounding(summary, tuple(success_results))
+            if grounding.reason_code != "grounded":
                 return CompletionAssessment(
                     status="revise",
-                    reason_code="unsupported_number",
-                    feedback=self._UNSUPPORTED_NUMBER_FEEDBACK,
+                    reason_code=grounding.reason_code,
+                    feedback=self._GROUNDING_FEEDBACK[grounding.reason_code],
                     safe_summary=(
-                        remove_lines_with_numbers(summary, unsupported_numbers)
+                        (
+                            remove_lines_with_numbers(
+                                summary, set(grounding.unsupported_values)
+                            )
+                            if grounding.reason_code == "unsupported_number"
+                            else remove_lines_with_values(
+                                summary, set(grounding.unsupported_values)
+                            )
+                        )
                         or None
                     ),
                 )
@@ -365,13 +384,20 @@ class AgentHarness:
             if (
                 assessment.status == "revise"
                 and control.state.completion_revision_count > 0
-                and assessment.safe_summary
             ):
-                return control, assessment.safe_summary
+                if assessment.safe_summary:
+                    safe_assessment = await self._assess_completion(
+                        control.state,
+                        FinishAction(summary=assessment.safe_summary),
+                    )
+                    if safe_assessment.status == "accept":
+                        return control, assessment.safe_summary
+                return control, DeterministicCompletionValidator._SAFE_STOP_SUMMARY
             state = replace(
                 control.state,
                 no_progress_count=control.state.no_progress_count + 1,
                 completion_feedback=assessment.feedback,
+                completion_feedback_code=assessment.reason_code,
                 completion_revision_count=(
                     control.state.completion_revision_count + 1
                     if assessment.status == "revise"
@@ -391,6 +417,20 @@ class AgentHarness:
             )
         self._guard_no_progress(state)
         return control, None
+
+    async def _assess_completion(
+        self, state: HarnessState, action: FinishAction
+    ) -> CompletionAssessment:
+        assess = getattr(self._validator, "assess", None)
+        if assess is not None:
+            return await assess(state, action)
+        return CompletionAssessment(
+            status=(
+                "accept"
+                if await self._validator.validate(state, action)
+                else "reject"
+            )
+        )
 
     async def plan_once(
         self, *, planner: Planner, control: HarnessControl
