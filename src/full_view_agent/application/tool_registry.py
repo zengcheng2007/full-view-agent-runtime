@@ -1,3 +1,5 @@
+from copy import deepcopy
+
 from full_view_agent.application.errors import ResourceNotFound
 from full_view_agent.domain.models import (
     GetObjectProfileInput,
@@ -17,6 +19,13 @@ _INPUT_MODELS = {
     "governance.get_object_profile": GetObjectProfileInput,
 }
 
+PRODUCTION_HTTP_TOOL_IDS = (
+    "governance.query_event_metrics",
+    "governance.query_housing_metrics",
+    "governance.query_population_metrics",
+    "governance.resolve_area",
+)
+
 
 class ToolRegistry:
     def __init__(
@@ -24,14 +33,18 @@ class ToolRegistry:
         *,
         manifests: list[InternalToolManifest],
         descriptors: list[ModelToolDescriptor],
+        housing_next_area_enabled: bool = True,
     ) -> None:
         self._manifests = {manifest.tool_id: manifest for manifest in manifests}
         self._descriptors = {
             descriptor.tool_id: descriptor for descriptor in descriptors
         }
+        self._housing_next_area_enabled = housing_next_area_enabled
 
     @classmethod
-    def default(cls) -> "ToolRegistry":
+    def default(
+        cls, *, housing_next_area_enabled: bool = True
+    ) -> "ToolRegistry":
         return cls(
             manifests=[
                 _manifest(
@@ -83,7 +96,9 @@ class ToolRegistry:
                     ),
                     additional_data_schema_refs=(
                         "schema://data/housing-area-group-table/1.0.0",
-                    ),
+                    )
+                    if housing_next_area_enabled
+                    else (),
                     cache_enabled=True,
                     ttl_seconds=60,
                     action="governance.housing.aggregate.read",
@@ -151,11 +166,15 @@ class ToolRegistry:
                     name="查询出租房指标",
                     description=(
                         "查询授权区域的出租房聚合统计，不返回个人明细。"
-                        "不传 group_by 时返回区域自身按租赁类型的汇总；"
-                        "group_by=['next_area'] 时返回直接下级区划"
-                        "（全市按区县、区县按街道、街道按社区、社区按网格）"
-                        "的出租房数量分布。"
-                        "不支持其他分组、筛选、排序。"
+                        + (
+                            "不传 group_by 时返回区域自身按租赁类型的汇总；"
+                            "group_by=['next_area'] 时返回直接下级区划"
+                            "（全市按区县、区县按街道、街道按社区、社区按网格）"
+                            "的出租房数量分布。"
+                            if housing_next_area_enabled
+                            else "返回区域自身按租赁类型的汇总。"
+                        )
+                        + "不支持其他分组、筛选、排序。"
                     ),
                     schema_ref=(
                         "schema://tools/query-housing-metrics-input/1.0.0"
@@ -183,7 +202,20 @@ class ToolRegistry:
                     schema_ref="schema://tools/get-object-profile-input/1.0.0",
                 ),
             ],
+            housing_next_area_enabled=housing_next_area_enabled,
         )
+
+    @classmethod
+    def production_http(
+        cls, *, housing_next_area_enabled: bool = False
+    ) -> "ToolRegistry":
+        return cls.default(
+            housing_next_area_enabled=housing_next_area_enabled
+        ).subset(set(PRODUCTION_HTTP_TOOL_IDS))
+
+    @property
+    def housing_next_area_enabled(self) -> bool:
+        return self._housing_next_area_enabled
 
     def get_manifest(self, tool_id: str) -> InternalToolManifest:
         manifest = self._manifests.get(tool_id)
@@ -202,7 +234,15 @@ class ToolRegistry:
 
     def get_input_schema(self, tool_id: str) -> dict[str, object]:
         self.get_manifest(tool_id)
-        return _INPUT_MODELS[tool_id].model_json_schema(mode="validation")
+        schema = _INPUT_MODELS[tool_id].model_json_schema(mode="validation")
+        if (
+            tool_id == "governance.query_housing_metrics"
+            and not self._housing_next_area_enabled
+        ):
+            schema = deepcopy(schema)
+            query_schema = schema.get("$defs", {}).get("HousingMetricQuerySpec", {})
+            query_schema.get("properties", {}).pop("group_by", None)
+        return schema
 
     def subset(self, tool_ids: set[str]) -> "ToolRegistry":
         unknown = tool_ids.difference(self._manifests)
@@ -211,6 +251,7 @@ class ToolRegistry:
         return ToolRegistry(
             manifests=[self._manifests[tool_id] for tool_id in sorted(tool_ids)],
             descriptors=[self._descriptors[tool_id] for tool_id in sorted(tool_ids)],
+            housing_next_area_enabled=self._housing_next_area_enabled,
         )
 
 

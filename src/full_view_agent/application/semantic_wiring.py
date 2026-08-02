@@ -63,7 +63,9 @@ def build_semantic_capability_stack(
     denial_ledger: DenialLedger | None = None,
 ) -> SemanticCapabilityStack:
     effective_policy = policy or MinimalPolicyAdapter()
-    effective_catalog = catalog or SemanticCatalog.default()
+    effective_catalog = catalog or SemanticCatalog.default(
+        housing_next_area_enabled=registry.housing_next_area_enabled
+    )
     capability = CapabilityService(
         registry=registry,
         policy=effective_policy,

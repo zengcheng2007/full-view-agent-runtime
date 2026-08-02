@@ -211,6 +211,85 @@ async def test_openai_compatible_provider_applies_timeout_and_parses_text() -> N
 
 
 @pytest.mark.asyncio
+async def test_openai_compatible_provider_parses_text_with_null_tool_calls() -> None:
+    transport = httpx.MockTransport(
+        lambda _request: httpx.Response(
+            200,
+            json={
+                "choices": [
+                    {
+                        "finish_reason": "stop",
+                        "message": {
+                            "content": "分析已完成",
+                            "tool_calls": None,
+                        },
+                    }
+                ],
+                "usage": {
+                    "prompt_tokens": 20,
+                    "completion_tokens": 5,
+                    "total_tokens": 25,
+                },
+            },
+        )
+    )
+    async with httpx.AsyncClient(transport=transport) as client:
+        provider = OpenAICompatibleModelProvider(
+            base_url="http://model.test/v1",
+            model="qwen-test",
+            client=client,
+        )
+
+        response = await provider.complete(
+            ModelRequest(messages=(ModelMessage(role="user", content="分析住房数据"),))
+        )
+
+    assert response.content == "分析已完成"
+    assert response.tool_calls == ()
+
+
+@pytest.mark.parametrize("malformed_tool_calls", [{}, "not-a-list"])
+@pytest.mark.asyncio
+async def test_openai_compatible_provider_rejects_non_list_tool_calls(
+    malformed_tool_calls: object,
+) -> None:
+    transport = httpx.MockTransport(
+        lambda _request: httpx.Response(
+            200,
+            json={
+                "choices": [
+                    {
+                        "finish_reason": "stop",
+                        "message": {
+                            "content": "分析已完成",
+                            "tool_calls": malformed_tool_calls,
+                        },
+                    }
+                ],
+                "usage": {
+                    "prompt_tokens": 20,
+                    "completion_tokens": 5,
+                    "total_tokens": 25,
+                },
+            },
+        )
+    )
+    async with httpx.AsyncClient(transport=transport) as client:
+        provider = OpenAICompatibleModelProvider(
+            base_url="http://model.test/v1",
+            model="qwen-test",
+            client=client,
+        )
+
+        with pytest.raises(errors.ModelContractError):
+            await provider.complete(
+                ModelRequest(
+                    messages=(ModelMessage(role="user", content="分析住房数据"),)
+                )
+            )
+
+
+@pytest.mark.asyncio
 async def test_openai_compatible_provider_rejects_responses_without_token_usage() -> None:
     transport = httpx.MockTransport(
         lambda _request: httpx.Response(

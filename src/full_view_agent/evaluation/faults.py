@@ -1,7 +1,11 @@
 from pydantic import BaseModel
 
 from full_view_agent.application.capability_service import ToolAdapter
-from full_view_agent.application.errors import UpstreamTimeout
+from full_view_agent.application.errors import (
+    UpstreamContractError,
+    UpstreamTimeout,
+    UpstreamUnavailable,
+)
 from full_view_agent.domain.models import (
     AuthContext,
     DataResult,
@@ -32,7 +36,15 @@ class FaultInjectingEvalAdapter:
         auth_context: AuthContext,
     ) -> DataResult:
         if manifest.tool_id == self._fault.tool_id:
-            raise UpstreamTimeout("evaluation injected upstream timeout")
+            if self._fault.type == "upstream_timeout":
+                raise UpstreamTimeout("evaluation injected upstream timeout")
+            if self._fault.type == "upstream_unavailable":
+                raise UpstreamUnavailable(
+                    "evaluation injected upstream unavailable"
+                )
+            raise UpstreamContractError(
+                "evaluation injected upstream contract error"
+            )
         return await self._delegate.execute(
             manifest=manifest,
             arguments=arguments,

@@ -29,7 +29,10 @@ from full_view_agent.application.semantic_executor import (
     SemanticToolExecutor,
 )
 from full_view_agent.application.session_run_service import SessionRunService
-from full_view_agent.application.tool_registry import ToolRegistry
+from full_view_agent.application.tool_registry import (
+    PRODUCTION_HTTP_TOOL_IDS,
+    ToolRegistry,
+)
 from full_view_agent.domain import models
 from full_view_agent.evaluation.http_environment import HttpEvalEnvironment
 from full_view_agent.evaluation.loader import load_eval_case
@@ -53,14 +56,6 @@ from .test_policy import population_auth_context
 from .test_session_run_service import run_request
 
 EVAL_CASES = Path(__file__).parents[1] / "evals" / "cases"
-
-PRODUCTION_HTTP_TOOL_IDS = [
-    "governance.query_event_metrics",
-    "governance.query_housing_metrics",
-    "governance.query_population_metrics",
-    "governance.resolve_area",
-]
-
 
 def _full_governance_auth_context() -> models.AuthContext:
     context = population_auth_context()
@@ -97,7 +92,9 @@ def _legacy_envelope(data: object) -> httpx.Response:
     )
 
 
-def _http_runtime_container() -> RuntimeContainer:
+def _http_runtime_container(
+    *, housing_next_area_enabled: bool = False
+) -> RuntimeContainer:
     client = httpx.AsyncClient(
         transport=httpx.MockTransport(lambda _: _legacy_envelope([]))
     )
@@ -105,6 +102,7 @@ def _http_runtime_container() -> RuntimeContainer:
         base_url="http://legacy.test/geo-qxst",
         credential_broker=InMemoryCredentialBroker(),
         client=client,
+        housing_next_area_enabled=housing_next_area_enabled,
     )
     return RuntimeContainer(
         identity_port=HashedLegacyIdentityAdapter(),
@@ -121,7 +119,7 @@ def _http_runtime_container() -> RuntimeContainer:
 def test_production_http_registry_subset_matches_wired_capabilities() -> None:
     container = _http_runtime_container()
 
-    assert container.tool_registry.list_tool_ids() == PRODUCTION_HTTP_TOOL_IDS
+    assert container.tool_registry.list_tool_ids() == list(PRODUCTION_HTTP_TOOL_IDS)
 
 
 @pytest.mark.asyncio
@@ -148,20 +146,102 @@ async def test_production_context_advertises_wired_aggregate_tools() -> None:
         state=HarnessState(),
     )
 
-    assert [tool.tool_id for tool in request.tools] == PRODUCTION_HTTP_TOOL_IDS
+    assert [tool.tool_id for tool in request.tools] == list(PRODUCTION_HTTP_TOOL_IDS)
     prompt = request.messages[0].content
     assert "query_housing_metrics" in prompt
-    assert "next_area" in prompt
+    assert "按租赁类型" in prompt
+    assert "next_area" not in prompt
+    housing_tool = next(
+        tool
+        for tool in request.tools
+        if tool.tool_id == "governance.query_housing_metrics"
+    )
+    assert "next_area" not in json.dumps(
+        {
+            "description": housing_tool.description,
+            "input_schema": housing_tool.input_schema,
+        },
+        ensure_ascii=False,
+    )
     assert "query_event_metrics" in prompt
     assert "不支持按阈值筛选" in prompt
     assert "get_object_profile" not in prompt
     assert "base_room_lease" not in prompt
     assert "getNextSiteData" not in prompt
     assert "getRoomLeaseType" not in prompt
+    housing_subject = container.semantic_stack.catalog.require_subject("housing")
+    assert housing_subject.max_group_by == 0
+    assert housing_subject.group_by_rules == ()
+    assert [shape.shape_id for shape in housing_subject.result_shapes] == [
+        "housing_lease_type_table"
+    ]
+
+
+@pytest.mark.asyncio
+async def test_production_context_exposes_next_area_only_when_explicitly_enabled(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("FULL_VIEW_HOUSING_NEXT_AREA_ENABLED", "true")
+    container = _http_runtime_container(housing_next_area_enabled=True)
+    store = InMemoryAgentStore()
+    service = SessionRunService(store)
+    session = await service.create_session(user_id="user-gated", title="门禁")
+    run = await service.create_run(
+        user_id="user-gated",
+        session_id=session.session_id,
+        request=run_request(),
+    )
+    auth_context = _full_governance_auth_context().model_copy(
+        update={"session_id": session.session_id, "run_id": run.run_id}
+    )
+
+    request = await AgentContextBuilder(
+        store=store,
+        registry=container.tool_registry,
+    ).build(
+        user_id="user-gated",
+        auth_context=auth_context,
+        state=HarnessState(),
+    )
+
+    housing_tool = next(
+        tool
+        for tool in request.tools
+        if tool.tool_id == "governance.query_housing_metrics"
+    )
+    model_surface = json.dumps(
+        {
+            "description": housing_tool.description,
+            "input_schema": housing_tool.input_schema,
+        },
+        ensure_ascii=False,
+    )
+    assert "next_area" in request.messages[0].content
+    assert "next_area" in model_surface
+    assert container.semantic_stack.catalog.require_subject(
+        "housing"
+    ).max_group_by == 1
+
+
+def test_runtime_rejects_http_adapter_flag_mismatch() -> None:
+    adapter = HttpGovernanceAdapter(
+        base_url="http://legacy.test/geo-qxst",
+        credential_broker=InMemoryCredentialBroker(),
+        housing_next_area_enabled=True,
+    )
+
+    with pytest.raises(
+        RuntimeError, match="FULL_VIEW_HOUSING_NEXT_AREA_ENABLED"
+    ):
+        RuntimeContainer(
+            identity_port=HashedLegacyIdentityAdapter(),
+            credentials=InMemoryCredentialBroker(),
+            governance_adapter=adapter,
+        )
 
 
 def test_prompt_only_lists_registered_and_authorized_capabilities() -> None:
-    assert FULL_VIEW_SYSTEM_PROMPT_VERSION == "full-view-governance-readonly-v10"
+    assert FULL_VIEW_SYSTEM_PROMPT_VERSION == "full-view-governance-readonly-v12"
 
     population_only = build_full_view_system_prompt(
         {}, tool_ids=("governance.query_population_metrics",)
@@ -253,6 +333,8 @@ def production_orchestrator(request: pytest.FixtureRequest) -> str:
 def _housing_http_environment(
     seen_paths: list[str],
     bodies: dict[str, list[dict[str, list[str]]]],
+    *,
+    housing_next_area_enabled: bool = False,
 ) -> HttpEvalEnvironment:
     def handle(request: httpx.Request) -> httpx.Response:
         seen_paths.append(request.url.path)
@@ -313,6 +395,7 @@ def _housing_http_environment(
         governance_base_url="http://legacy.test/geo-qxst",
         p0_allowed_user_ids={"legacy-user-1"},
         client=client,
+        housing_next_area_enabled=housing_next_area_enabled,
     )
 
 
@@ -346,6 +429,15 @@ async def test_production_wiring_housing_lease_type_over_http(
     serialized = trace.model_dump_json()
     assert "test-geo-token" not in serialized
     assert "credential_ref" not in serialized
+    lease_requests = [
+        summary
+        for summary in trace.outbound_requests
+        if summary.path == "/geo-qxst/house/getRoomLeaseType"
+    ]
+    assert [
+        (summary.method, summary.path, summary.count)
+        for summary in lease_requests
+    ] == [("POST", "/geo-qxst/house/getRoomLeaseType", 1)]
 
 
 @pytest.mark.asyncio
@@ -354,7 +446,9 @@ async def test_production_wiring_housing_next_area_over_http(
 ) -> None:
     seen_paths: list[str] = []
     bodies: dict[str, list[dict[str, list[str]]]] = {}
-    environment = _housing_http_environment(seen_paths, bodies)
+    environment = _housing_http_environment(
+        seen_paths, bodies, housing_next_area_enabled=True
+    )
     case = load_eval_case(
         EVAL_CASES / "planning-housing-next-area-http-success.yaml"
     )
@@ -373,6 +467,15 @@ async def test_production_wiring_housing_next_area_over_http(
     assert "governance.query_housing_metrics" in trace.model_requests[0].tool_ids
     serialized = trace.model_dump_json()
     assert "test-geo-token" not in serialized
+    next_area_requests = [
+        summary
+        for summary in trace.outbound_requests
+        if summary.path == "/geo-qxst/getNextSiteData"
+    ]
+    assert [
+        (summary.method, summary.path, summary.count)
+        for summary in next_area_requests
+    ] == [("POST", "/geo-qxst/getNextSiteData", 1)]
 
 
 @pytest.mark.asyncio
@@ -403,8 +506,17 @@ async def test_production_wiring_event_finish_rate_over_http(
     assert "governance.query_event_metrics" in trace.model_requests[0].tool_ids
     assert len(trace.evidence_ids) >= 2
     serialized = trace.model_dump_json()
+    model_surface = json.dumps(
+        [request.model_dump(mode="json") for request in trace.model_requests],
+        ensure_ascii=False,
+    )
     assert "test-geo-token" not in serialized
-    assert "getEventPropertiesAndConflictsByTotal" not in serialized
+    assert "getEventPropertiesAndConflictsByTotal" not in model_surface
+    assert any(
+        summary.path
+        == "/geo-qxst/api/getEventPropertiesAndConflictsByTotal"
+        for summary in trace.outbound_requests
+    )
 
 
 @pytest.mark.asyncio
@@ -436,8 +548,16 @@ async def test_production_wiring_population_resolve_and_query_over_http(
     ]
     assert len(trace.evidence_ids) >= 2
     serialized = trace.model_dump_json()
+    model_surface = json.dumps(
+        [request.model_dump(mode="json") for request in trace.model_requests],
+        ensure_ascii=False,
+    )
     assert "test-geo-token" not in serialized
-    assert "getNextSiteData" not in serialized
+    assert "getNextSiteData" not in model_surface
+    assert any(
+        summary.path == "/geo-qxst/getNextSiteData"
+        for summary in trace.outbound_requests
+    )
 
 
 # ---------------------------------------------------------------------------

@@ -5,6 +5,7 @@ import pytest
 from pydantic import SecretStr
 
 from full_view_agent.application import errors
+from full_view_agent.application.capability_service import CapabilityService
 from full_view_agent.application.policy import MinimalPolicyAdapter
 from full_view_agent.application.tool_registry import ToolRegistry
 from full_view_agent.domain import models
@@ -568,6 +569,62 @@ async def test_http_adapter_maps_housing_request_to_lease_type_contract() -> Non
     assert result.data_schema_ref == "schema://data/housing-lease-type-table/1.0.0"
     assert result.data.rows[0].lease_type == "住宅出租"
     assert result.data.rows[0].dwelling_count == 32
+
+
+@pytest.mark.parametrize(
+    ("group_by", "malformed_data"),
+    [
+        (None, {}),
+        (None, "not-a-list"),
+        (["next_area"], {}),
+        (["next_area"], "not-a-list"),
+    ],
+)
+@pytest.mark.asyncio
+async def test_housing_non_list_data_fails_closed_as_stable_tool_result(
+    group_by: list[str] | None,
+    malformed_data: object,
+) -> None:
+    def handler(_request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            json={
+                "state": True,
+                "code": 200,
+                "msg": "",
+                "data": malformed_data,
+            },
+        )
+
+    auth_context = _domain_auth_context(
+        entitlement="governance.housing.aggregate.read",
+        dataset_id="housing",
+    )
+    query: dict[str, object] = {"scope": {"area_code": "330106"}}
+    if group_by is not None:
+        query["group_by"] = group_by
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        service = CapabilityService(
+            registry=ToolRegistry.default(),
+            policy=MinimalPolicyAdapter(),
+            adapter=governance_adapter.HttpGovernanceAdapter(
+                base_url="http://legacy.test/geo-qxst",
+                credential_broker=RecordingCredentialBroker(),
+                client=client,
+            ),
+        )
+        result = await service.execute(
+            tool_call_id="tcl-housing-malformed-data",
+            tool_id="governance.query_housing_metrics",
+            raw_arguments={"query": query},
+            auth_context=auth_context,
+        )
+
+    assert result.status == "failed"
+    assert result.data_result is None
+    assert result.summary == "现有业务服务暂时不可用。"
+    assert result.warnings == ["upstream_contract_error"]
 
 
 @pytest.mark.asyncio

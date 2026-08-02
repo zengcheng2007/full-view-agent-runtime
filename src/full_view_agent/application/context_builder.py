@@ -109,6 +109,9 @@ class AgentContextBuilder:
                         if semantic_presentation is not None
                         else None
                     ),
+                    housing_next_area_enabled=(
+                        self._registry.housing_next_area_enabled
+                    ),
                 ),
             )
         ]
@@ -206,6 +209,17 @@ class AgentContextBuilder:
                         ),
                     )
                 )
+        if state.completion_feedback:
+            messages.append(
+                ModelMessage(
+                    role="system",
+                    content=(
+                        "上一版最终回答未通过可信回答校验。"
+                        + state.completion_feedback
+                        + "不得重复原来的无证据表述。"
+                    ),
+                )
+            )
 
         entitlements = set(auth_context.entitlements)
         datasets = set(auth_context.data_scopes.datasets)

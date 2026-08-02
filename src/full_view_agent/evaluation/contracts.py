@@ -42,7 +42,11 @@ class EvalErrorStep(ContractModel):
 
 
 class EvalFaultSpec(ContractModel):
-    type: Literal["upstream_timeout"]
+    type: Literal[
+        "upstream_timeout",
+        "upstream_unavailable",
+        "upstream_contract_error",
+    ]
     tool_id: str = Field(min_length=1, max_length=200)
 
 
@@ -114,6 +118,12 @@ class EvalModelRequestRecord(ContractModel):
     prompt_version: str | None = None
 
 
+class EvalOutboundRequestSummary(ContractModel):
+    method: str = Field(min_length=1, max_length=16)
+    path: str = Field(min_length=1, max_length=500)
+    count: int = Field(ge=1)
+
+
 GradeValue = str | int | bool | list[str] | None
 
 
@@ -145,6 +155,10 @@ class EvalTrace(ContractModel):
     case_id: str
     started_at: datetime
     completed_at: datetime
+    environment_kind: str = "unknown"
+    evidence_source_system: str = "unknown"
+    runtime_version: str = "unknown"
+    outbound_requests: list[EvalOutboundRequestSummary] = Field(default_factory=list)
     model_provider: str = "scripted"
     model_name: str = "scripted"
     prompt_version: str = "unknown"

@@ -1,23 +1,38 @@
 mode: worktree
-parent_task: C1-prepare-customer-demo-capability
+parent_task: P1-grounded-answer-and-semantic-entry
 batch: 1
 tasks:
-  - id: C1-A
-    name: c1-capability-inventory
+  - id: P1-G
+    name: p1-answer-grounding
+    executor: codex-module-dev
     file_ranges:
-      - docs/c1/c1-capability-matrix.md
+      - src/full_view_agent/application/answer_grounding.py
+      - src/full_view_agent/application/harness.py
+      - src/full_view_agent/application/context_builder.py
+      - src/full_view_agent/evaluation/contracts.py
+      - src/full_view_agent/evaluation/runner.py
+      - tests/test_harness.py
+      - tests/test_context_builder.py
+      - tests/test_eval_runner.py
     dependencies: []
-    verification:
-      - git diff --check
-  - id: C1-B
-    name: c1-production-contract-tests
+  - id: P1-S
+    name: p1-semantic-entry
+    executor: claude-code-module-dev
     file_ranges:
-      - tests/**
+      - src/full_view_agent/semantic/**
+      - src/full_view_agent/application/semantic_wiring.py
+      - tests/test_semantic_*.py
     dependencies: []
-    verification:
-      - uv run ruff check .
-      - uv run pyright
-      - uv run pytest
+  - id: P1-R
+    name: p1-integration-review
+    executor: reviewer
+    file_ranges: []
+    dependencies: [P1-G, P1-S]
+verification:
+  - uv run ruff check .
+  - uv run pyright
+  - uv run pytest -q
 constraints:
-  - C1-A only writes docs/c1/c1-capability-matrix.md; C1-B writes no docs
-  - no production source, frontend, credentials, or eval run artifacts
+  - P1-G and P1-S file ranges are mutually exclusive
+  - reviewer is read-only and runs only after both builders complete
+  - no frontend, database, credentials, deployment bypass, or eval run artifacts

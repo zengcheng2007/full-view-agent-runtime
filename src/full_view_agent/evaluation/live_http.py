@@ -5,6 +5,9 @@ from typing import Any, Literal
 from pydantic import Field, SecretStr
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
+from full_view_agent.application.deployment_capabilities import (
+    parse_housing_next_area_enabled,
+)
 from full_view_agent.evaluation.http_environment import HttpEvalEnvironment
 from full_view_agent.evaluation.live import build_live_eval_runner
 from full_view_agent.evaluation.runner import EvalRunner
@@ -22,6 +25,7 @@ class LiveHttpEvalSettings(BaseSettings):
         min_length=1,
     )
     p0_allowed_user_ids: str = ""
+    housing_next_area_enabled: str = "false"
 
 
 def build_live_http_eval_runner(
@@ -55,6 +59,9 @@ def build_live_http_eval_runner(
         legacy_gateway_url=settings.legacy_gateway_url,
         governance_base_url=settings.governance_base_url,
         p0_allowed_user_ids=allowed_user_ids,
+        housing_next_area_enabled=parse_housing_next_area_enabled(
+            settings.housing_next_area_enabled
+        ),
     )
     return build_live_eval_runner(
         env_file,

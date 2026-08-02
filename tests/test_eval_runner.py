@@ -12,6 +12,7 @@ from full_view_agent.evaluation.contracts import (
     EvalCase,
     EvalErrorStep,
     EvalFinishStep,
+    EvalTrace,
 )
 from full_view_agent.evaluation.loader import load_eval_case
 from full_view_agent.evaluation.runner import EvalRunner, StaticEvalEnvironment
@@ -133,11 +134,29 @@ async def test_eval_runner_executes_real_runtime_components_and_grades_success()
     assert trace.tool_ids == ["governance.semantic_query"]
     assert len(trace.evidence_ids) == 1
     assert trace.total_tokens == 150
+    assert trace.environment_kind == "static"
+    assert trace.evidence_source_system == "eval_fixture"
+    assert trace.runtime_version == "unknown"
+    assert trace.outbound_requests == []
     assert all(grade.passed for grade in trace.grades)
     assert "查询西湖区独居老人数量" in trace.model_requests[0].messages[-1].content
     serialized = trace.model_dump_json()
     assert "credential_ref" not in serialized
     assert "cred-eval" not in serialized
+
+    legacy_payload = trace.model_dump(
+        exclude={
+            "environment_kind",
+            "evidence_source_system",
+            "runtime_version",
+            "outbound_requests",
+        }
+    )
+    legacy_trace = EvalTrace.model_validate(legacy_payload)
+    assert legacy_trace.environment_kind == "unknown"
+    assert legacy_trace.evidence_source_system == "unknown"
+    assert legacy_trace.runtime_version == "unknown"
+    assert legacy_trace.outbound_requests == []
 
 
 @pytest.mark.asyncio
@@ -387,7 +406,7 @@ async def test_eval_runner_records_live_provider_steps_and_version_metadata() ->
     assert trace.passed is True
     assert trace.model_provider == "openai_compatible"
     assert trace.model_name == "qwen-live-test"
-    assert trace.prompt_version == "full-view-governance-readonly-v10"
+    assert trace.prompt_version == "full-view-governance-readonly-v12"
     assert [step.type for step in trace.model_steps] == ["tool_call", "finish"]
     assert trace.total_tokens == 210
     assert provider.call_count == 2
@@ -480,10 +499,12 @@ async def test_eval_runner_returns_failed_grade_instead_of_hiding_regression() -
 class CountingGovernanceAdapter:
     def __init__(self) -> None:
         self.calls = 0
+        self.tool_ids: list[str] = []
         self._delegate = InMemoryGovernanceAdapter()
 
     async def execute(self, **kwargs):
         self.calls += 1
+        self.tool_ids.append(kwargs["manifest"].tool_id)
         return await self._delegate.execute(**kwargs)
 
 
@@ -554,6 +575,38 @@ async def test_eval_runner_injects_tool_timeout_before_downstream_call() -> None
     assert trace.passed is True
     assert trace.completion_reason_code == "upstream_timeout"
     assert adapter.calls == 0
+
+
+@pytest.mark.parametrize(
+    ("case_file", "reason_code"),
+    [
+        ("housing-upstream-timeout.yaml", "upstream_timeout"),
+        ("housing-upstream-unavailable.yaml", "upstream_unavailable"),
+        ("housing-upstream-contract-error.yaml", "upstream_contract_error"),
+    ],
+)
+@pytest.mark.asyncio
+async def test_housing_fault_gate_fails_once_before_business_adapter(
+    case_file: str,
+    reason_code: str,
+) -> None:
+    case = load_eval_case(EVAL_CASES / case_file)
+    adapter = CountingGovernanceAdapter()
+
+    trace = await EvalRunner(
+        environment=CountingEvalEnvironment(adapter)
+    ).run(case)
+
+    assert trace.passed is True
+    assert trace.terminal_status == "failed"
+    assert trace.outcome == "failed"
+    assert trace.completion_reason_code == reason_code
+    assert trace.tool_ids.count("governance.query_housing_metrics") == 1
+    assert trace.event_types.count("tool.failed") == 1
+    assert "result.available" not in trace.event_types
+    assert "evidence.available" not in trace.event_types
+    assert trace.evidence_ids == []
+    assert adapter.tool_ids == ["governance.resolve_area"]
 
 
 @pytest.mark.asyncio

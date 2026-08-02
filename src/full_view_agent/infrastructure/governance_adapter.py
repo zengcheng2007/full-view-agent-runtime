@@ -317,11 +317,17 @@ class HttpGovernanceAdapter:
         base_url: str,
         credential_broker: "LegacyCredentialResolver",
         client: httpx.AsyncClient | None = None,
+        housing_next_area_enabled: bool = True,
     ) -> None:
         self._base_url = base_url.rstrip("/")
         self._credential_broker = credential_broker
         self._owns_client = client is None
         self._client = client or httpx.AsyncClient()
+        self._housing_next_area_enabled = housing_next_area_enabled
+
+    @property
+    def housing_next_area_enabled(self) -> bool:
+        return self._housing_next_area_enabled
 
     async def aclose(self) -> None:
         if self._owns_client:
@@ -578,6 +584,10 @@ class HttpGovernanceAdapter:
         max_attempts: int,
     ) -> TableDataResult:
         if arguments.query.group_by == ["next_area"]:
+            if not self._housing_next_area_enabled:
+                raise SemanticValidationError(
+                    "housing group_by=['next_area'] is disabled in this deployment"
+                )
             return await self._query_housing_area_distribution_http(
                 arguments=arguments,
                 auth_context=auth_context,
@@ -602,13 +612,17 @@ class HttpGovernanceAdapter:
             max_attempts=max_attempts,
         )
         raw_rows = _unwrap_standard_result(response)
+        if not isinstance(raw_rows, list):
+            raise UpstreamContractError(
+                "legacy housing response data is not a list"
+            )
         try:
             rows = [
                 HousingLeaseTypeRow(
                     lease_type=str(item["house_type"]),
                     dwelling_count=int(item["total"]),
                 )
-                for item in (raw_rows if isinstance(raw_rows, list) else [])
+                for item in raw_rows
             ][: arguments.query.limit]
         except (KeyError, TypeError, ValueError) as exc:
             raise UpstreamContractError(
@@ -655,7 +669,11 @@ class HttpGovernanceAdapter:
             max_attempts=max_attempts,
         )
         raw_rows = _unwrap_standard_result(response)
-        source_rows = raw_rows if isinstance(raw_rows, list) else []
+        if not isinstance(raw_rows, list):
+            raise UpstreamContractError(
+                "legacy housing area response data is not a list"
+            )
+        source_rows = raw_rows
         try:
             rows = sorted(
                 [

@@ -21,6 +21,10 @@ from full_view_agent.application.auth_context_refresh import RunAuthContextRefre
 from full_view_agent.application.capability_service import ToolAdapter
 from full_view_agent.application.context_builder import AgentContextBuilder
 from full_view_agent.application.cursor_codec import SignedCursorCodec
+from full_view_agent.application.deployment_capabilities import (
+    HOUSING_NEXT_AREA_ENV,
+    parse_housing_next_area_enabled,
+)
 from full_view_agent.application.errors import (
     ApplicationError,
     AuthenticationFailed,
@@ -57,7 +61,10 @@ from full_view_agent.application.semantic_wiring import (
     build_semantic_capability_stack,
 )
 from full_view_agent.application.session_run_service import SessionRunService, new_id
-from full_view_agent.application.tool_registry import ToolRegistry
+from full_view_agent.application.tool_registry import (
+    PRODUCTION_HTTP_TOOL_IDS,
+    ToolRegistry,
+)
 from full_view_agent.application.workflow_registry import WorkflowRegistry
 from full_view_agent.domain.models import (
     AgentMessage,
@@ -376,9 +383,13 @@ class RuntimeContainer:
             identity_port=self.identity_port,
             admission=self.admission,
         )
+        housing_next_area_enabled = parse_housing_next_area_enabled(
+            os.getenv(HOUSING_NEXT_AREA_ENV)
+        )
         if self.governance_adapter is None:
             if adapter_mode == "memory":
                 self.governance_adapter = InMemoryGovernanceAdapter()
+                housing_next_area_enabled = True
             elif adapter_mode == "http":
                 self.governance_adapter = HttpGovernanceAdapter(
                     base_url=os.getenv(
@@ -386,21 +397,38 @@ class RuntimeContainer:
                         f"{os.getenv('FULL_VIEW_LEGACY_GATEWAY_URL', 'http://127.0.0.1:9666')}/geo-qxst",
                     ),
                     credential_broker=self.credentials,
+                    housing_next_area_enabled=housing_next_area_enabled,
                 )
             else:
                 raise RuntimeError(
                     "FULL_VIEW_GOVERNANCE_ADAPTER must be 'memory' or 'http'"
                 )
-        self.tool_registry = self.tool_registry or ToolRegistry.default()
         if isinstance(self.governance_adapter, HttpGovernanceAdapter):
-            self.tool_registry = self.tool_registry.subset(
-                {
-                    "governance.resolve_area",
-                    "governance.query_event_metrics",
-                    "governance.query_housing_metrics",
-                    "governance.query_population_metrics",
-                }
+            if (
+                self.governance_adapter.housing_next_area_enabled
+                != housing_next_area_enabled
+            ):
+                raise RuntimeError(
+                    "injected HttpGovernanceAdapter disagrees with "
+                    f"{HOUSING_NEXT_AREA_ENV}"
+                )
+            if (
+                self.tool_registry is not None
+                and self.tool_registry.housing_next_area_enabled
+                != housing_next_area_enabled
+            ):
+                raise RuntimeError(
+                    "injected ToolRegistry disagrees with "
+                    f"{HOUSING_NEXT_AREA_ENV}"
+                )
+            self.tool_registry = self.tool_registry or ToolRegistry.default(
+                housing_next_area_enabled=housing_next_area_enabled
             )
+            self.tool_registry = self.tool_registry.subset(
+                set(PRODUCTION_HTTP_TOOL_IDS)
+            )
+        else:
+            self.tool_registry = self.tool_registry or ToolRegistry.default()
         if self.model_provider is None and model_provider_mode == "openai_compatible":
             model_base_url = os.getenv("FULL_VIEW_MODEL_BASE_URL")
             model_name = os.getenv("FULL_VIEW_MODEL_NAME")

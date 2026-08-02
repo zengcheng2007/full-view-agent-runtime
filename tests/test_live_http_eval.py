@@ -73,9 +73,27 @@ async def test_http_eval_environment_uses_real_identity_admission_and_http_tool(
         / "planning-population-http-success.yaml"
     )
 
-    trace = await EvalRunner(environment=environment).run(case)
+    trace = await EvalRunner(
+        environment=environment,
+        runtime_version="runtime-test-123",
+    ).run(case)
 
     assert trace.passed is True
+    assert trace.environment_kind == "live_http"
+    assert trace.evidence_source_system == "legacy_geo_qxst"
+    assert trace.runtime_version == "runtime-test-123"
+    assert [
+        summary.model_dump(mode="json") for summary in trace.outbound_requests
+    ] == [
+        {"method": "GET", "path": "/getUserByToken", "count": 1},
+        {
+            "method": "POST",
+            "path": "/geo-qxst/area/getAreaInfoByAreaName",
+            "count": 1,
+        },
+        {"method": "POST", "path": "/geo-qxst/getNextSiteData", "count": 1},
+    ]
+    assert "governance.get_object_profile" not in trace.model_requests[0].tool_ids
     assert seen_paths == [
         "/getUserByToken",
         "/geo-qxst/area/getAreaInfoByAreaName",
@@ -84,4 +102,4 @@ async def test_http_eval_environment_uses_real_identity_admission_and_http_tool(
     serialized = trace.model_dump_json()
     assert "test-geo-token" not in serialized
     assert "credential_ref" not in serialized
-
+    assert "geoToken" not in serialized

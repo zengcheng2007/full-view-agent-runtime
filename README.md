@@ -100,6 +100,8 @@ $env:FULL_VIEW_REDIS_URL = "redis://127.0.0.1:16379/0"
 $env:FULL_VIEW_P0_ALLOWED_USER_IDS = "replace-with-authorized-user-id"
 $env:FULL_VIEW_GOVERNANCE_ADAPTER = "http"
 $env:FULL_VIEW_GOVERNANCE_BASE_URL = "http://127.0.0.1:9666/geo-qxst"
+# 默认 false：仅在部署已验证下级区划出租房口径后显式设为 true
+$env:FULL_VIEW_HOUSING_NEXT_AREA_ENABLED = "false"
 $env:FULL_VIEW_ORCHESTRATOR = "langgraph"  # R3 默认；native 仅用于限时回滚
 $env:FULL_VIEW_MODEL_PROVIDER = "openai_compatible"
 $env:FULL_VIEW_MODEL_BASE_URL = "https://replace-with-model-endpoint/v1"
@@ -189,7 +191,8 @@ uv run python scripts/run_evals.py run-live `
 
 使用真实模型、现有登录身份和正式 HTTP Adapter 运行 S1 实景评测时，必须在当前进程
 临时注入已签发的 `geoToken`，并显式配置 P0 用户白名单。不要把 Token 写入 `.env`、
-命令参数或评测文件：
+命令参数或评测文件。`run-live-http` 与生产 API 共用同一组生产 HTTP Tool Registry，
+不会向模型暴露仅供静态评测使用的 `object_profile`：
 
 ```powershell
 $env:FULL_VIEW_EVAL_GEO_TOKEN = "replace-with-temporary-geo-token"
@@ -204,16 +207,25 @@ Remove-Item Env:FULL_VIEW_EVAL_GEO_TOKEN
 出租房纵向切片提供两个同类用例（按租赁类型汇总、按下级区划汇总）：
 `evals/cases/planning-housing-http-success.yaml` 与
 `evals/cases/planning-housing-next-area-http-success.yaml`，
-运行方式与上面一致，只需替换 `--case` 与 `--output`。
+运行方式与上面一致，只需替换 `--case` 与 `--output`。生产 HTTP 与
+`run-live-http` 默认只开放按租赁类型汇总；下级区划能力必须显式设置
+`FULL_VIEW_HOUSING_NEXT_AREA_ENABLED=true`。同一门禁会同步控制模型可见
+Schema、工具描述、系统提示、语义目录和 HTTP Adapter，禁用时手工传入
+`group_by=['next_area']` 也会在请求旧系统前拒绝。
 
 事件办结率快照的生产路径用例为
 `evals/cases/planning-event-http-success.yaml`，开放式真实模型用例为
 `evals/cases-live/open-event-finish-rate-query.yaml`。该能力仅复用原系统当前
 三层办结率，不支持时间范围、事件总量、办结数、下级区划明细或阈值筛选。
 
-真实评测 Trace 会记录模型提供方、模型名、Prompt 版本、模型动作、Token 用量和评分，
-但不会记录模型 API Key 或下游凭据。当前 System Prompt 版本为
-`full-view-governance-readonly-v9`。模型返回的对象字段若被二次编码为 JSON 字符串，
+真实评测 Trace 会记录模型提供方、模型名、Prompt 版本、模型动作、Token 用量、评分、
+环境类型、证据来源系统和运行时版本；`run-live-http` 还会记录按 `method/path/count`
+聚合的脱敏下游请求摘要。请求摘要属于审计元数据，不会进入模型上下文；Trace 不记录
+Header、Query、Body、模型 API Key、Token 或下游凭据。运行时版本优先读取显式配置的
+`FULL_VIEW_RUNTIME_VERSION`（仅允许安全的版本标识字符）；未配置时自动使用当前 Git
+HEAD 的 12 位短 SHA，并在工作树有改动时追加 `-dirty`。仅当 Git 信息不可用或
+不可验证时记录为 `unknown`，不会把仓库路径或 Git 状态内容写入 Trace。当前 System Prompt 版本为
+`full-view-governance-readonly-v12`。模型返回的对象字段若被二次编码为 JSON 字符串，
 运行时只对 Schema 明确定义为对象的字段执行一次兼容解码，随后仍须通过强类型和权限校验。
 成功、部分成功或拒绝的 Tool 不会在同一 Run 中再次暴露给模型，避免模型重复执行已经终止的
 动作；`upstream_timeout`、`upstream_unavailable` 和 `upstream_contract_error` 也会在
@@ -255,6 +267,7 @@ docker run -d --name agent-runtime \
   -e FULL_VIEW_P0_ALLOWED_USER_IDS=<user-id> \
   -e FULL_VIEW_GOVERNANCE_ADAPTER=http \
   -e FULL_VIEW_GOVERNANCE_BASE_URL=http://host:9666/geo-qxst \
+  -e FULL_VIEW_HOUSING_NEXT_AREA_ENABLED=false \
   -e FULL_VIEW_MODEL_PROVIDER=openai_compatible \
   -e FULL_VIEW_MODEL_BASE_URL=https://model-endpoint/v1 \
   -e FULL_VIEW_MODEL_NAME=model-name \

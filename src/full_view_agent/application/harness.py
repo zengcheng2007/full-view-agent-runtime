@@ -1,8 +1,12 @@
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, replace
 from time import time
-from typing import Protocol
+from typing import Literal, Protocol
 
+from full_view_agent.application.answer_grounding import (
+    remove_lines_with_numbers,
+    unsupported_answer_numbers,
+)
 from full_view_agent.application.errors import BudgetExceeded, LoopDetected
 from full_view_agent.application.fingerprints import canonical_fingerprint
 from full_view_agent.application.session_run_service import new_id
@@ -56,6 +60,8 @@ class HarnessState:
     tool_actions: tuple[ToolAction, ...] = ()
     inherited_result_ids: tuple[str, ...] = ()
     inherited_evidence_ids: tuple[str, ...] = ()
+    completion_feedback: str | None = None
+    completion_revision_count: int = 0
 
 
 @dataclass(frozen=True)
@@ -131,6 +137,14 @@ class CompletionValidator(Protocol):
     async def validate(self, state: HarnessState, action: FinishAction) -> bool: ...
 
 
+@dataclass(frozen=True)
+class CompletionAssessment:
+    status: Literal["accept", "revise", "reject"]
+    reason_code: str | None = None
+    feedback: str | None = None
+    safe_summary: str | None = None
+
+
 class NonEmptyCompletionValidator:
     async def validate(self, state: HarnessState, action: FinishAction) -> bool:
         del state
@@ -157,6 +171,24 @@ class DeterministicCompletionValidator:
     import re as _re
 
     _NUMBER_RE = _re.compile(r"\d{2,}")
+    _UNSUPPORTED_INFERENCE_PATTERNS = (
+        "分布均匀",
+        "较为均匀",
+        "可能反映",
+        "可能说明",
+        "可以推测",
+        "由此推测",
+        "原因可能",
+        "这表明",
+        "这说明",
+        "导致",
+    )
+    _UNSUPPORTED_INFERENCE_FEEDBACK = (
+        "回答包含无证据推断；请仅保留已验证事实和可复算计算。"
+    )
+    _UNSUPPORTED_NUMBER_FEEDBACK = (
+        "回答包含无法回指 Result 的数字；请只引用原始事实或可复算计算。"
+    )
 
     ALLOWED_NO_RESULT_PATTERNS = (
         "我可以",
@@ -180,36 +212,85 @@ class DeterministicCompletionValidator:
     )
 
     async def validate(self, state: HarnessState, action: FinishAction) -> bool:
+        return (await self.assess(state, action)).status == "accept"
+
+    async def assess(
+        self, state: HarnessState, action: FinishAction
+    ) -> CompletionAssessment:
         summary = action.summary.strip()
         if not summary:
-            return False
+            return CompletionAssessment(status="reject", reason_code="empty_summary")
 
         success_results = [r for r in state.tool_results if r.status in ("success", "partial")]
         denied_results = [r for r in state.tool_results if r.status == "denied"]
         failed_results = [r for r in state.tool_results if r.status == "failed"]
 
-        # Case 2: has real data → accept
+        # Successful data does not authorize unsupported causal or
+        # source-quality inferences.
         if success_results:
-            return True
+            unsupported_numbers = unsupported_answer_numbers(
+                summary, tuple(success_results)
+            )
+            if unsupported_numbers:
+                return CompletionAssessment(
+                    status="revise",
+                    reason_code="unsupported_number",
+                    feedback=self._UNSUPPORTED_NUMBER_FEEDBACK,
+                    safe_summary=(
+                        remove_lines_with_numbers(summary, unsupported_numbers)
+                        or None
+                    ),
+                )
+            safe_summary = self._remove_unsupported_inference_lines(summary)
+            if safe_summary != summary:
+                return CompletionAssessment(
+                    status="revise",
+                    reason_code="unsupported_inference",
+                    feedback=self._UNSUPPORTED_INFERENCE_FEEDBACK,
+                    safe_summary=safe_summary or None,
+                )
+            return CompletionAssessment(status="accept")
 
         has_fabricated_number = bool(self._NUMBER_RE.search(summary))
 
         # Case 3: denied results → must acknowledge denial, no fabricated data
         if denied_results and not success_results and not failed_results:
-            return not has_fabricated_number
+            accepted = not has_fabricated_number
+            return CompletionAssessment(
+                status="accept" if accepted else "reject",
+                reason_code=None if accepted else "fabricated_number",
+            )
 
         # Case 4: only failures → must acknowledge failure, no fabricated data
         if failed_results:
-            return not has_fabricated_number
+            accepted = not has_fabricated_number
+            return CompletionAssessment(
+                status="accept" if accepted else "reject",
+                reason_code=None if accepted else "fabricated_number",
+            )
 
         # A follow-up may transform a result already verified and persisted in
         # the same owned session. The orchestrator only populates these IDs
         # after reloading both the result and its evidence from the store.
         if state.inherited_result_ids and state.inherited_evidence_ids:
-            return True
+            return CompletionAssessment(status="accept")
 
         # Case 5: no current or inherited results → explicit allowlist only
-        return any(p in summary for p in self.ALLOWED_NO_RESULT_PATTERNS)
+        accepted = any(p in summary for p in self.ALLOWED_NO_RESULT_PATTERNS)
+        return CompletionAssessment(
+            status="accept" if accepted else "reject",
+            reason_code=None if accepted else "ungrounded_no_result",
+        )
+
+    def _remove_unsupported_inference_lines(self, summary: str) -> str:
+        return "\n".join(
+            line
+            for line in summary.splitlines()
+            if not any(
+                pattern in line
+                for pattern in self._UNSUPPORTED_INFERENCE_PATTERNS
+            )
+        ).strip()
 
 
 BeforeToolCall = Callable[[ToolAction, str], Awaitable[None]]
@@ -267,11 +348,35 @@ class AgentHarness:
         control: HarnessControl,
     ) -> tuple[HarnessControl, str | None]:
         if isinstance(action, FinishAction):
-            if await self._validator.validate(control.state, action):
+            assess = getattr(self._validator, "assess", None)
+            assessment = (
+                await assess(control.state, action)
+                if assess is not None
+                else CompletionAssessment(
+                    status=(
+                        "accept"
+                        if await self._validator.validate(control.state, action)
+                        else "reject"
+                    )
+                )
+            )
+            if assessment.status == "accept":
                 return control, action.summary
+            if (
+                assessment.status == "revise"
+                and control.state.completion_revision_count > 0
+                and assessment.safe_summary
+            ):
+                return control, assessment.safe_summary
             state = replace(
                 control.state,
                 no_progress_count=control.state.no_progress_count + 1,
+                completion_feedback=assessment.feedback,
+                completion_revision_count=(
+                    control.state.completion_revision_count + 1
+                    if assessment.status == "revise"
+                    else control.state.completion_revision_count
+                ),
             )
             self._guard_no_progress(state)
             return replace(control, state=state), None

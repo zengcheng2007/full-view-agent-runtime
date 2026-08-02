@@ -94,7 +94,12 @@ class OpenAICompatibleModelProvider:
             choice = body["choices"][0]
             message = choice["message"]
             parsed_calls: list[ModelToolCall] = []
-            for item in message.get("tool_calls", []):
+            raw_tool_calls = message.get("tool_calls")
+            if raw_tool_calls is None:
+                raw_tool_calls = []
+            elif not isinstance(raw_tool_calls, list):
+                raise TypeError("tool_calls must be a list or null")
+            for item in raw_tool_calls:
                 arguments = json.loads(item["function"]["arguments"])
                 if not isinstance(arguments, dict):
                     raise TypeError("tool arguments must be an object")

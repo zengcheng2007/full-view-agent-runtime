@@ -13,8 +13,10 @@ import httpx
 import pytest
 
 from full_view_agent.application import errors
+from full_view_agent.application.capability_service import CapabilityService
 from full_view_agent.application.policy import MinimalPolicyAdapter
 from full_view_agent.application.prompt_catalog import (
+    FULL_VIEW_SYSTEM_PROMPT_VERSION,
     build_full_view_system_prompt,
 )
 from full_view_agent.application.tool_registry import ToolRegistry
@@ -345,6 +347,78 @@ async def test_http_adapter_rejects_housing_next_area_at_unsupported_levels(
 
 
 @pytest.mark.asyncio
+async def test_http_adapter_disabled_next_area_fails_before_credentials_and_http(
+) -> None:
+    requests: list[httpx.Request] = []
+    broker = RecordingCredentialBroker()
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        return httpx.Response(200, json={"state": True, "code": 200, "data": []})
+
+    arguments = models.QueryHousingMetricsInput.model_validate(
+        {
+            "query": {
+                "scope": {"area_code": "330106"},
+                "group_by": ["next_area"],
+            }
+        }
+    )
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        adapter = governance_adapter.HttpGovernanceAdapter(
+            base_url="http://legacy.test/geo-qxst",
+            credential_broker=broker,
+            client=client,
+            housing_next_area_enabled=False,
+        )
+        with pytest.raises(
+            errors.SemanticValidationError, match="disabled"
+        ):
+            await _execute_housing(adapter, arguments)
+
+    assert broker.resolved == []
+    assert requests == []
+
+
+@pytest.mark.asyncio
+async def test_capability_service_reports_disabled_next_area_as_semantic_error(
+) -> None:
+    requests: list[httpx.Request] = []
+    broker = RecordingCredentialBroker()
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        return httpx.Response(200, json={"state": True, "code": 200, "data": []})
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        result = await CapabilityService(
+            registry=ToolRegistry.default(housing_next_area_enabled=False),
+            policy=MinimalPolicyAdapter(),
+            adapter=governance_adapter.HttpGovernanceAdapter(
+                base_url="http://legacy.test/geo-qxst",
+                credential_broker=broker,
+                client=client,
+                housing_next_area_enabled=False,
+            ),
+        ).execute(
+            tool_call_id="tcl-disabled-next-area",
+            tool_id="governance.query_housing_metrics",
+            raw_arguments={
+                "query": {
+                    "scope": {"area_code": "330106"},
+                    "group_by": ["next_area"],
+                }
+            },
+            auth_context=_housing_auth_context(),
+        )
+
+    assert result.status == "failed"
+    assert result.warnings == ["semantic_validation_error"]
+    assert broker.resolved == []
+    assert requests == []
+
+
+@pytest.mark.asyncio
 async def test_http_adapter_housing_next_area_rejects_malformed_rows() -> None:
     def handler(_request: httpx.Request) -> httpx.Response:
         return httpx.Response(
@@ -551,3 +625,14 @@ def test_system_prompt_forbids_unsupported_causal_explanations() -> None:
     )
 
     assert "不得自行推测原因或作因果归因" in prompt
+
+
+def test_housing_prompt_treats_lease_types_as_dynamic_open_categories() -> None:
+    prompt = build_full_view_system_prompt(
+        {}, tool_ids=("governance.query_housing_metrics",)
+    )
+
+    assert FULL_VIEW_SYSTEM_PROMPT_VERSION == "full-view-governance-readonly-v12"
+    assert "按上游当前返回的出租类型动态汇总" in prompt
+    assert "类型集合由业务数据决定" in prompt
+    assert "住宅出租、商铺出租、公寓出租、群租房、工业出租" not in prompt

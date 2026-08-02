@@ -19,6 +19,7 @@ from full_view_agent.evaluation.contracts import (
     EvalGrade,
     EvalMessageRecord,
     EvalModelRequestRecord,
+    EvalOutboundRequestSummary,
     EvalTrace,
     EvalTurnTrace,
     GradeValue,
@@ -45,10 +46,19 @@ class StaticAuthContextProvider:
 
 class EvalEnvironment(Protocol):
     @property
+    def tool_registry(self) -> ToolRegistry: ...
+
+    @property
     def adapter(self) -> ToolAdapter: ...
 
     @property
+    def environment_kind(self) -> str: ...
+
+    @property
     def evidence_source_system(self) -> str: ...
+
+    @property
+    def outbound_requests(self) -> list[EvalOutboundRequestSummary]: ...
 
     async def resolve_user_id(self, case: EvalCase) -> str: ...
 
@@ -73,8 +83,20 @@ class StaticEvalEnvironment:
         return self._adapter
 
     @property
+    def tool_registry(self) -> ToolRegistry:
+        return ToolRegistry.default()
+
+    @property
+    def environment_kind(self) -> str:
+        return "static"
+
+    @property
     def evidence_source_system(self) -> str:
         return "eval_fixture"
+
+    @property
+    def outbound_requests(self) -> list[EvalOutboundRequestSummary]:
+        return []
 
     async def resolve_user_id(self, case: EvalCase) -> str:
         return f"eval-user-{case.case_id}"
@@ -103,6 +125,7 @@ class EvalRunner:
         max_total_tokens: int = 32_000,
         environment: EvalEnvironment | None = None,
         orchestrator: Literal["native", "langgraph"] = "native",
+        runtime_version: str = "unknown",
     ) -> None:
         self._provider = provider
         self._model_provider = model_provider
@@ -110,6 +133,7 @@ class EvalRunner:
         self._max_total_tokens = max_total_tokens
         self._environment = environment
         self._orchestrator = orchestrator
+        self._runtime_version = runtime_version
 
     async def run(self, case: EvalCase) -> EvalTrace:
         return await self._run(case)
@@ -172,7 +196,7 @@ class EvalRunner:
         store = InMemoryAgentStore()
         events = InMemoryEventBroker()
         service = SessionRunService(store)
-        registry = ToolRegistry.default()
+        registry = environment.tool_registry
         use_live_provider = self._provider is not None and not force_scripted
         scripted_steps = [
             *case.model_steps,
@@ -339,6 +363,10 @@ class EvalRunner:
             case_id=case.case_id,
             started_at=started_at,
             completed_at=datetime.now(UTC),
+            environment_kind=environment.environment_kind,
+            evidence_source_system=environment.evidence_source_system,
+            runtime_version=self._runtime_version,
+            outbound_requests=environment.outbound_requests,
             model_provider=(self._model_provider if use_live_provider else "scripted"),
             model_name=(self._model_name if use_live_provider else "scripted"),
             prompt_version=(

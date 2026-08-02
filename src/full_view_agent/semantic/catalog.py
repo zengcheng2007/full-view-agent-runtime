@@ -196,7 +196,7 @@ def _population() -> SubjectDefinition:
     )
 
 
-def _housing() -> SubjectDefinition:
+def _housing(*, next_area_enabled: bool = True) -> SubjectDefinition:
     return SubjectDefinition(
         subject_id="housing",
         display_name="出租房指标",
@@ -215,9 +215,11 @@ def _housing() -> SubjectDefinition:
                 label="直接下级区划",
                 allowed_scope_levels=(4, 6, 9, 12),
             ),
-        ),
+        )
+        if next_area_enabled
+        else (),
         min_group_by=0,
-        max_group_by=1,
+        max_group_by=1 if next_area_enabled else 0,
         output_forms=("table",),
         result_shapes=(
             ResultShape(
@@ -226,12 +228,18 @@ def _housing() -> SubjectDefinition:
                 row_fields=("lease_type", "dwelling_count"),
                 group_by_selection=(),
             ),
-            ResultShape(
-                shape_id="housing_area_group_table",
-                data_schema_ref="schema://data/housing-area-group-table/1.0.0",
-                row_fields=("area_code", "area_name", "dwelling_count"),
-                group_by_selection=("next_area",),
-            ),
+        )
+        + (
+            (
+                ResultShape(
+                    shape_id="housing_area_group_table",
+                    data_schema_ref="schema://data/housing-area-group-table/1.0.0",
+                    row_fields=("area_code", "area_name", "dwelling_count"),
+                    group_by_selection=("next_area",),
+                ),
+            )
+            if next_area_enabled
+            else ()
         ),
     )
 
@@ -314,11 +322,16 @@ class SemanticCatalog:
         self._bindings = dict(bindings)
 
     @classmethod
-    def default(cls) -> "SemanticCatalog":
+    def default(
+        cls, *, housing_next_area_enabled: bool = True
+    ) -> "SemanticCatalog":
+        subjects = (_population(), _housing(
+            next_area_enabled=housing_next_area_enabled
+        ), _event())
         return cls(
             catalog_version=SEMANTIC_CATALOG_VERSION,
             supported_spec_versions=SEMANTIC_SPEC_VERSIONS,
-            subjects={subject.subject_id: subject for subject in _DEFAULT_SUBJECTS},
+            subjects={subject.subject_id: subject for subject in subjects},
             bindings=dict(_DEFAULT_BINDINGS),
         )
 

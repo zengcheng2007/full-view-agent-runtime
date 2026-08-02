@@ -91,7 +91,7 @@ async def test_context_builder_uses_messages_and_only_authorized_tools() -> None
     assert [tool.tool_id for tool in request.tools] == [
         "governance.query_population_metrics"
     ]
-    assert request.prompt_version == "full-view-governance-readonly-v10"
+    assert request.prompt_version == "full-view-governance-readonly-v12"
     assert "需要业务数据时必须调用" in request.messages[0].content
     assert "会话中已验证且仍可用的历史结果" in request.messages[0].content
     assert "solitary_elderly" in request.messages[0].content
@@ -101,6 +101,41 @@ async def test_context_builder_uses_messages_and_only_authorized_tools() -> None
     assert "query" in request.tools[0].input_schema["properties"]
     assert "solitary_elderly" in request.tools[0].description
     assert "group_by" in request.tools[0].description
+
+
+@pytest.mark.asyncio
+async def test_context_builder_exposes_completion_revision_feedback() -> None:
+    store = InMemoryAgentStore()
+    service = SessionRunService(store)
+    session = await service.create_session(user_id="user-revise", title="回答修订")
+    run = await service.create_run(
+        user_id="user-revise",
+        session_id=session.session_id,
+        request=run_request(),
+    )
+    auth_context = population_auth_context().model_copy(
+        update={"session_id": session.session_id, "run_id": run.run_id}
+    )
+
+    request = await AgentContextBuilder(
+        store=store,
+        registry=ToolRegistry.default(),
+    ).build(
+        user_id="user-revise",
+        auth_context=auth_context,
+        state=HarnessState(
+            completion_feedback=(
+                "回答包含无证据推断；请仅保留已验证事实和可复算计算。"
+            ),
+            completion_revision_count=1,
+        ),
+    )
+
+    assert any(
+        message.role == "system"
+        and "回答包含无证据推断" in (message.content or "")
+        for message in request.messages
+    )
 
 
 @pytest.mark.asyncio

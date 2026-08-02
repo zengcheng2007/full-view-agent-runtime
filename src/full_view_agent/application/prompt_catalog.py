@@ -1,7 +1,7 @@
 import json
 from collections.abc import Iterable
 
-FULL_VIEW_SYSTEM_PROMPT_VERSION = "full-view-governance-readonly-v10"
+FULL_VIEW_SYSTEM_PROMPT_VERSION = "full-view-governance-readonly-v12"
 
 # 能力说明由注册表实际接线驱动：只有当前注册且授权可见的 Tool
 # 才会出现在系统提示中，未接线/未验证的能力不得宣称可用。
@@ -15,13 +15,6 @@ _CAPABILITY_LINES: dict[str, tuple[str, ...]] = {
         "不得替换为中文值或年龄条件。",
         "人口 Tool 的 group_by 规则：区县按街道汇总传 group_by=['street']，"
         "街道按社区汇总传 group_by=['community']，社区按网格汇总传 group_by=['grid']。",
-    ),
-    "governance.query_housing_metrics": (
-        "query_housing_metrics：查询出租房按类型"
-        "（住宅出租、商铺出租、公寓出租、群租房、工业出租）的区域自身汇总；"
-        "传 group_by=['next_area'] 时返回直接下级区划"
-        "（全市按区县、区县按街道、街道按社区、社区按网格）的出租房数量分布；"
-        "不支持其他分组、筛选、排序。",
     ),
     "governance.query_event_metrics": (
         "query_event_metrics：查询指定区域自身的网格、社区、街道三个层级汇总办结率；"
@@ -47,6 +40,7 @@ def build_full_view_system_prompt(
     *,
     tool_ids: Iterable[str],
     semantic_capabilities: str | None = None,
+    housing_next_area_enabled: bool = True,
 ) -> str:
     available_tool_ids = frozenset(tool_ids)
     capability_lines: list[str] = []
@@ -54,7 +48,12 @@ def build_full_view_system_prompt(
     for tool_id in _CANONICAL_TOOL_ORDER:
         if tool_id not in available_tool_ids:
             continue
-        for line in _CAPABILITY_LINES[tool_id]:
+        lines = (
+            _housing_capability_lines(housing_next_area_enabled)
+            if tool_id == "governance.query_housing_metrics"
+            else _CAPABILITY_LINES[tool_id]
+        )
+        for line in lines:
             capability_lines.append(f"({line_number}) {line}")
             line_number += 1
     capabilities = "".join(capability_lines) or "当前没有可用的业务 Tool。"
@@ -83,3 +82,18 @@ def build_full_view_system_prompt(
         "授权上下文："
         + json.dumps(authorization, ensure_ascii=False, sort_keys=True)
     )
+
+
+def _housing_capability_lines(next_area_enabled: bool) -> tuple[str, ...]:
+    base = (
+        "query_housing_metrics：按上游当前返回的出租类型动态汇总区域自身数据，"
+        "类型集合由业务数据决定，不预设固定完整枚举；"
+    )
+    if next_area_enabled:
+        return (
+            base
+            + "传 group_by=['next_area'] 时返回直接下级区划"
+            "（全市按区县、区县按街道、街道按社区、社区按网格）的出租房数量分布；"
+            "不支持其他分组、筛选、排序。",
+        )
+    return (base + "当前仅支持按租赁类型汇总，不支持分组、筛选、排序。",)
