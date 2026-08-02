@@ -46,9 +46,12 @@ OutputForm = Literal["table", "choropleth"]
 
 _DEFAULT_RESULT_GRAIN_LABEL = "按所选查询维度返回结果"
 _UNSAFE_BUSINESS_LABEL = re.compile(
-    r"(?i)(://|\bhttps?\b|\badapter\b|\bschema\b|"
-    r"\b(?:select|insert|update|delete|drop|alter|create|from|join|where|table)\b|"
-    r"[\\/]|[a-z]:)"
+    r"(?i)(://|[\\/]|[a-z]:|"
+    # Python 的 \b 会把下划线当作单词字符，无法阻断 adapter_ref / SQL_token。
+    # 这里以 ASCII 字母数字为边界，_ 与 - 均被视作 token 分隔符。
+    r"(?<![a-z0-9])(?:https?|adapter(?:[_-]?ref)?|schema(?:[_-]?ref)?|"
+    r"select|insert|update|delete|drop|alter|create|from|join|where|table)"
+    r"(?![a-z0-9]))"
 )
 _BUSINESS_LABEL_CHARACTERS = re.compile(
     r"^[\u4e00-\u9fffA-Za-z0-9 _、，。（）()%-]+$"

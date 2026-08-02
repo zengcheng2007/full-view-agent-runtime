@@ -529,7 +529,7 @@ def test_presenter_never_leaks_unvalidated_grain_label_from_custom_catalog() -> 
     housing = base.require_subject("housing")
     bypassed_validation_shape = housing.result_shapes[0].model_copy(
         update={
-            "grain_label": "adapter://private/source SELECT secret FROM dm_table",
+            "grain_label": "AdApTeR_ReF SELECT_secret_FROM_dm_private_table",
             "row_fields": ("dm_secret_column",),
         }
     )
@@ -550,7 +550,8 @@ def test_presenter_never_leaks_unvalidated_grain_label_from_custom_catalog() -> 
     )
 
     assert presentation is not None
-    assert "adapter://" not in presentation.description
+    assert "AdApTeR_ReF" not in presentation.description
+    assert "SELECT_secret" not in presentation.description
     assert "dm_secret" not in presentation.description
     assert "按所选查询维度返回结果" in presentation.description
 

@@ -214,3 +214,21 @@ including validation-bypass defense in depth and the unchanged production
   - semantic spec used `subject=housing` and explicit `group_by=[]`
   - terminal status/outcome: `completed/success`
   - trace: `C:\Users\zengc\AppData\Local\Temp\p1-live-housing-final-8ce345b4a70944a4a3fd9731198dfde5.json`
+
+## Token-boundary reviewer revision
+
+- Replaced Python `\b` token checks with explicit ASCII-alphanumeric
+  lookaround boundaries, so underscore and hyphen both delimit forbidden
+  physical/SQL tokens.
+- TDD covers `adapter_ref`, `schema_ref`,
+  `SELECT_secret_FROM_dm_table`, `dm_private_table`, mixed-case and hyphenated
+  variants, plus a normal Chinese business label non-regression.
+- The validation-bypass custom Catalog probe now uses mixed-case underscore
+  tokens and still degrades to the server-fixed generic label.
+- Fresh focused tests: 89 passed; Ruff/Pyright/compileall passed.
+- Fresh Qwen routing probe confirmed the safe Prompt and exact
+  `resolve_area -> semantic_query` route with explicit `group_by=[]`. The later
+  structured-finish response ended as `model_contract_error`, outside this
+  Catalog/Presenter task; no result-grain or canonical-Tool regression occurred.
+  Trace:
+  `C:\Users\zengc\AppData\Local\Temp\p1-live-housing-token-boundary-3c67603e39bb40b08c0a2f9ac20d9266.json`.

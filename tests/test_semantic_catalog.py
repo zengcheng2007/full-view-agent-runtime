@@ -414,6 +414,12 @@ def test_result_shape_display_label_is_backward_compatible_and_safe() -> None:
         row_fields=("internal_column",),
     )
     assert legacy.grain_label is None
+    assert ResultShape(
+        shape_id="safe_business_table",
+        data_schema_ref="schema://internal/safe-business-table/1.0",
+        grain_label="按租赁类型汇总",
+        row_fields=("internal_column",),
+    ).grain_label == "按租赁类型汇总"
 
     for unsafe_label in (
         "adapter://private/source",
@@ -421,6 +427,14 @@ def test_result_shape_display_label_is_backward_compatible_and_safe() -> None:
         "schema://data/private",
         "SELECT secret_column FROM dm_private_table",
         r"C:\private\table.csv",
+        "adapter_ref",
+        "schema_ref",
+        "SELECT_secret_FROM_dm_table",
+        "dm_private_table",
+        "AdApTeR-ReF",
+        "ScHeMa-ReF",
+        "SeLeCt-secret-FrOm-dm-table",
+        "DM-PRIVATE-TABLE",
     ):
         with pytest.raises(ValidationError, match="business display text"):
             ResultShape(
