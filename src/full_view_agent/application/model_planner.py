@@ -103,10 +103,12 @@ class ModelPlanner:
             if call.tool_id == FINISH_TOOL_ID:
                 try:
                     structured_finish = StructuredFinish.model_validate(call.arguments)
-                except ValueError as exc:
-                    raise ModelContractError(
-                        "model returned invalid structured finish"
-                    ) from exc
+                except ValueError:
+                    return FinishAction(
+                        summary="结构化完成参数无效。",
+                        structured_finish_error="invalid_structured_finish",
+                        legacy=False,
+                    )
                 return FinishAction(
                     summary=structured_finish.summary,
                     structured_finish=structured_finish,

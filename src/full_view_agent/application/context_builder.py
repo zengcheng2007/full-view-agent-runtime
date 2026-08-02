@@ -142,8 +142,9 @@ class AgentContextBuilder:
                     ModelMessage(
                         role="system",
                         content=(
-                            "会话中已验证且仍可用的历史结果（可用于本轮排序、筛选、"
-                            "解释或展示，不得超出这些数据）："
+                            "会话中已有可引用的历史结果（尚未加载为当前运行可复算数据；"
+                            "只能使用 reference_only 指向数据面板，不得复述、排序、筛选、"
+                            "计算或解释）："
                             + json.dumps(
                                 inherited_observations,
                                 ensure_ascii=False,
@@ -344,17 +345,8 @@ def _build_inherited_result_observation(result: object) -> dict[str, object]:
     row_count = getattr(result, "row_count", None)
     if row_count is not None:
         observation["row_count"] = row_count
-    data = getattr(result, "data", None)
-    rows = getattr(data, "rows", None)
-    if isinstance(rows, list):
-        observation["rows"] = [
-            row.model_dump(mode="json") if hasattr(row, "model_dump") else row
-            for row in rows[:MAX_OBSERVATION_ROWS]
-        ]
-        if len(rows) > MAX_OBSERVATION_ROWS:
-            observation["truncated"] = True
-    elif data is not None and hasattr(data, "model_dump"):
-        observation["data"] = data.model_dump(mode="json")
+    if getattr(result, "truncated", False):
+        observation["truncated"] = True
     return observation
 
 

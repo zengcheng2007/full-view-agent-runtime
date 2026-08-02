@@ -28,7 +28,7 @@
 4. Fail-closed：
    - 有 success/partial Result 时，生产普通文本进入
      `structured_claims_required` 修订；
-   - 非 `claims/reference_only` 的结构化类型不能在成功数据后夹带事实正文；
+   - Finish Tool schema 只暴露已实现的 `claims/reference_only`；
    - 仅允许一次修订，第二次仍缺失或非法时返回固定安全结束语，不触发
      `loop_detected`。
 5. Eval：
@@ -37,6 +37,20 @@
    - 回放时按稳定 `result_fingerprint` 将录制 Claim 重新绑定到本次 Result ID；
    - Tool 观察增加 `result_fingerprint`，未增加凭据或内部地址。
 6. Prompt 升级为 `full-view-governance-readonly-v13`，明确结构化完成约束。
+
+## Reviewer 阻断修复
+
+- `all_equal` 只接受可证实为真的声明；两行不等时，即使模型提交
+  `value=false` 也拒绝，避免渲染成“全部相同”。
+- 历史 Result 尚未水合进 Harness 时，只允许结构化 `reference_only`，并输出
+  服务端固定文案；普通文本和 claims 均修订一次后安全停止。
+- 无当前或历史 Result 时，`reference_only/claims` 不能借普通文本白名单通过。
+- reserved finish 参数缺字段或非法枚举时转为可修订完成动作；多 Tool、未知业务
+  Tool 等协议错误仍硬失败。Native/LangGraph 均覆盖二次错误安全停止且无 loop。
+- v13 提示和历史上下文同步降级：只提供 Result 引用元数据，不提供历史行载荷，
+  明确禁止复述、排序、筛选、计算或解释。
+- HTTP 住房类型及 InMemory 住房类型/下级区划统一执行 `limit + truncated`；
+  上游显式截断标志同样保留，截断结果的全局聚合 Claim 被拒绝。
 
 ## TDD 证据
 
@@ -51,14 +65,16 @@
 - `rows` 与 `root` 两种集合；
 - 普通文本修订一次后安全终止；
 - `reference_only` 忽略模型错误正文；
-- capability 类型不能在成功结果后夹带事实；
+- Finish Tool schema 不再暴露未实现的 capability/clarification/denial/failure；
+- malformed structured finish 在两个编排器中修订一次后安全停止；
+- HTTP/InMemory 住房 limit 截断贯通到 Claim 聚合拒绝；
 - OpenAI Finish Tool 往返；
 - Native/LangGraph 同一结构化 Claim 产生相同事实文本；
 - live Eval 录制后 Scripted replay 不丢 Claim。
 
 ## Fresh 验证
 
-- 全量测试：`569 passed, 18 skipped`。
+- 全量测试：`581 passed, 18 skipped`（`599 collected`）。
 - Ruff：`All checks passed!`。
 - Pyright：`0 errors, 0 warnings, 0 informations`。
 - Compileall：通过。

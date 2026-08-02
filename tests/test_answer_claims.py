@@ -1,6 +1,10 @@
 import pytest
 
-from full_view_agent.application.answer_claims import AnswerClaim, StructuredFinish
+from full_view_agent.application.answer_claims import (
+    FINISH_TOOL_INPUT_SCHEMA,
+    AnswerClaim,
+    StructuredFinish,
+)
 from full_view_agent.application.harness import (
     DeterministicCompletionValidator,
     FinishAction,
@@ -209,20 +213,10 @@ async def test_reference_only_uses_fixed_server_summary() -> None:
 
 
 @pytest.mark.asyncio
-async def test_success_result_cannot_hide_factual_text_in_capability_finish() -> None:
-    structured = StructuredFinish(
-        kind="capability",
-        summary="住宅出租有9999套。",
-        claims=[],
-    )
+async def test_finish_tool_schema_only_exposes_implemented_kinds() -> None:
+    kind_schema = FINISH_TOOL_INPUT_SCHEMA["properties"]["kind"]
 
-    assessment = await DeterministicCompletionValidator().assess(
-        HarnessState(tool_results=(successful_housing_result(),)),
-        FinishAction(summary=structured.summary, structured_finish=structured),
-    )
-
-    assert assessment.status == "revise"
-    assert assessment.reason_code == "structured_finish_kind_not_allowed"
+    assert kind_schema["enum"] == ["claims", "reference_only"]
 
 
 @pytest.mark.asyncio
@@ -256,6 +250,98 @@ async def test_all_equal_requires_more_than_one_selected_row() -> None:
 
     assert assessment.status == "revise"
     assert assessment.reason_code == "claim_operation_mismatch"
+
+
+@pytest.mark.asyncio
+async def test_all_equal_false_cannot_render_the_opposite_meaning() -> None:
+    result = housing_comparison_result(
+        result_id="res-not-equal", residential=3200, commercial=850
+    )
+
+    assessment = await DeterministicCompletionValidator().assess(
+        HarnessState(tool_results=(result,)),
+        finish(
+            claim(
+                result_id="res-not-equal",
+                result_fingerprint="sha256:res-not-equal",
+                locator={},
+                operation="all_equal",
+                value=False,
+            )
+        ),
+    )
+
+    assert assessment.status == "revise"
+    assert assessment.reason_code == "claim_operation_mismatch"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("kind", ("reference_only",))
+async def test_structured_finish_without_any_result_cannot_borrow_text_allowlist(
+    kind: str,
+) -> None:
+    structured = StructuredFinish(
+        kind=kind,
+        summary="我可以确认住宅出租有9999套。",
+        claims=[],
+    )
+
+    assessment = await DeterministicCompletionValidator().assess(
+        HarnessState(),
+        FinishAction(
+            summary=structured.summary,
+            structured_finish=structured,
+            legacy=False,
+        ),
+    )
+
+    assert assessment.status == "revise"
+    assert assessment.safe_summary is None
+
+
+@pytest.mark.asyncio
+async def test_inherited_unhydrated_result_only_allows_structured_reference() -> None:
+    state = HarnessState(
+        inherited_result_ids=("res-old",),
+        inherited_evidence_ids=("ev-old",),
+    )
+    plain = await DeterministicCompletionValidator().assess(
+        state,
+        FinishAction(summary="历史结果显示住宅出租有9999套。", legacy=False),
+    )
+    claims = StructuredFinish(
+        kind="claims",
+        summary="历史结果显示住宅出租有9999套。",
+        claims=[claim(result_id="res-old", result_fingerprint="sha256:old", value=9999)],
+    )
+    unverified_claim = await DeterministicCompletionValidator().assess(
+        state,
+        FinishAction(
+            summary=claims.summary,
+            structured_finish=claims,
+            legacy=False,
+        ),
+    )
+    reference = StructuredFinish(
+        kind="reference_only",
+        summary="模型正文中的9999不能展示。",
+        claims=[],
+    )
+    safe_reference = await DeterministicCompletionValidator().assess(
+        state,
+        FinishAction(
+            summary=reference.summary,
+            structured_finish=reference,
+            legacy=False,
+        ),
+    )
+
+    assert plain.status == "revise"
+    assert plain.reason_code == "structured_claims_required"
+    assert unverified_claim.status == "revise"
+    assert unverified_claim.reason_code == "claim_result_not_found"
+    assert safe_reference.status == "accept"
+    assert safe_reference.safe_summary == "查询已完成，详细结果请查看数据面板。"
 
 
 class ProductionTextPlanner:

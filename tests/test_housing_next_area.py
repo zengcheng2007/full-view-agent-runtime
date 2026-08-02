@@ -573,6 +573,28 @@ async def test_in_memory_adapter_keeps_lease_type_summary_without_group_by() -> 
     }
 
 
+@pytest.mark.asyncio
+@pytest.mark.parametrize("group_by", ([], ["next_area"]))
+async def test_in_memory_housing_limit_sets_truncated_for_both_shapes(
+    group_by: list[str],
+) -> None:
+    adapter = governance_adapter.InMemoryGovernanceAdapter()
+    arguments = models.QueryHousingMetricsInput.model_validate(
+        {
+            "query": {
+                "scope": {"area_code": "330106"},
+                "group_by": group_by,
+                "limit": 1,
+            }
+        }
+    )
+
+    result = await _execute_housing(adapter, arguments)
+
+    assert result.row_count == 1
+    assert result.truncated is True
+
+
 # ---------------------------------------------------------------------------
 # 清单/模型可见性：双结果 Schema、且不泄露物理实现
 # ---------------------------------------------------------------------------

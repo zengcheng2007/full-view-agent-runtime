@@ -246,8 +246,8 @@ async def test_eval_runner_executes_follow_up_in_same_grounded_session(
     follow_up_request = trace.model_requests[-1]
     serialized = follow_up_request.model_dump_json()
     assert "哪个街道最多" in serialized
-    assert "会话中已验证且仍可用的历史结果" in serialized
-    assert any(
+    assert "会话中已有可引用的历史结果" in serialized
+    assert not any(
         '"person_count": 128' in (message.content or "")
         for message in follow_up_request.messages
     )

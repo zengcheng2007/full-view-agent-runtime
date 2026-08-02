@@ -764,7 +764,7 @@ async def test_deterministic_validator_rejects_empty_summary() -> None:
 
 
 @pytest.mark.asyncio
-async def test_deterministic_validator_accepts_followup_grounded_by_inherited_evidence() -> None:
+async def test_deterministic_validator_rejects_unstructured_inherited_fact() -> None:
     validator = DeterministicCompletionValidator()
     state = HarnessState(
         inherited_result_ids=("res-prior",),
@@ -776,7 +776,7 @@ async def test_deterministic_validator_accepts_followup_grounded_by_inherited_ev
             state,
             FinishAction(summary="北山街道 2 人，灵隐街道 1 人。"),
         )
-        is True
+        is False
     )
 
 

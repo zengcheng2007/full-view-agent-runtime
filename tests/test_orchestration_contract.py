@@ -12,7 +12,11 @@ from typing import Protocol
 
 import pytest
 
-from full_view_agent.application.answer_claims import AnswerClaim, StructuredFinish
+from full_view_agent.application.answer_claims import (
+    FINISH_TOOL_ID,
+    AnswerClaim,
+    StructuredFinish,
+)
 from full_view_agent.application.capability_service import (
     CapabilityService,
     ToolAdapter,
@@ -25,6 +29,14 @@ from full_view_agent.application.harness import (
     HarnessLimits,
     HarnessState,
     ToolAction,
+)
+from full_view_agent.application.model_planner import ModelPlanner
+from full_view_agent.application.model_provider import (
+    ModelMessage,
+    ModelRequest,
+    ModelResponse,
+    ModelToolCall,
+    ModelToolDefinition,
 )
 from full_view_agent.application.native_orchestrator import (
     NativeOrchestrator,
@@ -197,10 +209,91 @@ class _StructuredSingleToolPlanner(_SingleToolPlanner):
 class _GroundedFollowupPlanner(_SingleToolPlanner):
     async def decide(self, state: HarnessState) -> ToolAction | FinishAction:
         if state.inherited_result_ids:
+            finish = StructuredFinish(
+                kind="reference_only",
+                summary="模型不能复述尚未 hydration 的历史数字。",
+                claims=[],
+            )
             return FinishAction(
-                summary="北山街道 2 人，灵隐街道 1 人，已按数量降序排列。"
+                summary=finish.summary,
+                structured_finish=finish,
+                legacy=False,
             )
         return await super().decide(state)
+
+
+class _UnsafeInheritedFollowupPlanner(_SingleToolPlanner):
+    async def decide(self, state: HarnessState) -> ToolAction | FinishAction:
+        if state.inherited_result_ids:
+            return FinishAction(
+                summary="北山街道有9999人。",
+                legacy=False,
+            )
+        return await super().decide(state)
+
+
+class _MalformedFinishContextBuilder:
+    def __init__(self) -> None:
+        self.feedback_codes: list[str | None] = []
+
+    async def build(self, *, state: HarnessState, **_kwargs: object) -> ModelRequest:
+        self.feedback_codes.append(state.completion_feedback_code)
+        return ModelRequest(
+            messages=(ModelMessage(role="user", content="查询人口指标"),),
+            tools=(
+                ModelToolDefinition(
+                    tool_id="governance.query_population_metrics",
+                    description="查询人口指标",
+                    input_schema={"type": "object"},
+                ),
+            ),
+        )
+
+
+class _MalformedFinishProvider:
+    def __init__(self) -> None:
+        query = ModelResponse(
+            content=None,
+            tool_calls=(
+                ModelToolCall(
+                    tool_id="governance.query_population_metrics",
+                    arguments={
+                        "query": {
+                            "metrics": ["person_count"],
+                            "scope": {"area_code": "330106"},
+                            "filters": [],
+                            "group_by": ["street"],
+                        }
+                    },
+                ),
+            ),
+            finish_reason="tool_calls",
+        )
+        invalid_claims = {
+            "kind": "claims",
+            "summary": "伪造人口为9999人。",
+            "claims": [
+                {
+                    "claim_id": "claim-1",
+                    "collection": "rows",
+                    "row_locator": {},
+                    "field": "person_count",
+                    "operation": "not-an-operation",
+                    "value": 9999,
+                }
+            ],
+        }
+        malformed = ModelResponse(
+            content=None,
+            tool_calls=(
+                ModelToolCall(tool_id=FINISH_TOOL_ID, arguments=invalid_claims),
+            ),
+            finish_reason="tool_calls",
+        )
+        self.responses = [query, malformed, malformed]
+
+    async def complete(self, _request: ModelRequest) -> ModelResponse:
+        return self.responses.pop(0)
 
 
 # ---------------------------------------------------------------------------
@@ -359,6 +452,70 @@ async def test_followup_can_reuse_verified_session_result_without_loop(
     )
     assert followup_answer.evidence_ids
     assert any(item.type == "result_reference" for item in followup_answer.content)
+
+
+@pytest.mark.asyncio
+async def test_unstructured_inherited_followup_revises_once_then_stops_safely(
+    orch_factory: OrchFactory,
+) -> None:
+    orch, store, events = orch_factory(planner=_UnsafeInheritedFollowupPlanner())
+    service = SessionRunService(store)
+    session = await service.create_session(user_id="u", title="历史结果安全停止")
+    first = await service.create_run(
+        user_id="u",
+        session_id=session.session_id,
+        request=run_request("web-msg-unsafe-first"),
+    )
+    await orch.execute(user_id="u", run_id=first.run_id)
+    second = await service.create_run(
+        user_id="u",
+        session_id=session.session_id,
+        request=run_request("web-msg-unsafe-followup"),
+    )
+
+    await orch.execute(user_id="u", run_id=second.run_id)
+
+    run = await store.get_run(user_id="u", run_id=second.run_id)
+    assert run.status == "completed"
+    messages = await store.list_messages(user_id="u", session_id=session.session_id)
+    answer = next(
+        message
+        for message in messages
+        if message.role == "assistant" and message.run_id == second.run_id
+    )
+    assert answer.content[0].text == (
+        "抱歉，当前回答仍包含无法由查询结果核验的内容，已停止生成结论。"
+    )
+    types = [event.type for event in await events.list_events(run_id=second.run_id)]
+    assert "run.failed" not in types
+
+
+@pytest.mark.asyncio
+async def test_malformed_structured_finish_revises_then_stops_across_orchestrators(
+    orch_factory: OrchFactory,
+) -> None:
+    context_builder = _MalformedFinishContextBuilder()
+    planner = ModelPlanner(
+        provider=_MalformedFinishProvider(),
+        context_builder=context_builder,
+        user_id="u",
+        auth_context=population_auth_context(),
+    )
+    orch, store, events = orch_factory(planner=planner)
+    run_id = await _make_run(store)
+
+    await orch.execute(user_id="u", run_id=run_id)
+
+    run = await store.get_run(user_id="u", run_id=run_id)
+    assert run.status == "completed"
+    messages = await store.list_messages(user_id="u", session_id=run.session_id)
+    answer = next(message for message in messages if message.role == "assistant")
+    assert answer.content[0].text == (
+        "抱歉，当前回答仍包含无法由查询结果核验的内容，已停止生成结论。"
+    )
+    assert context_builder.feedback_codes == [None, None, "invalid_structured_finish"]
+    types = [event.type for event in await events.list_events(run_id=run_id)]
+    assert "run.failed" not in types
 
 
 # ---------------------------------------------------------------------------

@@ -97,6 +97,9 @@ async def test_context_builder_uses_messages_and_only_authorized_tools() -> None
     assert "每条事实必须绑定 result_id" in (request.messages[0].content or "")
     assert "需要业务数据时必须调用" in request.messages[0].content
     assert "会话中已验证且仍可用的历史结果" in request.messages[0].content
+    assert "未加载为当前运行可复算数据" in request.messages[0].content
+    assert "只能使用 reference_only" in request.messages[0].content
+    assert "可以直接基于这些结果排序" not in request.messages[0].content
     assert "solitary_elderly" in request.messages[0].content
     assert "区县按街道" in request.messages[0].content
     assert "不代表任何业务指标为零" in request.messages[0].content
@@ -330,13 +333,14 @@ async def test_context_builder_hydrates_verified_inherited_result_rows() -> None
         message
         for message in request.messages
         if message.role == "system"
-        and (message.content or "").startswith(
-            "会话中已验证且仍可用的历史结果"
-        )
+        and (message.content or "").startswith("会话中已有可引用的历史结果")
     )
     assert inherited_message.content is not None
-    assert '"area_name": "北山街道"' in inherited_message.content
-    assert '"person_count": 2' in inherited_message.content
+    assert '"result_id": "res-inherited-01"' in inherited_message.content
+    assert '"result_fingerprint": "sha256:inherited"' in inherited_message.content
+    assert '"row_count": 2' in inherited_message.content
+    assert '"area_name": "北山街道"' not in inherited_message.content
+    assert '"person_count": 2' not in inherited_message.content
 
 
 @pytest.mark.asyncio

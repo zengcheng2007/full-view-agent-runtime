@@ -34,7 +34,11 @@ follow_up_turns:
   - user_message: 哪个街道最多？直接根据刚才结果回答。
     model_steps:
       - type: finish
-        content: 根据刚才已验证的结果，示例街道最多，为128人。
+        content: 模型不复述尚未 hydration 的历史结果数字。
+        structured_finish:
+          kind: reference_only
+          summary: 模型不复述尚未 hydration 的历史结果数字。
+          claims: []
     expected:
       terminal_status: completed
       outcome: success
@@ -43,4 +47,4 @@ follow_up_turns:
       min_evidence_count: 0
       max_evidence_count: 0
       required_event_types: [run.completed]
-      required_answer_substrings: ["128"]
+      required_answer_substrings: ["数据面板"]

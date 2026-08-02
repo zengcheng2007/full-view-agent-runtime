@@ -160,6 +160,49 @@ async def test_model_planner_intercepts_structured_finish_tool() -> None:
 
 
 @pytest.mark.asyncio
+async def test_model_planner_routes_invalid_reserved_finish_to_harness_revision() -> None:
+    provider = QueueModelProvider(
+        ModelResponse(
+            content=None,
+            tool_calls=(
+                ModelToolCall(
+                    tool_id=FINISH_TOOL_ID,
+                    arguments={
+                        "kind": "claims",
+                        "summary": "缺少结果绑定。",
+                        "claims": [
+                            {
+                                "claim_id": "claim-1",
+                                "collection": "rows",
+                                "row_locator": {},
+                                "field": "person_count",
+                                "operation": "not-an-operation",
+                                "value": 9999,
+                            }
+                        ],
+                    },
+                ),
+            ),
+            finish_reason="tool_calls",
+        )
+    )
+    planner = ModelPlanner(
+        provider=provider,
+        context_builder=StaticContextBuilder(),
+        user_id="user-01",
+        auth_context=population_auth_context(),
+    )
+
+    action = await planner.decide(HarnessState())
+
+    assert action == FinishAction(
+        summary="结构化完成参数无效。",
+        structured_finish_error="invalid_structured_finish",
+        legacy=False,
+    )
+
+
+@pytest.mark.asyncio
 async def test_model_planner_returns_finish_action_for_nonblank_text() -> None:
     provider = QueueModelProvider(
         ModelResponse(

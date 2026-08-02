@@ -50,6 +50,7 @@ class ToolAction:
 class FinishAction:
     summary: str
     structured_finish: StructuredFinish | None = None
+    structured_finish_error: str | None = None
     legacy: bool = True
 
 
@@ -239,6 +240,15 @@ class DeterministicCompletionValidator:
         summary = action.summary.strip()
         if not summary:
             return CompletionAssessment(status="reject", reason_code="empty_summary")
+        if action.structured_finish_error is not None:
+            return CompletionAssessment(
+                status="revise",
+                reason_code=action.structured_finish_error,
+                feedback=(
+                    "结构化完成参数无效；请按完成工具 schema 补齐 Result 绑定、"
+                    "行、字段、运算和值。"
+                ),
+            )
 
         success_results = [r for r in state.tool_results if r.status in ("success", "partial")]
         denied_results = [r for r in state.tool_results if r.status == "denied"]
@@ -299,6 +309,29 @@ class DeterministicCompletionValidator:
                 )
             return CompletionAssessment(status="accept")
 
+        if action.structured_finish is not None:
+            has_inherited_reference = bool(
+                state.inherited_result_ids and state.inherited_evidence_ids
+            )
+            claim_assessment = assess_structured_finish(
+                action.structured_finish,
+                (),
+                has_reference=has_inherited_reference,
+            )
+            return CompletionAssessment(
+                status="accept" if claim_assessment.accepted else "revise",
+                reason_code=claim_assessment.reason_code,
+                feedback=(
+                    None
+                    if claim_assessment.accepted
+                    else (
+                        "当前没有可用于核验 claims 的已加载结果；"
+                        "如仅需引用已有结果，请使用 reference_only。"
+                    )
+                ),
+                safe_summary=claim_assessment.rendered_summary,
+            )
+
         has_fabricated_number = bool(self._NUMBER_RE.search(summary))
 
         # Case 3: denied results → must acknowledge denial, no fabricated data
@@ -321,7 +354,14 @@ class DeterministicCompletionValidator:
         # the same owned session. The orchestrator only populates these IDs
         # after reloading both the result and its evidence from the store.
         if state.inherited_result_ids and state.inherited_evidence_ids:
-            return CompletionAssessment(status="accept")
+            return CompletionAssessment(
+                status="revise",
+                reason_code="structured_claims_required",
+                feedback=(
+                    "历史结果尚未加载为可复算数据；不得直接复述事实，"
+                    "请使用结构化完成工具的 reference_only。"
+                ),
+            )
 
         # Case 5: no current or inherited results → explicit allowlist only
         accepted = any(p in summary for p in self.ALLOWED_NO_RESULT_PATTERNS)

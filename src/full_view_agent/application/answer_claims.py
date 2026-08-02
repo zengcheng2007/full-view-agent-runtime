@@ -37,14 +37,7 @@ class AnswerClaim(ContractModel):
 
 
 class StructuredFinish(ContractModel):
-    kind: Literal[
-        "claims",
-        "reference_only",
-        "clarification",
-        "capability",
-        "denial",
-        "failure",
-    ]
+    kind: Literal["claims", "reference_only"]
     summary: str = Field(min_length=1, max_length=10_000)
     claims: list[AnswerClaim] = Field(default_factory=list, max_length=100)
 
@@ -77,17 +70,21 @@ class ClaimAssessment:
 def assess_structured_finish(
     finish: StructuredFinish,
     results: tuple[ToolResult, ...],
+    *,
+    has_reference: bool = False,
 ) -> ClaimAssessment:
-    if finish.kind == "reference_only":
-        return ClaimAssessment(True, "reference_only", REFERENCE_ONLY_SUMMARY)
-    if finish.kind != "claims":
-        return ClaimAssessment(False, "structured_finish_kind_not_allowed")
-
     available = {
         result.data_result.result_id: result.data_result
         for result in results
         if result.status in {"success", "partial"} and result.data_result is not None
     }
+    if finish.kind == "reference_only":
+        if not available and not has_reference:
+            return ClaimAssessment(False, "reference_result_not_found")
+        return ClaimAssessment(True, "reference_only", REFERENCE_ONLY_SUMMARY)
+    if finish.kind != "claims":
+        return ClaimAssessment(False, "structured_finish_kind_not_allowed")
+
     rendered: list[str] = []
     for claim in finish.claims:
         result = available.get(claim.result_id)
@@ -149,8 +146,13 @@ def _compute_claim(
     values = [row[claim.field] for row in selected]
     if claim.operation == "value":
         return values[0]
-    if claim.operation == "all_equal" and len(values) < 2:
-        return _OPERATION_MISMATCH
+    if claim.operation == "all_equal":
+        if len(values) < 2:
+            return _OPERATION_MISMATCH
+        numeric = _decimals(values)
+        if numeric is None or len(set(numeric)) != 1:
+            return _OPERATION_MISMATCH
+        return True
     numeric = _decimals(values)
     if numeric is None:
         return _OPERATION_MISMATCH
@@ -160,8 +162,6 @@ def _compute_claim(
         return min(numeric)
     if claim.operation == "max":
         return max(numeric)
-    if claim.operation == "all_equal":
-        return len(set(numeric)) == 1
     all_values = _decimals(
         [row[claim.field] for row in rows if claim.field in row]
     )

@@ -1,4 +1,4 @@
-from typing import Literal, Protocol
+from typing import Any, Literal, Protocol
 
 import httpx
 from pydantic import BaseModel, SecretStr
@@ -192,13 +192,14 @@ class InMemoryGovernanceAdapter:
             return InMemoryGovernanceAdapter._query_housing_area_distribution(
                 arguments
             )
-        rows = [
+        source_rows = [
             HousingLeaseTypeRow(lease_type="住宅出租", dwelling_count=3200),
             HousingLeaseTypeRow(lease_type="商铺出租", dwelling_count=850),
             HousingLeaseTypeRow(lease_type="公寓出租", dwelling_count=1200),
             HousingLeaseTypeRow(lease_type="群租房", dwelling_count=320),
             HousingLeaseTypeRow(lease_type="工业出租", dwelling_count=180),
         ]
+        rows = source_rows[: arguments.query.limit]
         data = HousingLeaseTypeTable(rows=rows)
         return TableDataResult(
             result_id=new_id("res"),
@@ -209,6 +210,7 @@ class InMemoryGovernanceAdapter:
             ),
             data=data,
             row_count=len(rows),
+            truncated=len(source_rows) > arguments.query.limit,
         )
 
     @staticmethod
@@ -218,7 +220,7 @@ class InMemoryGovernanceAdapter:
         _validate_housing_next_area_query(arguments)
         area_code = arguments.query.scope.area_code
         child_label = _NEXT_AREA_CHILD_LABEL[len(area_code)]
-        rows = [
+        source_rows = [
             HousingAreaGroupRow(
                 area_code=f"{area_code}001",
                 area_name=f"示例{child_label}一",
@@ -229,7 +231,8 @@ class InMemoryGovernanceAdapter:
                 area_name=f"示例{child_label}二",
                 dwelling_count=168,
             ),
-        ][: arguments.query.limit]
+        ]
+        rows = source_rows[: arguments.query.limit]
         data = HousingAreaGroupTable(rows=rows)
         return TableDataResult(
             result_id=new_id("res"),
@@ -240,6 +243,7 @@ class InMemoryGovernanceAdapter:
             ),
             data=data,
             row_count=len(rows),
+            truncated=len(source_rows) > arguments.query.limit,
         )
 
     @staticmethod
@@ -486,7 +490,7 @@ class HttpGovernanceAdapter:
             timeout_seconds=timeout_seconds,
             max_attempts=max_attempts,
         )
-        raw_rows = _unwrap_standard_result(response)
+        raw_rows, upstream_truncated = _unwrap_standard_result_page(response)
         try:
             rows = [
                 PopulationMetricRow(
@@ -510,7 +514,9 @@ class HttpGovernanceAdapter:
             ),
             data=data,
             row_count=len(rows),
-            truncated=len(raw_rows) > arguments.query.limit,
+            truncated=(
+                upstream_truncated or len(raw_rows) > arguments.query.limit
+            ),
         )
 
     async def _query_event_metrics_http(
@@ -611,7 +617,7 @@ class HttpGovernanceAdapter:
             timeout_seconds=timeout_seconds,
             max_attempts=max_attempts,
         )
-        raw_rows = _unwrap_standard_result(response)
+        raw_rows, upstream_truncated = _unwrap_standard_result_page(response)
         if not isinstance(raw_rows, list):
             raise UpstreamContractError(
                 "legacy housing response data is not a list"
@@ -638,7 +644,9 @@ class HttpGovernanceAdapter:
             ),
             data=data,
             row_count=len(rows),
-            truncated=False,
+            truncated=(
+                upstream_truncated or len(raw_rows) > arguments.query.limit
+            ),
         )
 
     async def _query_housing_area_distribution_http(
@@ -965,7 +973,7 @@ def _parse_percent(value: object) -> float:
     return parsed
 
 
-def _unwrap_standard_result(response: httpx.Response):
+def _unwrap_standard_envelope(response: httpx.Response) -> dict[str, object]:
     try:
         envelope = response.json()
     except ValueError as exc:
@@ -976,7 +984,21 @@ def _unwrap_standard_result(response: httpx.Response):
         raise ReauthenticationRequired("登录凭据已失效，请重新认证")
     if envelope.get("state") is not True or envelope.get("code") != 200:
         raise UpstreamUnavailable(str(envelope.get("msg") or "legacy service failed"))
+    return envelope
+
+
+def _unwrap_standard_result(response: httpx.Response) -> Any:
+    envelope = _unwrap_standard_envelope(response)
     return envelope["data"]
+
+
+def _unwrap_standard_result_page(response: httpx.Response) -> tuple[Any, bool]:
+    envelope = _unwrap_standard_envelope(response)
+    explicitly_truncated = any(
+        envelope.get(field) is True
+        for field in ("truncated", "hasMore", "has_more")
+    )
+    return envelope["data"], explicitly_truncated
 
 
 def _is_token_failure_response(response: httpx.Response) -> bool:

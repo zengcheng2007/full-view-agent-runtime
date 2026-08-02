@@ -5,11 +5,21 @@ import pytest
 from pydantic import SecretStr
 
 from full_view_agent.application import errors
+from full_view_agent.application.answer_claims import AnswerClaim, StructuredFinish
 from full_view_agent.application.capability_service import CapabilityService
+from full_view_agent.application.harness import (
+    DeterministicCompletionValidator,
+    FinishAction,
+    HarnessState,
+)
 from full_view_agent.application.policy import MinimalPolicyAdapter
 from full_view_agent.application.tool_registry import ToolRegistry
 from full_view_agent.domain import models
-from full_view_agent.domain.models import QueryPopulationMetricsInput, ResolveAreaInput
+from full_view_agent.domain.models import (
+    QueryPopulationMetricsInput,
+    ResolveAreaInput,
+    ToolResult,
+)
 from full_view_agent.infrastructure import governance_adapter
 
 from .test_policy import population_auth_context
@@ -569,6 +579,133 @@ async def test_http_adapter_maps_housing_request_to_lease_type_contract() -> Non
     assert result.data_schema_ref == "schema://data/housing-lease-type-table/1.0.0"
     assert result.data.rows[0].lease_type == "住宅出租"
     assert result.data.rows[0].dwelling_count == 32
+
+
+@pytest.mark.asyncio
+async def test_http_housing_limit_marks_result_truncated_and_blocks_global_claim() -> None:
+    def handler(_request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            json={
+                "state": True,
+                "code": 200,
+                "msg": "",
+                "data": [
+                    {"house_type": "住宅出租", "total": 32},
+                    {"house_type": "商铺出租", "total": 8},
+                ],
+            },
+        )
+
+    auth_context = _domain_auth_context(
+        entitlement="governance.housing.aggregate.read",
+        dataset_id="housing",
+    )
+    arguments = models.QueryHousingMetricsInput.model_validate(
+        {"query": {"scope": {"area_code": "330106"}, "limit": 1}}
+    )
+    manifest = ToolRegistry.default().get_manifest(
+        "governance.query_housing_metrics"
+    )
+    policy = MinimalPolicyAdapter().evaluate(
+        manifest=manifest,
+        auth_context=auth_context,
+        arguments=arguments,
+    )
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        result = await governance_adapter.HttpGovernanceAdapter(
+            base_url="http://legacy.test/geo-qxst",
+            credential_broker=RecordingCredentialBroker(),
+            client=client,
+        ).execute(
+            manifest=manifest,
+            arguments=arguments,
+            policy_decision=policy,
+            auth_context=auth_context,
+        )
+
+    assert result.row_count == 1
+    assert result.truncated is True
+    claim = AnswerClaim(
+        claim_id="claim-sum",
+        result_id=result.result_id,
+        result_fingerprint=result.result_fingerprint,
+        collection="rows",
+        row_locator={},
+        field="dwelling_count",
+        operation="sum",
+        value=32,
+    )
+    finish = StructuredFinish(
+        kind="claims",
+        summary="出租房合计32套。",
+        claims=[claim],
+    )
+    assessment = await DeterministicCompletionValidator().assess(
+        HarnessState(
+            tool_results=(
+                ToolResult(
+                    tool_call_id="tcl-housing-limit",
+                    tool_id=manifest.tool_id,
+                        tool_version=manifest.tool_version,
+                    status="success",
+                    summary="查询成功",
+                    data_result=result,
+                ),
+            )
+        ),
+        FinishAction(
+            summary=finish.summary,
+            structured_finish=finish,
+            legacy=False,
+        ),
+    )
+    assert assessment.status == "revise"
+    assert assessment.reason_code == "claim_truncated_aggregate"
+
+
+@pytest.mark.asyncio
+async def test_http_housing_honors_explicit_upstream_truncated_flag() -> None:
+    def handler(_request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            json={
+                "state": True,
+                "code": 200,
+                "msg": "",
+                "truncated": True,
+                "data": [{"house_type": "住宅出租", "total": 32}],
+            },
+        )
+
+    auth_context = _domain_auth_context(
+        entitlement="governance.housing.aggregate.read",
+        dataset_id="housing",
+    )
+    arguments = models.QueryHousingMetricsInput.model_validate(
+        {"query": {"scope": {"area_code": "330106"}, "limit": 1}}
+    )
+    manifest = ToolRegistry.default().get_manifest(
+        "governance.query_housing_metrics"
+    )
+    policy = MinimalPolicyAdapter().evaluate(
+        manifest=manifest,
+        auth_context=auth_context,
+        arguments=arguments,
+    )
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        result = await governance_adapter.HttpGovernanceAdapter(
+            base_url="http://legacy.test/geo-qxst",
+            credential_broker=RecordingCredentialBroker(),
+            client=client,
+        ).execute(
+            manifest=manifest,
+            arguments=arguments,
+            policy_decision=policy,
+            auth_context=auth_context,
+        )
+
+    assert result.truncated is True
 
 
 @pytest.mark.parametrize(
