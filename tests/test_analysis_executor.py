@@ -1,6 +1,7 @@
 """P1-2 AnalysisPlan 执行器的确定性、安全和预算契约。"""
 
 import asyncio
+import inspect
 import warnings
 from collections.abc import Mapping
 from typing import Literal
@@ -20,8 +21,11 @@ from full_view_agent.application.fingerprints import canonical_fingerprint
 from full_view_agent.application.semantic_executor import SemanticToolExecutor
 from full_view_agent.application.semantic_wiring import build_semantic_capability_stack
 from full_view_agent.application.tool_registry import ToolRegistry
+from full_view_agent.domain.analysis_execution import AnalysisExecutionResult
 from full_view_agent.domain.analysis_plan import (
+    AnalysisOmission,
     AnalysisPlan,
+    AnalysisRequest,
     AnalysisStep,
     AreaScopeRef,
     PlanBudget,
@@ -37,6 +41,12 @@ from full_view_agent.semantic.catalog import CapabilityBinding, SemanticCatalog
 
 from .test_analysis_planner import area_request
 from .test_policy import population_auth_context
+
+
+def test_public_execution_port_accepts_only_plan_identity_not_plan_body() -> None:
+    parameters = inspect.signature(AnalysisPlanExecutor.execute).parameters
+    assert "plan" not in parameters
+    assert {"plan_id", "request_id", "auth_context"} <= set(parameters)
 
 
 def _full_auth_context() -> AuthContext:
@@ -59,6 +69,39 @@ def _full_auth_context() -> AuthContext:
     )
 
 
+class _InMemoryAnalysisPlanRepository:
+    """测试用可信服务端计划源；不代表客户端输入。"""
+
+    def __init__(self) -> None:
+        self.plans: dict[tuple[str, str, str, str], AnalysisPlan] = {}
+
+    async def get(
+        self,
+        *,
+        tenant_id: str,
+        user_id: str,
+        run_id: str,
+        plan_id: str,
+    ) -> AnalysisPlan | None:
+        return self.plans.get((tenant_id, user_id, run_id, plan_id))
+
+
+class _ControlledAnalysisPlanner(AnalysisPlanner):
+    """仅为调度单测生成带依赖/短超时的可信服务端计划。"""
+
+    expected_plan: AnalysisPlan | None = None
+
+    def plan(
+        self,
+        request: AnalysisRequest,
+        *,
+        authorization: SubjectAuthorization | None,
+    ) -> AnalysisPlan:
+        if self.expected_plan is not None:
+            return self.expected_plan
+        return super().plan(request, authorization=authorization)
+
+
 class _ControlledSemanticPort(SemanticToolExecutor):
     """仅在调度测试中控制延迟/结果；成功仍走真实语义执行器。"""
 
@@ -70,6 +113,8 @@ class _ControlledSemanticPort(SemanticToolExecutor):
         statuses: Mapping[str, Literal["failed", "denied"]] | None = None,
         summaries: Mapping[str, str] | None = None,
         exceptions: Mapping[str, Exception] | None = None,
+        plan_repository: _InMemoryAnalysisPlanRepository,
+        planner: _ControlledAnalysisPlanner,
     ) -> None:
         self.inner = inner
         self.delays = dict(delays or {})
@@ -78,6 +123,8 @@ class _ControlledSemanticPort(SemanticToolExecutor):
         )
         self.summaries = dict(summaries or {})
         self.exceptions = dict(exceptions or {})
+        self.plan_repository = plan_repository
+        self.planner = planner
         self.calls: list[str] = []
         self.active = 0
         self.max_active = 0
@@ -147,22 +194,58 @@ def _executor(
         adapter=InMemoryGovernanceAdapter(),
         catalog=effective_catalog,
     )
+    plan_repository = _InMemoryAnalysisPlanRepository()
+    planner = _ControlledAnalysisPlanner(stack.catalog)
     port = _ControlledSemanticPort(
         stack.executor,
         delays=delays,
         statuses=statuses,
         summaries=summaries,
         exceptions=exceptions,
+        plan_repository=plan_repository,
+        planner=planner,
     )
     return (
         AnalysisPlanExecutor(
             catalog=stack.catalog,
             resolver=stack.resolver,
             semantic_executor=port,
+            planner=planner,
+            plan_repository=plan_repository,
         ),
         port,
         stack.catalog,
     )
+
+
+async def _execute_loaded(
+    executor: AnalysisPlanExecutor,
+    port: _ControlledSemanticPort,
+    plan: AnalysisPlan,
+    *,
+    auth_context: AuthContext,
+    lookup_plan_id: str | None = None,
+    request_id: str | None = None,
+    trusted_replanned: bool = False,
+) -> AnalysisExecutionResult:
+    effective_plan_id = lookup_plan_id or plan.plan_id
+    key = (
+        auth_context.principal.tenant_id,
+        auth_context.principal.user_id,
+        auth_context.run_id,
+        effective_plan_id,
+    )
+    port.plan_repository.plans[key] = plan
+    if trusted_replanned:
+        port.planner.expected_plan = plan
+    try:
+        return await executor.execute(
+            plan_id=effective_plan_id,
+            request_id=request_id or plan.request_id,
+            auth_context=auth_context,
+        )
+    finally:
+        port.planner.expected_plan = None
 
 
 def _overview_plan(
@@ -232,7 +315,13 @@ async def test_independent_ready_steps_run_with_bounded_parallelism_and_plan_ord
         constraints=PlanBudget(max_parallel=2, total_timeout_ms=2_000),
     )
 
-    result = await executor.execute(plan, auth_context=_full_auth_context())
+    result = await _execute_loaded(
+        executor,
+        port,
+        plan,
+        auth_context=_full_auth_context(),
+        trusted_replanned=True,
+    )
 
     assert result.status == "completed"
     assert result.reason_code == "ANALYSIS_COMPLETED"
@@ -252,7 +341,13 @@ async def test_dependency_waits_for_successful_parent() -> None:
     dependent_housing = housing.model_copy(update={"depends_on": (event.step_id,)})
     plan = _replace_steps(plan, (event, dependent_housing, population))
 
-    result = await executor.execute(plan, auth_context=_full_auth_context())
+    result = await _execute_loaded(
+        executor,
+        port,
+        plan,
+        auth_context=_full_auth_context(),
+        trusted_replanned=True,
+    )
 
     assert result.status == "completed"
     assert port.calls.index("event") < port.calls.index("housing")
@@ -263,7 +358,13 @@ async def test_failed_subject_does_not_stop_independent_subjects_and_is_partial(
     executor, port, catalog = _executor(statuses={"housing": "failed"})
     plan = _overview_plan(catalog)
 
-    result = await executor.execute(plan, auth_context=_full_auth_context())
+    result = await _execute_loaded(
+        executor,
+        port,
+        plan,
+        auth_context=_full_auth_context(),
+        trusted_replanned=True,
+    )
 
     assert result.status == "partial"
     assert result.reason_code == "ANALYSIS_PARTIAL"
@@ -283,7 +384,13 @@ async def test_failed_dependency_is_skipped_without_tool_call() -> None:
     dependent_housing = housing.model_copy(update={"depends_on": (event.step_id,)})
     plan = _replace_steps(plan, (event, dependent_housing, population))
 
-    result = await executor.execute(plan, auth_context=_full_auth_context())
+    result = await _execute_loaded(
+        executor,
+        port,
+        plan,
+        auth_context=_full_auth_context(),
+        trusted_replanned=True,
+    )
 
     assert result.status == "partial"
     assert port.calls == ["event", "population"]
@@ -303,7 +410,13 @@ async def test_per_step_timeout_is_structured_and_other_subjects_complete() -> N
     )
     plan = _replace_steps(plan, steps)
 
-    result = await executor.execute(plan, auth_context=_full_auth_context())
+    result = await _execute_loaded(
+        executor,
+        _port,
+        plan,
+        auth_context=_full_auth_context(),
+        trusted_replanned=True,
+    )
 
     assert result.status == "partial"
     by_subject = {step.subject: step for step in result.steps}
@@ -322,7 +435,13 @@ async def test_total_timeout_cancels_inflight_and_marks_unfinished_steps() -> No
     steps = tuple(step.model_copy(update={"timeout_ms": 100}) for step in plan.steps)
     plan = _replace_steps(plan, steps, constraints=budget)
 
-    result = await executor.execute(plan, auth_context=_full_auth_context())
+    result = await _execute_loaded(
+        executor,
+        port,
+        plan,
+        auth_context=_full_auth_context(),
+        trusted_replanned=True,
+    )
 
     assert result.status == "failed"
     assert result.tool_call_count == 2
@@ -338,7 +457,7 @@ async def test_external_cancellation_propagates_and_cancels_inflight_tasks() -> 
     )
     plan = _overview_plan(catalog)
     task = asyncio.create_task(
-        executor.execute(plan, auth_context=_full_auth_context())
+        _execute_loaded(executor, port, plan, auth_context=_full_auth_context())
     )
     await asyncio.wait_for(port.entered.wait(), timeout=1)
 
@@ -360,7 +479,9 @@ async def test_catalog_version_or_fingerprint_drift_rejects_before_any_call() ->
         plan.model_copy(update={"catalog_fingerprint": "sha256:" + "f" * 64}),
     ):
         with pytest.raises(AnalysisExecutionRejected) as exc_info:
-            await executor.execute(drifted, auth_context=_full_auth_context())
+            await _execute_loaded(
+                executor, port, drifted, auth_context=_full_auth_context()
+            )
         assert exc_info.value.code in {
             "CATALOG_VERSION_MISMATCH",
             "CATALOG_FINGERPRINT_MISMATCH",
@@ -377,7 +498,9 @@ async def test_binding_drift_rejects_before_any_call() -> None:
     plan = _replace_steps(plan, (tampered, *plan.steps[1:]))
 
     with pytest.raises(AnalysisExecutionRejected) as exc_info:
-        await executor.execute(plan, auth_context=_full_auth_context())
+        await _execute_loaded(
+            executor, port, plan, auth_context=_full_auth_context()
+        )
 
     assert exc_info.value.code == "CAPABILITY_BINDING_MISMATCH"
     assert port.calls == []
@@ -403,7 +526,9 @@ async def test_catalog_binding_adapter_change_is_detected_by_fingerprint() -> No
     executor, port, _catalog = _executor(catalog=altered)
 
     with pytest.raises(AnalysisExecutionRejected) as exc_info:
-        await executor.execute(plan, auth_context=_full_auth_context())
+        await _execute_loaded(
+            executor, port, plan, auth_context=_full_auth_context()
+        )
 
     assert exc_info.value.code == "CATALOG_FINGERPRINT_MISMATCH"
     assert port.calls == []
@@ -420,7 +545,9 @@ async def test_model_copy_steps_over_budget_is_rejected_before_any_call() -> Non
     )
 
     with pytest.raises(AnalysisExecutionRejected) as exc_info:
-        await executor.execute(plan, auth_context=_full_auth_context())
+        await _execute_loaded(
+            executor, port, plan, auth_context=_full_auth_context()
+        )
 
     assert exc_info.value.code == "PLAN_CONTRACT_INVALID"
     assert port.calls == []
@@ -433,7 +560,9 @@ async def test_long_tool_summary_is_bounded_without_breaking_other_steps() -> No
     )
     plan = _overview_plan(catalog)
 
-    result = await executor.execute(plan, auth_context=_full_auth_context())
+    result = await _execute_loaded(
+        executor, _port, plan, auth_context=_full_auth_context()
+    )
 
     assert result.status == "partial"
     housing = next(step for step in result.steps if step.subject == "housing")
@@ -450,7 +579,9 @@ async def test_reauthentication_control_flow_propagates_and_cancels_peers() -> N
     plan = _overview_plan(catalog)
 
     with pytest.raises(ReauthenticationRequired, match="credential expired"):
-        await executor.execute(plan, auth_context=_full_auth_context())
+        await _execute_loaded(
+            executor, port, plan, auth_context=_full_auth_context()
+        )
 
     assert port.active == 0
     assert set(port.cancelled_subjects) == {"housing", "population"}
@@ -474,6 +605,8 @@ def test_executor_rejects_semantic_executor_with_a_different_resolver() -> None:
             catalog=first.catalog,
             resolver=first.resolver,
             semantic_executor=second.executor,
+            planner=AnalysisPlanner(first.catalog),
+            plan_repository=_InMemoryAnalysisPlanRepository(),
         )
 
 
@@ -486,7 +619,9 @@ async def test_changed_step_scope_with_old_plan_id_is_rejected_before_calls() ->
     tampered = plan.model_copy(update={"steps": (changed, *plan.steps[1:])})
 
     with pytest.raises(AnalysisExecutionRejected) as exc_info:
-        await executor.execute(tampered, auth_context=_full_auth_context())
+        await _execute_loaded(
+            executor, port, tampered, auth_context=_full_auth_context()
+        )
 
     assert exc_info.value.code == "PLAN_ID_MISMATCH"
     assert port.calls == []
@@ -504,7 +639,9 @@ async def test_recomputed_plan_id_cannot_authorize_cross_scope_step() -> None:
     )
 
     with pytest.raises(AnalysisExecutionRejected) as exc_info:
-        await executor.execute(tampered, auth_context=_full_auth_context())
+        await _execute_loaded(
+            executor, port, tampered, auth_context=_full_auth_context()
+        )
 
     assert exc_info.value.code == "PLAN_SCOPE_MISMATCH"
     assert port.calls == []
@@ -517,7 +654,9 @@ async def test_model_copy_duplicate_step_ids_is_rejected_before_calls() -> None:
     tampered = plan.model_copy(update={"steps": (*plan.steps, plan.steps[0])})
 
     with pytest.raises(AnalysisExecutionRejected) as exc_info:
-        await executor.execute(tampered, auth_context=_full_auth_context())
+        await _execute_loaded(
+            executor, port, tampered, auth_context=_full_auth_context()
+        )
 
     assert exc_info.value.code == "PLAN_CONTRACT_INVALID"
     assert port.calls == []
@@ -533,7 +672,9 @@ async def test_model_copy_cycle_is_rejected_before_calls() -> None:
     tampered = plan.model_copy(update={"steps": (first, second, third)})
 
     with pytest.raises(AnalysisExecutionRejected) as exc_info:
-        await executor.execute(tampered, auth_context=_full_auth_context())
+        await _execute_loaded(
+            executor, port, tampered, auth_context=_full_auth_context()
+        )
 
     assert exc_info.value.code == "PLAN_CONTRACT_INVALID"
     assert port.calls == []
@@ -550,7 +691,9 @@ async def test_model_construct_pollution_is_rejected_with_stable_code() -> None:
     with warnings.catch_warnings(record=True) as caught, pytest.raises(
         AnalysisExecutionRejected
     ) as exc_info:
-        await executor.execute(polluted, auth_context=_full_auth_context())
+            await _execute_loaded(
+                executor, port, polluted, auth_context=_full_auth_context()
+            )
 
     assert exc_info.value.code == "PLAN_CONTRACT_INVALID"
     assert port.calls == []
@@ -568,7 +711,9 @@ async def test_recomputed_id_cannot_attach_unrelated_goal_to_step() -> None:
     )
 
     with pytest.raises(AnalysisExecutionRejected) as exc_info:
-        await executor.execute(tampered, auth_context=_full_auth_context())
+        await _execute_loaded(
+            executor, port, tampered, auth_context=_full_auth_context()
+        )
 
     assert exc_info.value.code == "PLAN_GOAL_MISMATCH"
     assert port.calls == []
@@ -594,7 +739,174 @@ async def test_non_derivable_step_is_rejected_before_any_tool_call() -> None:
     assert [step.subject for step in plan.steps] == ["event", "housing", "population"]
 
     with pytest.raises(AnalysisExecutionRejected) as exc_info:
-        await executor.execute(plan, auth_context=_full_auth_context())
+        await _execute_loaded(
+            executor, port, plan, auth_context=_full_auth_context()
+        )
 
     assert exc_info.value.code == "QUERY_SPEC_NOT_DERIVABLE"
+    assert port.calls == []
+
+
+@pytest.mark.asyncio
+async def test_plan_repository_not_found_is_rejected_before_calls() -> None:
+    executor, port, _catalog = _executor()
+    auth = _full_auth_context()
+
+    with pytest.raises(AnalysisExecutionRejected) as exc_info:
+        await executor.execute(
+            plan_id="sha256:" + "0" * 64,
+            request_id="req-missing",
+            auth_context=auth,
+        )
+
+    assert exc_info.value.code == "PLAN_NOT_FOUND"
+    assert port.calls == []
+
+
+@pytest.mark.asyncio
+async def test_repository_returning_wrong_plan_id_is_rejected_before_calls() -> None:
+    executor, port, catalog = _executor()
+    plan = _overview_plan(catalog)
+    requested_id = "sha256:" + "f" * 64
+
+    with pytest.raises(AnalysisExecutionRejected) as exc_info:
+        await _execute_loaded(
+            executor,
+            port,
+            plan,
+            lookup_plan_id=requested_id,
+            auth_context=_full_auth_context(),
+        )
+
+    assert exc_info.value.code == "PLAN_SOURCE_ID_MISMATCH"
+    assert port.calls == []
+
+
+@pytest.mark.asyncio
+async def test_loaded_plan_request_id_must_match_execution_request() -> None:
+    executor, port, catalog = _executor()
+    plan = _overview_plan(catalog)
+
+    with pytest.raises(AnalysisExecutionRejected) as exc_info:
+        await _execute_loaded(
+            executor,
+            port,
+            plan,
+            request_id="req-other",
+            auth_context=_full_auth_context(),
+        )
+
+    assert exc_info.value.code == "PLAN_REQUEST_MISMATCH"
+    assert port.calls == []
+
+
+@pytest.mark.asyncio
+async def test_replanning_rejects_overview_with_a_subject_removed() -> None:
+    executor, port, catalog = _executor()
+    plan = _overview_plan(catalog)
+    tampered = plan.model_copy(
+        update={"steps": tuple(step for step in plan.steps if step.subject != "housing")}
+    )
+    tampered = tampered.model_copy(
+        update={"plan_id": _attacker_recomputed_plan_id(tampered)}
+    )
+
+    with pytest.raises(AnalysisExecutionRejected) as exc_info:
+        await _execute_loaded(
+            executor, port, tampered, auth_context=_full_auth_context()
+        )
+
+    assert exc_info.value.code == "PLAN_REPLANNING_MISMATCH"
+    assert port.calls == []
+
+
+@pytest.mark.asyncio
+async def test_replanning_rejects_forged_overview_omission_reason() -> None:
+    executor, port, catalog = _executor()
+    plan = _overview_plan(catalog)
+    housing = next(step for step in plan.steps if step.subject == "housing")
+    tampered = plan.model_copy(
+        update={
+            "steps": tuple(step for step in plan.steps if step.subject != "housing"),
+            "omissions": (
+                AnalysisOmission(
+                    goals=housing.goals,
+                    subject="housing",
+                    reason_code="NOT_ENTITLED",
+                    detail="forged omission",
+                ),
+            ),
+        }
+    )
+    tampered = tampered.model_copy(
+        update={"plan_id": _attacker_recomputed_plan_id(tampered)}
+    )
+
+    with pytest.raises(AnalysisExecutionRejected) as exc_info:
+        await _execute_loaded(
+            executor, port, tampered, auth_context=_full_auth_context()
+        )
+
+    assert exc_info.value.code == "PLAN_REPLANNING_MISMATCH"
+    assert port.calls == []
+
+
+@pytest.mark.asyncio
+async def test_whole_scope_replacement_cannot_be_loaded_by_old_plan_id() -> None:
+    executor, port, catalog = _executor()
+    original = _overview_plan(catalog)
+    alternate = AnalysisPlanner(catalog).plan(
+        area_request("overview", area_code="330106001"),
+        authorization=SubjectAuthorization.from_auth_context(_full_auth_context()),
+    )
+    assert alternate.plan_id != original.plan_id
+
+    with pytest.raises(AnalysisExecutionRejected) as exc_info:
+        await _execute_loaded(
+            executor,
+            port,
+            alternate,
+            lookup_plan_id=original.plan_id,
+            request_id=original.request_id,
+            auth_context=_full_auth_context(),
+        )
+
+    assert exc_info.value.code == "PLAN_SOURCE_ID_MISMATCH"
+    assert port.calls == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("namespace_field", ["tenant_id", "user_id", "run_id"])
+async def test_same_plan_id_is_not_visible_across_server_namespace(
+    namespace_field: str,
+) -> None:
+    executor, port, catalog = _executor()
+    plan = _overview_plan(catalog)
+    owner = _full_auth_context()
+    key = (
+        owner.principal.tenant_id,
+        owner.principal.user_id,
+        owner.run_id,
+        plan.plan_id,
+    )
+    port.plan_repository.plans[key] = plan
+    if namespace_field == "run_id":
+        other = owner.model_copy(update={"run_id": "run-other"})
+    else:
+        other = owner.model_copy(
+            update={
+                "principal": owner.principal.model_copy(
+                    update={namespace_field: f"{namespace_field}-other"}
+                )
+            }
+        )
+
+    with pytest.raises(AnalysisExecutionRejected) as exc_info:
+        await executor.execute(
+            plan_id=plan.plan_id,
+            request_id=plan.request_id,
+            auth_context=other,
+        )
+
+    assert exc_info.value.code == "PLAN_NOT_FOUND"
     assert port.calls == []

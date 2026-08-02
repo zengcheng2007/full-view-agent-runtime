@@ -13,6 +13,7 @@ from pydantic import ValidationError
 from full_view_agent.application.analysis_plan_integrity import (
     recompute_analysis_plan_id,
 )
+from full_view_agent.application.analysis_planner import AnalysisPlanner
 from full_view_agent.application.errors import ReauthenticationRequired
 from full_view_agent.application.fingerprints import canonical_fingerprint
 from full_view_agent.application.semantic_executor import SemanticToolExecutor
@@ -24,6 +25,7 @@ from full_view_agent.domain.analysis_execution import (
 )
 from full_view_agent.domain.analysis_plan import (
     AnalysisPlan,
+    AnalysisRequest,
     AnalysisStep,
     AreaScopeRef,
 )
@@ -32,6 +34,7 @@ from full_view_agent.semantic.action_resolver import (
     SEMANTIC_QUERY_TOOL_ID,
     SemanticActionResolver,
 )
+from full_view_agent.semantic.authorization import SubjectAuthorization
 from full_view_agent.semantic.catalog import SemanticCatalog, SubjectDefinition
 
 
@@ -40,10 +43,24 @@ class AnalysisPlanExecutionPort(Protocol):
 
     async def execute(
         self,
-        plan: AnalysisPlan,
         *,
+        plan_id: str,
+        request_id: str,
         auth_context: AuthContext,
     ) -> AnalysisExecutionResult: ...
+
+
+class AnalysisPlanRepository(Protocol):
+    """服务端可信计划源；首期不接受客户端计划正文。"""
+
+    async def get(
+        self,
+        *,
+        tenant_id: str,
+        user_id: str,
+        run_id: str,
+        plan_id: str,
+    ) -> AnalysisPlan | None: ...
 
 
 class AnalysisExecutionRejected(Exception):
@@ -63,6 +80,8 @@ class AnalysisPlanExecutor:
         catalog: SemanticCatalog,
         resolver: SemanticActionResolver,
         semantic_executor: SemanticToolExecutor,
+        planner: AnalysisPlanner,
+        plan_repository: AnalysisPlanRepository,
     ) -> None:
         self._catalog = catalog
         # 要求组合根显式传入与 SemanticToolExecutor 共用的 resolver。
@@ -72,16 +91,42 @@ class AnalysisPlanExecutor:
             raise ValueError("analysis executor resolver must share the catalog instance")
         if semantic_executor.resolver is not resolver:
             raise ValueError("analysis executor and semantic executor must share the same resolver")
+        if planner.catalog is not catalog:
+            raise ValueError("analysis executor and planner must share the same catalog")
         self._semantic_executor = semantic_executor
+        self._planner = planner
+        self._plan_repository = plan_repository
 
     async def execute(
         self,
-        plan: AnalysisPlan,
         *,
+        plan_id: str,
+        request_id: str,
         auth_context: AuthContext,
     ) -> AnalysisExecutionResult:
-        plan = self._revalidate_plan(plan)
+        loaded = await self._plan_repository.get(
+            tenant_id=auth_context.principal.tenant_id,
+            user_id=auth_context.principal.user_id,
+            run_id=auth_context.run_id,
+            plan_id=plan_id,
+        )
+        if loaded is None:
+            raise AnalysisExecutionRejected(
+                "PLAN_NOT_FOUND", "server-side analysis plan was not found"
+            )
+        plan = self._revalidate_plan(loaded)
+        if plan.plan_id != plan_id:
+            raise AnalysisExecutionRejected(
+                "PLAN_SOURCE_ID_MISMATCH",
+                "loaded plan id does not match the requested plan id",
+            )
+        if plan.request_id != request_id:
+            raise AnalysisExecutionRejected(
+                "PLAN_REQUEST_MISMATCH",
+                "loaded plan is not bound to this execution request",
+            )
         self._validate_plan_snapshot(plan)
+        self._validate_replanning(plan, auth_context=auth_context)
         semantic_arguments = {
             step.step_id: self._semantic_arguments(plan, step)
             for step in plan.steps
@@ -122,6 +167,27 @@ class AnalysisPlanExecutor:
             omissions=plan.omissions,
             tool_call_count=call_counter[0],
         )
+
+    def _validate_replanning(
+        self,
+        plan: AnalysisPlan,
+        *,
+        auth_context: AuthContext,
+    ) -> None:
+        expected = self._planner.plan(
+            AnalysisRequest(
+                request_id=plan.request_id,
+                goals=plan.goals,
+                scope_ref=plan.scope_ref,
+                budget=plan.constraints,
+            ),
+            authorization=SubjectAuthorization.from_auth_context(auth_context),
+        )
+        if expected != plan:
+            raise AnalysisExecutionRejected(
+                "PLAN_REPLANNING_MISMATCH",
+                "loaded plan differs from the current authorized deterministic plan",
+            )
 
     @staticmethod
     def _revalidate_plan(plan: AnalysisPlan) -> AnalysisPlan:

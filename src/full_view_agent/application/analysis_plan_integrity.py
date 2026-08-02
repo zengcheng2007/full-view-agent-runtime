@@ -1,4 +1,7 @@
-"""AnalysisPlan 指纹的唯一实现。"""
+"""AnalysisPlan 指纹的唯一实现。
+
+该 canonical SHA 是内容地址/幂等键，不是签名或授权凭据。
+"""
 
 from collections.abc import Sequence
 

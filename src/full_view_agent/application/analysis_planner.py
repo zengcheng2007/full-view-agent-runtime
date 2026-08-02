@@ -74,6 +74,11 @@ class AnalysisPlanner:
         self._catalog = catalog
         self._default_budget = default_budget or PlanBudget()
 
+    @property
+    def catalog(self) -> SemanticCatalog:
+        """只读暴露规划所用 Catalog，供组合根防止错接。"""
+        return self._catalog
+
     def plan(
         self,
         request: AnalysisRequest,

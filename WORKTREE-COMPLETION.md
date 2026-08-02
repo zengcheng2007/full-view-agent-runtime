@@ -265,8 +265,8 @@ including validation-bypass defense in depth and the unchanged production
 
 ## 验证证据
 
-- TDD 定向：`tests/test_analysis_executor.py` 21 项通过。
-- 全量：773 项收集，`uv run pytest -q` exit 0。
+- TDD 定向：`tests/test_analysis_executor.py` 31 项通过。
+- 全量：783 项收集，`uv run pytest -q` exit 0。
 - Ruff：通过。Pyright：`0 errors, 0 warnings`。Compileall：通过。
 
 ## 剩余接线点
@@ -289,3 +289,20 @@ including validation-bypass defense in depth and the unchanged production
 - 信任边界：首期 Plan 只能由服务端生成并按 ID 加载，后续 API
   不得接受客户端自报的 Plan 内容。Plan ID 是普通 canonical SHA，
   用于完整性检测，不是认证签名或授权凭据。
+
+## 第二轮审核退回修复
+
+- 公共端口已改为 `execute(plan_id, request_id, auth_context)`，不再接受
+  `AnalysisPlan` 正文。计划只能由构造注入的服务端
+  `AnalysisPlanRepository` 加载；本批仅定义应用端口，未越界实现 PG。
+- Repository 查询强制使用来自 `AuthContext` 的
+  `tenant_id + user_id + run_id + plan_id` 服务端命名空间；这些隔离字段
+  不由调用者单独传入。
+- 加载后先校验 repository 返回 ID 和运行 `request_id` 绑定，再执行
+  完整契约、指纹、Catalog/binding/scope 零调用门禁。
+- 执行器使用注入的同配置 `AnalysisPlanner` 和当前授权重建
+  `AnalysisRequest`，重新生成 expected plan，并对 steps、omissions、constraints
+  和 ID 整体比对。因此 overview 删减主题、伪造 omission 或重复主题
+  不能仅通过重算 SHA 放行。
+- 服务端 Planner 自身的 default budget 仍是上限；加载计划的 constraints
+  只能收紧，不能成为自报的信任上限。
