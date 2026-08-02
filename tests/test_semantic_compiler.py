@@ -150,7 +150,10 @@ def test_housing_lease_and_next_area_select_distinct_result_schemas(
     )
     assert lease.expected_result.row_fields == ("lease_type", "dwelling_count")
 
-    next_area = compiler.compile(
+    next_area_compiler = SemanticCompiler(
+        SemanticCatalog.default(housing_next_area_enabled=True)
+    )
+    next_area = next_area_compiler.compile(
         _population_spec(
             subject="housing",
             metrics=["dwelling_count"],

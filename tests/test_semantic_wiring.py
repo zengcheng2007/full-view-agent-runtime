@@ -7,6 +7,8 @@
 
 from __future__ import annotations
 
+from collections.abc import Callable
+
 import pytest
 
 from full_view_agent.application.context_builder import AgentContextBuilder
@@ -66,6 +68,43 @@ def _semantic_args(
             "group_by": [group_by],
             "output": output,
         }
+    }
+
+
+def _subject_auth(subject: str) -> AuthContext:
+    """按主题派生授权上下文：entitlement 与数据集跟随主题。"""
+    base = population_auth_context()
+    return base.model_copy(
+        update={
+            "entitlements": [f"governance.{subject}.aggregate.read"],
+            "data_scopes": base.data_scopes.model_copy(
+                update={"datasets": [subject]}
+            ),
+        }
+    )
+
+
+def _housing_args() -> dict[str, object]:
+    return {
+        "catalog_version": SemanticCatalog.default().catalog_version,
+        "catalog_fingerprint": SemanticCatalog.default().execution_fingerprint,
+        "spec": {
+            "subject": "housing",
+            "metrics": ["dwelling_count"],
+            "scope": {"area_code": "330106"},
+        },
+    }
+
+
+def _event_args() -> dict[str, object]:
+    return {
+        "catalog_version": SemanticCatalog.default().catalog_version,
+        "catalog_fingerprint": SemanticCatalog.default().execution_fingerprint,
+        "spec": {
+            "subject": "event",
+            "metrics": ["finish_rate"],
+            "scope": {"area_code": "330106"},
+        },
     }
 
 
@@ -154,7 +193,8 @@ async def _semantic_orchestrator(
     store = InMemoryAgentStore()
     events = InMemoryEventBroker()
     service = SessionRunService(store)
-    registry = ToolRegistry.default()
+    # 通用语义链路测试使用生产安全默认：住房 next_area 关闭。
+    registry = ToolRegistry.default(housing_next_area_enabled=False)
     stack = build_semantic_capability_stack(
         registry=registry,
         adapter=adapter or InMemoryGovernanceAdapter(),
@@ -196,9 +236,17 @@ def test_presenter_returns_none_without_population_authorization() -> None:
     assert presenter.present(auth_context=auth) is None
 
 
-def test_presenter_returns_none_for_unbindable_catalog_subjects_only() -> None:
-    # 仅有 housing 权限：Catalog 声明存在，但 S1-A 不绑定 → 不可见。
-    presenter = SemanticToolPresenter(catalog=SemanticCatalog.default())
+def test_presenter_returns_none_for_declared_but_unbound_subjects_only() -> None:
+    # 仅有 housing 权限：主题在 Catalog 声明但没有已验证能力绑定 →
+    # 可执行集合不含该主题，语义 Tool 对模型不可见（fail closed）。
+    base = SemanticCatalog.default()
+    partial = SemanticCatalog(
+        catalog_version=base.catalog_version,
+        supported_spec_versions=base.supported_spec_versions,
+        subjects=base.subjects,
+        bindings={"population": base.bindings["population"]},
+    )
+    presenter = SemanticToolPresenter(catalog=partial)
     auth = population_auth_context().model_copy(
         update={
             "entitlements": ["governance.housing.aggregate.read"],
@@ -219,7 +267,11 @@ def test_presenter_derives_description_from_catalog_not_handwritten_list() -> No
 
     assert presentation is not None
     assert presentation.tool_id == SEMANTIC_QUERY_TOOL_ID
+    # 所有已绑定主题都只通过统一语义入口对模型暴露；规范 Tool 仍保留在
+    # Registry/CapabilityService 内部供编译结果兼容执行。
     assert presentation.shadowed_tool_ids == (
+        "governance.query_event_metrics",
+        "governance.query_housing_metrics",
         "governance.query_population_metrics",
     )
     description = presentation.description
@@ -228,7 +280,7 @@ def test_presenter_derives_description_from_catalog_not_handwritten_list() -> No
     assert "population" in description
     assert "person_count" in description
     assert "solitary_elderly" in description
-    # 未绑定主题不宣称。
+    # 描述按本次授权过滤：仅人口授权时不宣称住房/事件能力。
     assert "housing" not in description
     assert "event" not in description
     # 物理实现不泄漏。
@@ -273,7 +325,16 @@ async def test_context_builder_advertises_semantic_tool_and_prompt_section() -> 
 
 
 @pytest.mark.asyncio
-async def test_context_builder_keeps_unmigrated_subject_tools_visible() -> None:
+async def test_context_builder_keeps_unbound_subject_tools_visible() -> None:
+    # 目录未绑定住房能力时：住房规范 Tool 保持可见（尚未被语义入口接管），
+    # 人口规范 Tool 由语义入口接管而隐藏；绑定增减驱动接管面，无需改代码。
+    base_catalog = SemanticCatalog.default()
+    partial = SemanticCatalog(
+        catalog_version=base_catalog.catalog_version,
+        supported_spec_versions=base_catalog.supported_spec_versions,
+        subjects=base_catalog.subjects,
+        bindings={"population": base_catalog.bindings["population"]},
+    )
     store = InMemoryAgentStore()
     service = SessionRunService(store)
     session = await service.create_session(user_id="user-mixed", title="混合主题")
@@ -297,7 +358,7 @@ async def test_context_builder_keeps_unmigrated_subject_tools_visible() -> None:
     request = await AgentContextBuilder(
         store=store,
         registry=ToolRegistry.default(),
-        semantic_presenter=SemanticToolPresenter(catalog=SemanticCatalog.default()),
+        semantic_presenter=SemanticToolPresenter(catalog=partial),
     ).build(
         user_id="user-mixed",
         auth_context=auth,
@@ -308,6 +369,97 @@ async def test_context_builder_keeps_unmigrated_subject_tools_visible() -> None:
     assert "governance.query_population_metrics" not in tool_ids
     assert "governance.query_housing_metrics" in tool_ids
     assert SEMANTIC_QUERY_TOOL_ID in tool_ids
+
+
+@pytest.mark.asyncio
+async def test_context_builder_shadows_all_bindable_canonical_tools() -> None:
+    # 全授权下，三个已绑定主题的规范 Tool 全部从模型面隐藏；统一语义
+    # 入口描述同时宣称三主题能力。
+    store = InMemoryAgentStore()
+    service = SessionRunService(store)
+    session = await service.create_session(user_id="user-all", title="全主题入口")
+    run = await service.create_run(
+        user_id="user-all", session_id=session.session_id, request=run_request()
+    )
+    base = population_auth_context()
+    auth = base.model_copy(
+        update={
+            "session_id": session.session_id,
+            "run_id": run.run_id,
+            "entitlements": [
+                "governance.area.read",
+                "governance.population.aggregate.read",
+                "governance.housing.aggregate.read",
+                "governance.event.aggregate.read",
+            ],
+            "data_scopes": base.data_scopes.model_copy(
+                update={
+                    "datasets": [
+                        "administrative_area",
+                        "population",
+                        "housing",
+                        "event",
+                    ]
+                }
+            ),
+        }
+    )
+    request = await AgentContextBuilder(
+        store=store,
+        registry=ToolRegistry.default(),
+        semantic_presenter=SemanticToolPresenter(catalog=SemanticCatalog.default()),
+    ).build(
+        user_id="user-all",
+        auth_context=auth,
+        state=HarnessState(),
+    )
+
+    tool_ids = [tool.tool_id for tool in request.tools]
+    assert SEMANTIC_QUERY_TOOL_ID in tool_ids
+    assert "governance.query_population_metrics" not in tool_ids
+    assert "governance.query_housing_metrics" not in tool_ids
+    assert "governance.query_event_metrics" not in tool_ids
+    # 语义入口描述宣称全部已绑定且已授权的主题（模型可见入口）。
+    prompt = request.messages[0].content
+    assert prompt is not None
+    for token in ("population", "housing", "event"):
+        assert token in prompt
+
+
+def test_presenter_description_advertises_all_authorized_bound_subjects() -> None:
+    # 模型可见入口：全授权时住房/事件/人口逐字段出现在语义入口描述中，
+    # 全部由 Catalog 派生，不手写能力清单。
+    base = population_auth_context()
+    auth = base.model_copy(
+        update={
+            "entitlements": [
+                "governance.population.aggregate.read",
+                "governance.housing.aggregate.read",
+                "governance.event.aggregate.read",
+            ],
+            "data_scopes": base.data_scopes.model_copy(
+                update={"datasets": ["population", "housing", "event"]}
+            ),
+        }
+    )
+    presentation = SemanticToolPresenter(catalog=SemanticCatalog.default()).present(
+        auth_context=auth
+    )
+
+    assert presentation is not None
+    description = presentation.description
+    for token in (
+        "population",
+        "person_count",
+        "housing",
+        "dwelling_count",
+        "event",
+        "finish_rate",
+    ):
+        assert token in description
+    # 物理实现不泄漏。
+    for token in ("getNextSiteData", "adapter://", "getRoomLeaseType"):
+        assert token not in description
 
 
 @pytest.mark.asyncio
@@ -525,6 +677,79 @@ async def test_semantic_query_without_map_capability_only_shows_table(
         if event.type == "frontend.command.requested"
     ]
     assert command_types == ["panel.show_table"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("args_builder", "subject", "canonical_tool", "metric"),
+    [
+        (
+            _housing_args,
+            "housing",
+            "governance.query_housing_metrics",
+            "dwelling_count",
+        ),
+        (
+            _event_args,
+            "event",
+            "governance.query_event_metrics",
+            "finish_rate",
+        ),
+    ],
+    ids=["housing", "event"],
+)
+async def test_housing_and_event_semantic_query_end_to_end_both_orchestrators(
+    orchestrator_type: type,
+    args_builder: Callable[[], dict[str, object]],
+    subject: str,
+    canonical_tool: str,
+    metric: str,
+) -> None:
+    # 住房/事件与人口走同一统一入口：Native 与 LangGraph 双编排器均须
+    # 解析到既有规范 Tool，落 Evidence 血缘，不产生第二份执行路径。
+    orch, store, events, run_id, _stack = await _semantic_orchestrator(
+        orchestrator_type=orchestrator_type,
+        planner=_SemanticPlanner([args_builder()]),
+        auth=_subject_auth(subject),
+    )
+
+    await orch.execute(user_id="user-semantic", run_id=run_id)
+
+    run = await store.get_run(user_id="user-semantic", run_id=run_id)
+    assert run.status == "completed"
+    assert run.outcome == "success"
+
+    published = await events.list_events(run_id=run_id)
+    types = [event.type for event in published]
+    assert "tool.completed" in types
+    assert "result.available" in types
+    assert "evidence.available" in types
+    started = next(event for event in published if event.type == "tool.started")
+    assert started.data["tool_id"] == SEMANTIC_QUERY_TOOL_ID
+
+    evidence_ids = sorted(store.evidence)
+    assert len(evidence_ids) == 1
+    evidence = await store.get_evidence(
+        user_id="user-semantic", evidence_id=evidence_ids[0]
+    )
+    assert evidence.dataset_id == subject
+    assert evidence.tool.tool_id == canonical_tool
+    assert [m.metric_id for m in evidence.metric_definitions] == [metric]
+    assert (
+        evidence.semantic_registry_version
+        == SemanticCatalog.default().catalog_version
+    )
+    assert evidence.effective_area_codes == ["330106"]
+
+    # 住房租赁汇总与事件办结率快照均为表格形态：仅发表格面板命令，
+    # 命令序列在两种编排器间一致（无固定地区名、无第二套命令路径）。
+    commands = [
+        event.data["command"]
+        for event in published
+        if event.type == "frontend.command.requested"
+    ]
+    assert [command["type"] for command in commands] == ["panel.show_table"]
+    assert commands[0]["preconditions"]["area_code"] == "330106"
 
 
 @pytest.mark.asyncio

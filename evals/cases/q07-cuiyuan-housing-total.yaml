@@ -6,6 +6,7 @@ auth:
   area_codes: ["3301"]
   datasets: [administrative_area, population, housing, event, governance_objects]
   entitlements: [governance.area.read, governance.population.aggregate.read, governance.housing.aggregate.read, governance.event.aggregate.read, governance.object.profile.read]
+  field_policy_set: governance_analyst_v1
 model_steps:
   - type: tool_call
     tool_id: governance.resolve_area
@@ -13,9 +14,11 @@ model_steps:
       query: 翠苑街道
       context_area_code: "330106"
   - type: tool_call
-    tool_id: governance.query_housing_metrics
+    tool_id: governance.semantic_query
     arguments:
-      query:
+      spec:
+        subject: housing
+        metrics: [dwelling_count]
         scope: {area_code: "330106001", include_descendants: true}
   - type: finish
     content: 翠苑街道出租房按类型汇总查询完成，已得出总量。
@@ -23,6 +26,6 @@ expected:
   terminal_status: completed
   outcome: success
   completion_reason_code: goal_completed
-  tool_ids: [governance.resolve_area, governance.query_housing_metrics]
+  tool_ids: [governance.resolve_area, governance.semantic_query]
   min_evidence_count: 0
   required_event_types: [tool.completed, result.available, run.completed]

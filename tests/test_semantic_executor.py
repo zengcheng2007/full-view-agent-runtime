@@ -207,38 +207,119 @@ async def test_executor_authorization_rejection_is_denied() -> None:
 
 
 @pytest.mark.asyncio
-async def test_executor_housing_subject_is_denied_entry_not_executed() -> None:
+@pytest.mark.parametrize(
+    ("subject", "metrics"),
+    [("housing", ["dwelling_count"]), ("event", ["finish_rate"])],
+)
+async def test_executor_resolves_housing_and_event_to_canonical_execution(
+    subject: str, metrics: list[str]
+) -> None:
+    canonical_tool = {
+        "housing": "governance.query_housing_metrics",
+        "event": "governance.query_event_metrics",
+    }[subject]
+    schema_ref = {
+        "housing": "schema://data/housing-lease-type-table/1.0.0",
+        "event": "schema://data/event-finish-rate-table/1.0.0",
+    }[subject]
     executor = _executor()
-    auth = population_auth_context().model_copy(
+    base = population_auth_context()
+    auth = base.model_copy(
         update={
-            "entitlements": [
-                "governance.population.aggregate.read",
-                "governance.housing.aggregate.read",
-            ],
-            "data_scopes": population_auth_context().data_scopes.model_copy(
-                update={"datasets": ["population", "housing"]}
+            "entitlements": [f"governance.{subject}.aggregate.read"],
+            "data_scopes": base.data_scopes.model_copy(
+                update={"datasets": [subject]}
             ),
         }
     )
 
     result = await executor.execute(
-        tool_call_id="tcl-housing",
+        tool_call_id=f"tcl-{subject}",
+        tool_id=SEMANTIC_QUERY_TOOL_ID,
+        raw_arguments=_semantic_args(
+            subject=subject, metrics=metrics, filters=[], group_by=[]
+        ),
+        auth_context=auth,
+    )
+
+    # 住房/事件与人口走同一执行链路：归属规范 Tool，携带语义血缘。
+    assert result.status == "success"
+    assert result.tool_id == canonical_tool
+    assert result.tool_version == "1.0.0"
+    assert result.data_result is not None
+    assert result.data_result.data_schema_ref == schema_ref
+    lineage = result.semantic_lineage
+    assert lineage is not None
+    assert lineage.subject == subject
+    assert lineage.canonical_tool_id == canonical_tool
+
+
+class _CountingAdapter(InMemoryGovernanceAdapter):
+    def __init__(self) -> None:
+        super().__init__()
+        self.calls = 0
+
+    async def execute(self, **kwargs: object) -> object:
+        self.calls += 1
+        return await super().execute(**kwargs)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("subject", "metrics"),
+    [("housing", ["dwelling_count"]), ("event", ["finish_rate"])],
+)
+async def test_executor_unbound_subject_is_failed_and_adapter_not_reached(
+    subject: str, metrics: list[str]
+) -> None:
+    # 声明存在但没有已验证能力绑定：语义层即 fail closed，不得触达 Adapter。
+    base = SemanticCatalog.default()
+    partial = SemanticCatalog(
+        catalog_version=base.catalog_version,
+        supported_spec_versions=base.supported_spec_versions,
+        subjects=base.subjects,
+        bindings={"population": base.bindings["population"]},
+    )
+    adapter = _CountingAdapter()
+    registry = ToolRegistry.default()
+    policy = MinimalPolicyAdapter()
+    executor = SemanticToolExecutor(
+        inner=CapabilityService(
+            registry=registry, policy=policy, adapter=adapter
+        ),
+        resolver=SemanticActionResolver(
+            catalog=partial, registry=registry, policy=policy
+        ),
+    )
+    auth_base = population_auth_context()
+    auth = auth_base.model_copy(
+        update={
+            "entitlements": [f"governance.{subject}.aggregate.read"],
+            "data_scopes": auth_base.data_scopes.model_copy(
+                update={"datasets": [subject]}
+            ),
+        }
+    )
+
+    result = await executor.execute(
+        tool_call_id=f"tcl-unbound-{subject}",
         tool_id=SEMANTIC_QUERY_TOOL_ID,
         raw_arguments={
-            "catalog_version": SemanticCatalog.default().catalog_version,
-            "catalog_fingerprint": SemanticCatalog.default().execution_fingerprint,
+            "catalog_version": partial.catalog_version,
+            "catalog_fingerprint": partial.execution_fingerprint,
             "spec": {
-                "subject": "housing",
-                "metrics": ["dwelling_count"],
+                "subject": subject,
+                "metrics": metrics,
                 "scope": {"area_code": "330106"},
-            }
+            },
         },
         auth_context=auth,
     )
 
-    # S1-A fail closed：housing 不绑定，且不得触达住房 Adapter。
     assert result.status == "failed"
     assert "SUBJECT_NOT_BINDABLE" in result.warnings
+    assert result.data_result is None
+    assert adapter.calls == 0
 
 
 @pytest.mark.asyncio

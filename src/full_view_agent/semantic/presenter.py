@@ -3,7 +3,8 @@
 ADR-05 要求 Tool 描述由经过权限过滤的 Catalog 能力生成，Prompt 不得
 手写一份容易漂移的能力清单。本模块按当前 AuthContext 派生
 ``ModelCapabilityView``（fail closed：无显式授权时没有任何主题可见），
-再与 S1-A 可绑定主题取交集；交集为空则虚拟 Tool 对模型不可见。
+再与 Catalog 绑定派生的可执行主题取交集；交集为空则虚拟 Tool 对模型
+不可见。
 
 描述文本中固定部分只有"如何使用语义入口"与层级编码通识；主题、指标、
 分组、筛选、输出形态全部逐字段从 Catalog 序列化，Catalog 能力变化时
@@ -14,7 +15,6 @@ from dataclasses import dataclass
 
 from full_view_agent.domain.models import AuthContext
 from full_view_agent.semantic.action_resolver import (
-    S1A_BINDABLE_SUBJECTS,
     SEMANTIC_QUERY_TOOL_ID,
     SEMANTIC_QUERY_TOOL_VERSION,
     SemanticQueryInput,
@@ -47,25 +47,29 @@ class SemanticToolPresenter:
         self,
         *,
         catalog: SemanticCatalog,
-        bindable_subjects: frozenset[str] = S1A_BINDABLE_SUBJECTS,
     ) -> None:
         self._catalog = catalog
-        self._bindable_subjects = frozenset(bindable_subjects)
+
+    @property
+    def _bindable_subjects(self) -> frozenset[str]:
+        """可执行主题：由 Catalog 能力绑定派生，无硬编码白名单。"""
+        return self._catalog.bindable_subject_ids()
 
     @property
     def shadowed_tool_ids(self) -> tuple[str, ...]:
         """Canonical Tools owned by this model-facing semantic entry.
 
-        Takeover is deployment configuration, not an authorization outcome.
-        Even when the current field policy cannot produce a semantic
-        presentation, these Tools must stay hidden from the model so an
-        incomplete authorization fails closed instead of bypassing Catalog.
+        Every bound subject is exposed to the model only through the semantic
+        entry. Canonical Tools remain registered and internally executable,
+        but are never advertised in parallel. This set is independent of the
+        current authorization so incomplete policy fails closed rather than
+        falling back to a bypass path.
         """
 
         return tuple(
             sorted(
                 binding.capability_id
-                for subject_id in self._bindable_subjects
+                for subject_id in self._catalog.bindable_subject_ids()
                 if (binding := self._catalog.binding(subject_id)) is not None
             )
         )

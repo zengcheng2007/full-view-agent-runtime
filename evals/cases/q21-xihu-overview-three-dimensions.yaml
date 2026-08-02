@@ -23,14 +23,18 @@ model_steps:
           - {field: person_category, operator: eq, value: solitary_elderly}
         group_by: [street]
   - type: tool_call
-    tool_id: governance.query_housing_metrics
+    tool_id: governance.semantic_query
     arguments:
-      query:
+      spec:
+        subject: housing
+        metrics: [dwelling_count]
         scope: {area_code: "330106", include_descendants: true}
   - type: tool_call
-    tool_id: governance.query_event_metrics
+    tool_id: governance.semantic_query
     arguments:
-      query:
+      spec:
+        subject: event
+        metrics: [finish_rate]
         scope: {area_code: "330106", include_descendants: true}
   - type: finish
     content: 西湖区总览已按用户约束裁剪为人口、房屋和事件三个维度。
@@ -41,7 +45,7 @@ expected:
   tool_ids:
     - governance.resolve_area
     - governance.semantic_query
-    - governance.query_housing_metrics
-    - governance.query_event_metrics
+    - governance.semantic_query
+    - governance.semantic_query
   min_evidence_count: 0
   required_event_types: [tool.completed, result.available, run.completed]

@@ -1,18 +1,23 @@
 """S1-A：governance.semantic_query 虚拟 Tool 的语义动作解析器。
 
-解析链路为 parse → S1-A 主题白名单（fail closed）→ 必填筛选强制 →
-Validator → Compiler → ExecutionGuard 生产 Policy 复核，成功时产出
-规范 ToolAction、SemanticPlan 与结果血缘。housing/event 仅保留 Catalog
-声明，本期禁止绑定；所有反例必须结构化拒绝，不得静默改写或放行。
+解析链路为 parse → Catalog 绑定派生的可执行主题（fail closed）→ 必填
+筛选强制 → Validator → Compiler → ExecutionGuard 生产 Policy 复核，成功
+时产出规范 ToolAction、SemanticPlan 与结果血缘。可执行主题没有硬编码
+白名单：人口、住房、事件均由 Catalog 能力绑定派生进入统一入口；声明
+存在但缺少绑定的主题结构化拒绝（``SUBJECT_NOT_BINDABLE``）。所有反例
+必须结构化拒绝，不得静默改写或放行。
 """
 
 import pytest
 
 from full_view_agent.application.policy import MinimalPolicyAdapter
 from full_view_agent.application.tool_registry import ToolRegistry
-from full_view_agent.domain.models import QueryPopulationMetricsInput
+from full_view_agent.domain.models import (
+    QueryEventMetricsInput,
+    QueryHousingMetricsInput,
+    QueryPopulationMetricsInput,
+)
 from full_view_agent.semantic.action_resolver import (
-    S1A_BINDABLE_SUBJECTS,
     SEMANTIC_QUERY_TOOL_ID,
     SEMANTIC_QUERY_TOOL_VERSION,
     DeniedSemanticAction,
@@ -35,6 +40,56 @@ def _resolver(
         registry=registry or ToolRegistry.default(),
         policy=MinimalPolicyAdapter(),
     )
+
+
+def _catalog_with_bindings(*subject_ids: str) -> SemanticCatalog:
+    """只保留指定主题能力绑定的目录：模拟绑定增减后的可执行集合。"""
+    base = SemanticCatalog.default()
+    return SemanticCatalog(
+        catalog_version=base.catalog_version,
+        supported_spec_versions=base.supported_spec_versions,
+        subjects=base.subjects,
+        bindings={
+            subject_id: base.bindings[subject_id] for subject_id in subject_ids
+        },
+    )
+
+
+def _auth_for(*subjects: str):
+    """按主题派生授权：entitlement 与数据集跟随主题集合。"""
+    base = population_auth_context()
+    return base.model_copy(
+        update={
+            "entitlements": [
+                f"governance.{subject}.aggregate.read" for subject in subjects
+            ],
+            "data_scopes": base.data_scopes.model_copy(
+                update={"datasets": list(subjects)}
+            ),
+        }
+    )
+
+
+def _subject_args(
+    subject: str,
+    *,
+    metrics: list[str],
+    area_code: str = "330106",
+    group_by: list[str] | None = None,
+    catalog: SemanticCatalog | None = None,
+) -> dict[str, object]:
+    """构造 semantic_query 原始参数；版本与指纹钉扎到给定目录。"""
+    effective = catalog or SemanticCatalog.default()
+    return {
+        "catalog_version": effective.catalog_version,
+        "catalog_fingerprint": effective.execution_fingerprint,
+        "spec": {
+            "subject": subject,
+            "metrics": metrics,
+            "scope": {"area_code": area_code},
+            "group_by": group_by or [],
+        },
+    }
 
 
 def _population_spec(**spec_overrides: object) -> dict[str, object]:
@@ -170,33 +225,268 @@ def test_resolver_different_specs_produce_different_fingerprints() -> None:
 
 
 # ---------------------------------------------------------------------------
-# Fail closed：S1-A 只绑定 population；housing/event 拒绝解析
+# 可执行主题：由 Catalog 能力绑定派生（无硬编码白名单）
 # ---------------------------------------------------------------------------
 
 
-def test_s1a_allowlist_only_binds_population() -> None:
-    assert frozenset({"population"}) == S1A_BINDABLE_SUBJECTS
+def test_resolver_bindable_subjects_derive_from_catalog_bindings() -> None:
+    # 默认目录三主题均有已验证绑定 → 全部进入统一语义入口。
+    assert _resolver().bindable_subjects == frozenset(
+        {"event", "housing", "population"}
+    )
+    # 绑定收缩 → 可执行集合同步收缩，无需改任何白名单常量。
+    partial = _catalog_with_bindings("population")
+    assert _resolver(catalog=partial).bindable_subjects == frozenset(
+        {"population"}
+    )
 
 
-@pytest.mark.parametrize("subject", ["housing", "event"])
-def test_resolver_rejects_catalog_subjects_outside_s1a_allowlist(subject: str) -> None:
+# ---------------------------------------------------------------------------
+# 成功路径：housing / event 与 population 走同一解析链路
+# ---------------------------------------------------------------------------
+
+
+def test_resolver_compiles_housing_lease_spec_to_canonical_tool_action() -> None:
     resolution = _resolver().resolve(
-        {
-            "catalog_version": SemanticCatalog.default().catalog_version,
-            "catalog_fingerprint": SemanticCatalog.default().execution_fingerprint,
-            "spec": {
-                "subject": subject,
-                "metrics": ["dwelling_count"],
-                "scope": {"area_code": "330106"},
-            }
-        },
-        auth_context=population_auth_context(),
+        _subject_args("housing", metrics=["dwelling_count"]),
+        auth_context=_auth_for("housing"),
+    )
+
+    assert isinstance(resolution, ResolvedSemanticAction)
+    action = resolution.canonical_action
+    assert action.tool_id == "governance.query_housing_metrics"
+    QueryHousingMetricsInput.model_validate(action.arguments)
+    assert resolution.lineage.subject == "housing"
+    assert resolution.lineage.logical_dataset_id == "housing"
+    assert resolution.lineage.canonical_tool_id == "governance.query_housing_metrics"
+    assert resolution.recheck is not None
+    assert resolution.recheck.allowed is True
+
+
+def test_resolver_compiles_housing_next_area_spec_to_canonical_tool_action() -> None:
+    # 区域按直接下级区划汇总（门禁开启时）同样进入统一入口。
+    catalog = SemanticCatalog.default(housing_next_area_enabled=True)
+    resolution = _resolver(catalog=catalog).resolve(
+        _subject_args(
+            "housing",
+            metrics=["dwelling_count"],
+            group_by=["next_area"],
+            catalog=catalog,
+        ),
+        auth_context=_auth_for("housing"),
+    )
+
+    assert isinstance(resolution, ResolvedSemanticAction)
+    validated = QueryHousingMetricsInput.model_validate(
+        resolution.canonical_action.arguments
+    )
+    assert validated.query.group_by == ["next_area"]
+
+
+def test_resolver_compiles_event_snapshot_spec_to_canonical_tool_action() -> None:
+    resolution = _resolver().resolve(
+        _subject_args("event", metrics=["finish_rate"]),
+        auth_context=_auth_for("event"),
+    )
+
+    assert isinstance(resolution, ResolvedSemanticAction)
+    action = resolution.canonical_action
+    assert action.tool_id == "governance.query_event_metrics"
+    QueryEventMetricsInput.model_validate(action.arguments)
+    query = action.arguments["query"]
+    assert isinstance(query, dict)
+    # 事件三层办结率快照：参数不得携带 group_by/filters 等未验证语义。
+    assert "group_by" not in query
+    assert "filters" not in query
+    assert resolution.lineage.subject == "event"
+    assert resolution.lineage.canonical_tool_id == "governance.query_event_metrics"
+    assert resolution.recheck is not None
+    assert resolution.recheck.allowed is True
+
+
+# ---------------------------------------------------------------------------
+# Fail closed：声明存在但无能力绑定 → SUBJECT_NOT_BINDABLE，不执行
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    ("subject", "metrics"),
+    [("housing", ["dwelling_count"]), ("event", ["finish_rate"])],
+)
+def test_resolver_rejects_declared_subject_without_capability_binding(
+    subject: str, metrics: list[str]
+) -> None:
+    partial = _catalog_with_bindings("population")
+    resolution = _resolver(catalog=partial).resolve(
+        _subject_args(subject, metrics=metrics, catalog=partial),
+        auth_context=_auth_for(subject),
     )
 
     assert isinstance(resolution, RejectedSemanticAction)
     assert "SUBJECT_NOT_BINDABLE" in resolution.codes
     assert subject in resolution.user_message
     assert resolution.is_authorization_denial is False
+
+
+# ---------------------------------------------------------------------------
+# 事件受控边界：不得虚构时间、阈值、总量或下级区划
+# ---------------------------------------------------------------------------
+
+
+def test_resolver_rejects_event_time_range_as_unsupported() -> None:
+    arguments = _subject_args("event", metrics=["finish_rate"])
+    spec = arguments["spec"]
+    assert isinstance(spec, dict)
+    spec["time_range"] = {"start": "2026-01-01", "end": "2026-06-30"}
+
+    resolution = _resolver().resolve(arguments, auth_context=_auth_for("event"))
+
+    assert isinstance(resolution, RejectedSemanticAction)
+    assert "TIME_RANGE_UNSUPPORTED" in resolution.codes
+
+
+@pytest.mark.parametrize("metric", ["event_count", "finish_count", "total_count"])
+def test_resolver_rejects_event_total_or_volume_metrics(metric: str) -> None:
+    resolution = _resolver().resolve(
+        _subject_args("event", metrics=[metric]),
+        auth_context=_auth_for("event"),
+    )
+
+    assert isinstance(resolution, RejectedSemanticAction)
+    assert "UNKNOWN_METRIC" in resolution.codes
+
+
+def test_resolver_rejects_event_threshold_filter() -> None:
+    arguments = _subject_args("event", metrics=["finish_rate"])
+    spec = arguments["spec"]
+    assert isinstance(spec, dict)
+    spec["filters"] = [{"field": "finish_rate", "operator": "lt", "value": 60}]
+
+    resolution = _resolver().resolve(arguments, auth_context=_auth_for("event"))
+
+    assert isinstance(resolution, RejectedSemanticAction)
+    assert "INVALID_FILTER_FIELD" in resolution.codes
+
+
+@pytest.mark.parametrize("dimension", ["next_area", "street", "grid"])
+def test_resolver_rejects_event_sub_area_grouping(dimension: str) -> None:
+    resolution = _resolver().resolve(
+        _subject_args("event", metrics=["finish_rate"], group_by=[dimension]),
+        auth_context=_auth_for("event"),
+    )
+
+    assert isinstance(resolution, RejectedSemanticAction)
+    assert "INVALID_GROUP_BY" in resolution.codes
+
+
+# ---------------------------------------------------------------------------
+# 住房部署门禁：next_area 关闭时仅区域自身租赁汇总合法
+# ---------------------------------------------------------------------------
+
+
+def test_resolver_rejects_housing_next_area_when_deployment_gate_closed() -> None:
+    gated = SemanticCatalog.default(housing_next_area_enabled=False)
+    resolver = _resolver(catalog=gated)
+
+    next_area = resolver.resolve(
+        _subject_args(
+            "housing",
+            metrics=["dwelling_count"],
+            group_by=["next_area"],
+            catalog=gated,
+        ),
+        auth_context=_auth_for("housing"),
+    )
+    assert isinstance(next_area, RejectedSemanticAction)
+    assert "INVALID_GROUP_BY" in next_area.codes
+
+    lease_self = resolver.resolve(
+        _subject_args("housing", metrics=["dwelling_count"], catalog=gated),
+        auth_context=_auth_for("housing"),
+    )
+    assert isinstance(lease_self, ResolvedSemanticAction)
+
+
+# ---------------------------------------------------------------------------
+# 授权反例：住房/事件越权主题与越权区域按 denied 归类
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    ("subject", "metrics"),
+    [("housing", ["dwelling_count"]), ("event", ["finish_rate"])],
+)
+def test_resolver_denies_housing_and_event_without_entitlement(
+    subject: str, metrics: list[str]
+) -> None:
+    # 仅人口授权：住房/事件主题按权限拒绝，不按语义失败。
+    resolution = _resolver().resolve(
+        _subject_args(subject, metrics=metrics),
+        auth_context=population_auth_context(),
+    )
+
+    assert isinstance(resolution, RejectedSemanticAction)
+    assert "SUBJECT_NOT_ENTITLED" in resolution.codes
+    assert resolution.is_authorization_denial is True
+
+
+@pytest.mark.parametrize(
+    ("subject", "metrics"),
+    [("housing", ["dwelling_count"]), ("event", ["finish_rate"])],
+)
+def test_resolver_denies_housing_and_event_area_out_of_scope(
+    subject: str, metrics: list[str]
+) -> None:
+    # 授权 330106（西湖区），请求 330108（滨江区）。
+    resolution = _resolver().resolve(
+        _subject_args(subject, metrics=metrics, area_code="330108"),
+        auth_context=_auth_for(subject),
+    )
+
+    assert isinstance(resolution, RejectedSemanticAction)
+    assert "AREA_OUT_OF_SCOPE" in resolution.codes
+    assert resolution.is_authorization_denial is True
+
+
+# ---------------------------------------------------------------------------
+# 确定性：住房/事件同义 spec 收敛到同一规范动作与指纹
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    ("subject", "metric"),
+    [("housing", "dwelling_count"), ("event", "finish_rate")],
+)
+def test_resolver_synonymous_specs_converge_to_same_canonical_action(
+    subject: str, metric: str
+) -> None:
+    resolver = _resolver()
+    auth = _auth_for(subject)
+    first = resolver.resolve(
+        _subject_args(subject, metrics=[metric]), auth_context=auth
+    )
+    # 键序不同、显式默认值（output/limit/空集合）与省略默认值同义。
+    synonym = {
+        "catalog_version": SemanticCatalog.default().catalog_version,
+        "catalog_fingerprint": SemanticCatalog.default().execution_fingerprint,
+        "spec": {
+            "group_by": [],
+            "filters": [],
+            "order_by": [],
+            "output": "table",
+            "limit": 200,
+            "scope": {"include_descendants": True, "area_code": "330106"},
+            "metrics": [metric],
+            "subject": subject,
+        },
+    }
+    second = resolver.resolve(synonym, auth_context=auth)
+
+    assert isinstance(first, ResolvedSemanticAction)
+    assert isinstance(second, ResolvedSemanticAction)
+    assert first.lineage.spec_fingerprint == second.lineage.spec_fingerprint
+    assert first.lineage.plan_fingerprint == second.lineage.plan_fingerprint
+    assert first.canonical_action == second.canonical_action
 
 
 def test_resolver_rejects_unknown_subject_with_catalog_violation() -> None:

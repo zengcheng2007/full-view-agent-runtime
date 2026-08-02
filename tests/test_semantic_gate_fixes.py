@@ -225,7 +225,7 @@ def test_resolver_rejects_unversioned_metric_definition_drift() -> None:
 
 @pytest.mark.asyncio
 async def test_semantic_area_denial_enters_canonical_denial_ledger() -> None:
-    registry = ToolRegistry.default()
+    registry = ToolRegistry.default(housing_next_area_enabled=False)
     ledger = InMemoryDenialLedger()
     stack = build_semantic_capability_stack(
         registry=registry,
@@ -305,7 +305,7 @@ async def test_semantic_area_denial_enters_canonical_denial_ledger() -> None:
 async def test_semantic_subject_denials_enter_canonical_ledger(
     auth_update: dict[str, object],
 ) -> None:
-    registry = ToolRegistry.default()
+    registry = ToolRegistry.default(housing_next_area_enabled=False)
     ledger = InMemoryDenialLedger()
     stack = build_semantic_capability_stack(
         registry=registry,
@@ -346,7 +346,7 @@ async def test_semantic_subject_denials_enter_canonical_ledger(
 
 @pytest.mark.asyncio
 async def test_non_authorization_semantic_failure_does_not_pollute_ledger() -> None:
-    registry = ToolRegistry.default()
+    registry = ToolRegistry.default(housing_next_area_enabled=False)
     ledger = InMemoryDenialLedger()
     stack = build_semantic_capability_stack(
         registry=registry,

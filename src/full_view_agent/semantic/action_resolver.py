@@ -8,8 +8,9 @@ CapabilityService 之前先经本解析器把它编译为规范 ToolAction。
 
 1. 结构解析：``{"spec": SemanticQuerySpec}``，物理命名注入在 Schema 层
    即被 pydantic 拒绝，归一为 ``SEMANTIC_INPUT_INVALID``；
-2. S1-A 主题白名单：本期只绑定已真实闭环的 population；housing/event
-   保留 Catalog 声明但拒绝解析（``SUBJECT_NOT_BINDABLE``）；
+2. 可执行主题：由 Catalog 能力绑定派生（``bindable_subject_ids``），
+   没有硬编码主题白名单；人口、住房、事件走同一入口，声明存在但缺少
+   已验证绑定的主题结构化拒绝（``SUBJECT_NOT_BINDABLE``）；
 3. 必填筛选强制：Catalog 声明的 ``required_filters`` 缺失即拒绝
    （``REQUIRED_FILTER_MISSING``），不让无筛选查询打到真实 Adapter
    白名单后才失败；
@@ -60,10 +61,6 @@ from full_view_agent.semantic.validator import (
 
 SEMANTIC_QUERY_TOOL_ID = "governance.semantic_query"
 SEMANTIC_QUERY_TOOL_VERSION = "1.0.0"
-
-# S1-A 只绑定真实已闭环的独居老人（population）纵向切片；housing/event
-# 仅有 Catalog 声明，解析层禁止绑定（见《16》S1 与《19》并行计划）。
-S1A_BINDABLE_SUBJECTS: frozenset[str] = frozenset({"population"})
 
 # 授权类违规码：拒绝结果按 denied 归类并进入拒绝审计语义；
 # 其余语义错误按 failed 归类，模型可修正 spec 后重试。
@@ -145,7 +142,6 @@ class SemanticActionResolver:
         validator: SemanticValidator | None = None,
         compiler: SemanticCompiler | None = None,
         guard: ExecutionGuard | None = None,
-        bindable_subjects: frozenset[str] = S1A_BINDABLE_SUBJECTS,
     ) -> None:
         self._catalog = catalog
         self._validator = validator or SemanticValidator(catalog)
@@ -153,7 +149,6 @@ class SemanticActionResolver:
         self._guard = guard or ExecutionGuard(
             catalog=catalog, registry=registry, policy=policy
         )
-        self._bindable_subjects = frozenset(bindable_subjects)
 
     @property
     def catalog(self) -> SemanticCatalog:
@@ -161,7 +156,8 @@ class SemanticActionResolver:
 
     @property
     def bindable_subjects(self) -> frozenset[str]:
-        return frozenset(self._bindable_subjects)
+        """可执行主题：由 Catalog 能力绑定派生，无硬编码白名单。"""
+        return self._catalog.bindable_subject_ids()
 
     def compile_action(
         self,
@@ -169,7 +165,7 @@ class SemanticActionResolver:
         *,
         auth_context: AuthContext,
     ) -> ResolvedSemanticAction | RejectedSemanticAction:
-        """parse → 白名单 → 必填筛选 → Validator → Compiler（不含 Policy）。
+        """parse → 可执行主题 → 必填筛选 → Validator → Compiler（不含 Policy）。
 
         供执行链路与循环指纹共用：指纹只需要规范动作的确定性，
         不评估 Policy（Policy 决策含时间边界，与指纹稳定性无关）。
@@ -196,12 +192,12 @@ class SemanticActionResolver:
             )
 
         subject = self._catalog.subject(spec.subject)
-        if subject is not None and spec.subject not in self._bindable_subjects:
+        if subject is not None and spec.subject not in self.bindable_subjects:
             return RejectedSemanticAction(
                 codes=("SUBJECT_NOT_BINDABLE",),
                 user_message=(
-                    f"业务主题 {spec.subject} 已在语义目录声明，但当前阶段"
-                    f"语义查询入口仅绑定 {sorted(self._bindable_subjects)}；"
+                    f"业务主题 {spec.subject} 已在语义目录声明，但当前没有"
+                    "已验证的能力绑定，语义查询入口不予执行；"
                     "该主题请继续使用其专用 Tool。"
                 ),
             )

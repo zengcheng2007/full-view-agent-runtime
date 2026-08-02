@@ -424,7 +424,8 @@ async def test_production_wiring_housing_lease_type_over_http(
         "areaName": ["county_code"],
         "areaCode": ["330106"],
     }
-    assert "governance.query_housing_metrics" in trace.model_requests[0].tool_ids
+    assert "governance.semantic_query" in trace.model_requests[0].tool_ids
+    assert "governance.query_housing_metrics" not in trace.model_requests[0].tool_ids
     assert len(trace.evidence_ids) >= 2
     serialized = trace.model_dump_json()
     assert "test-geo-token" not in serialized
@@ -464,7 +465,8 @@ async def test_production_wiring_housing_next_area_over_http(
         "areaCode": ["330106"],
         "tableName": ["base_room_lease"],
     }
-    assert "governance.query_housing_metrics" in trace.model_requests[0].tool_ids
+    assert "governance.semantic_query" in trace.model_requests[0].tool_ids
+    assert "governance.query_housing_metrics" not in trace.model_requests[0].tool_ids
     serialized = trace.model_dump_json()
     assert "test-geo-token" not in serialized
     next_area_requests = [
@@ -503,7 +505,8 @@ async def test_production_wiring_event_finish_rate_over_http(
         "areaCodeName": ["county_code"],
         "areaCodeValue": ["330106"],
     }
-    assert "governance.query_event_metrics" in trace.model_requests[0].tool_ids
+    assert "governance.semantic_query" in trace.model_requests[0].tool_ids
+    assert "governance.query_event_metrics" not in trace.model_requests[0].tool_ids
     assert len(trace.evidence_ids) >= 2
     serialized = trace.model_dump_json()
     model_surface = json.dumps(

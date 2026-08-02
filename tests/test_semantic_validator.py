@@ -34,7 +34,10 @@ FULL_AUTH = SubjectAuthorization(
 
 @pytest.fixture
 def validator() -> SemanticValidator:
-    return SemanticValidator(SemanticCatalog.default())
+    # 正向 next_area 用例只在显式开启部署门禁的目录上运行。
+    return SemanticValidator(
+        SemanticCatalog.default(housing_next_area_enabled=True)
+    )
 
 
 def _spec(**overrides: object) -> SemanticQuerySpec:
@@ -177,6 +180,30 @@ def test_housing_next_area_rejects_grid_scope(validator: SemanticValidator) -> N
     )
 
 
+def test_housing_next_area_rejected_when_deployment_gate_closed() -> None:
+    # 部署门禁关闭 next_area 时，Catalog 不声明该分组，Validator 必须拒绝；
+    # 区域自身按租赁类型汇总（无 group_by）仍为唯一合法住房查询。
+    gated = SemanticValidator(
+        SemanticCatalog.default(housing_next_area_enabled=False)
+    )
+    next_area = gated.validate(
+        _spec(
+            subject="housing",
+            metrics=["dwelling_count"],
+            filters=[],
+            group_by=["next_area"],
+        ),
+        authorization=FULL_AUTH,
+    )
+    assert ViolationCode.INVALID_GROUP_BY in _codes(next_area)
+
+    lease_self = gated.validate(
+        _spec(subject="housing", metrics=["dwelling_count"], filters=[], group_by=[]),
+        authorization=FULL_AUTH,
+    )
+    assert lease_self.is_valid, lease_self.violations
+
+
 # ---------------------------------------------------------------------------
 # 区划编码结构校验（QuerySpec 边界，先于主题语义）
 # ---------------------------------------------------------------------------
@@ -260,6 +287,89 @@ def test_event_rejects_any_group_by(validator: SemanticValidator) -> None:
         )
     )
     assert ViolationCode.INVALID_GROUP_BY in _codes(report)
+
+
+# ---------------------------------------------------------------------------
+# 事件受控边界：不得虚构时间、阈值、总量或下级区划
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("metric", ["event_count", "finish_count", "total_count"])
+def test_event_rejects_total_or_volume_metrics(
+    validator: SemanticValidator, metric: str
+) -> None:
+    # 真实接口只返回三层办结率：任何总量/办结数指标都是虚构，必须拒绝。
+    report = validator.validate(
+        _spec(subject="event", metrics=[metric], filters=[], group_by=[])
+    )
+    assert ViolationCode.UNKNOWN_METRIC in _codes(report)
+
+
+@pytest.mark.parametrize("dimension", ["next_area", "street", "grid"])
+def test_event_rejects_sub_area_group_dimensions(
+    validator: SemanticValidator, dimension: str
+) -> None:
+    # 事件只有区域自身快照：任何下级区划分组都是虚构，必须拒绝。
+    report = validator.validate(
+        _spec(
+            subject="event",
+            metrics=["finish_rate"],
+            filters=[],
+            group_by=[dimension],
+        )
+    )
+    assert ViolationCode.INVALID_GROUP_BY in _codes(report)
+
+
+@pytest.mark.parametrize(
+    ("subject", "metrics"),
+    [("housing", ["dwelling_count"]), ("event", ["finish_rate"])],
+)
+def test_housing_and_event_reject_time_range(
+    validator: SemanticValidator, subject: str, metrics: list[str]
+) -> None:
+    report = validator.validate(
+        _spec(
+            subject=subject,
+            metrics=metrics,
+            filters=[],
+            group_by=[],
+            time_range={"start": "2026-01-01", "end": "2026-06-30"},
+        )
+    )
+    assert ViolationCode.TIME_RANGE_UNSUPPORTED in _codes(report)
+
+
+# ---------------------------------------------------------------------------
+# 开放表达：同义结构在受控 Schema 层收敛为同一语义
+# ---------------------------------------------------------------------------
+
+
+def test_synonymous_spec_forms_validate_to_identical_model() -> None:
+    # 键序不同、显式默认值（output/limit/空集合）与省略默认值同义：
+    # 不同开放表达进入统一入口后不得产生语义差异。
+    explicit = SemanticQuerySpec.model_validate(
+        {
+            "schema_version": "s0.1",
+            "subject": "housing",
+            "metrics": ["dwelling_count"],
+            "scope": {"area_code": "330106", "include_descendants": True},
+            "group_by": [],
+            "filters": [],
+            "order_by": [],
+            "limit": 200,
+            "output": "table",
+        }
+    )
+    reordered = SemanticQuerySpec.model_validate(
+        {
+            "output": "table",
+            "scope": {"include_descendants": True, "area_code": "330106"},
+            "metrics": ["dwelling_count"],
+            "subject": "housing",
+        }
+    )
+    assert explicit.model_dump() == reordered.model_dump()
 
 
 # ---------------------------------------------------------------------------

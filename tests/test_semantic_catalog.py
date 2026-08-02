@@ -25,6 +25,7 @@ from full_view_agent.infrastructure.governance_adapter import (
     _validate_solitary_elderly_query,
 )
 from full_view_agent.semantic import (
+    CapabilityBinding,
     SemanticCatalog,
     SemanticFilter,
     SemanticQuerySpec,
@@ -65,7 +66,9 @@ FULL_AUTH = SubjectAuthorization(
 
 @pytest.fixture
 def catalog() -> SemanticCatalog:
-    return SemanticCatalog.default()
+    # 本 fixture 验证完整已部署能力；next_area 必须显式开启，避免测试
+    # 无意中改变生产默认门禁。
+    return SemanticCatalog.default(housing_next_area_enabled=True)
 
 
 # ---------------------------------------------------------------------------
@@ -129,6 +132,17 @@ def test_housing_only_declares_lease_summary_and_next_area(
     }
 
 
+def test_default_catalog_keeps_housing_next_area_gate_closed() -> None:
+    catalog = SemanticCatalog.default()
+    housing = catalog.require_subject("housing")
+
+    assert housing.group_by_rules == ()
+    assert housing.max_group_by == 0
+    assert [shape.shape_id for shape in housing.result_shapes] == [
+        "housing_lease_type_table"
+    ]
+
+
 def test_event_only_declares_three_level_finish_rate_snapshot(
     catalog: SemanticCatalog,
 ) -> None:
@@ -152,6 +166,59 @@ def test_result_schemas_are_distinct_per_subject(catalog: SemanticCatalog) -> No
         for shape in catalog.require_subject(subject_id).result_shapes
     }
     assert len(refs) == 4
+
+
+# ---------------------------------------------------------------------------
+# 可执行主题：由内部能力绑定派生，而非硬编码白名单
+# ---------------------------------------------------------------------------
+
+
+def test_bindable_subject_ids_derive_from_capability_bindings(
+    catalog: SemanticCatalog,
+) -> None:
+    # 三个主题均存在已验证能力绑定 → 均可进入语义入口解析链路。
+    assert catalog.bindable_subject_ids() == frozenset(
+        {"event", "housing", "population"}
+    )
+
+
+def test_bindable_subject_ids_follow_binding_subset() -> None:
+    base = SemanticCatalog.default()
+    partial = SemanticCatalog(
+        catalog_version=base.catalog_version,
+        supported_spec_versions=base.supported_spec_versions,
+        subjects=base.subjects,
+        bindings={"population": base.bindings["population"]},
+    )
+
+    # 声明存在但没有绑定的主题（housing/event）不在可执行集合内。
+    assert partial.bindable_subject_ids() == frozenset({"population"})
+
+
+def test_gate_closed_housing_stays_bindable_without_next_area() -> None:
+    # 部署门禁关闭 next_area 只移除分组声明，不等于撤销主题能力绑定：
+    # 住房区域自身租赁汇总仍是已验证能力，主题保持在可执行集合内。
+    gated = SemanticCatalog.default(housing_next_area_enabled=False)
+    assert "housing" in gated.bindable_subject_ids()
+    assert gated.require_subject("housing").group_by_rules == ()
+    assert gated.require_subject("housing").max_group_by == 0
+
+
+# ---------------------------------------------------------------------------
+# 模型面入口唯一性：绑定即由统一语义入口承载
+# ---------------------------------------------------------------------------
+
+
+def test_capability_binding_has_no_model_takeover_fork() -> None:
+    with pytest.raises(ValidationError):
+        CapabilityBinding.model_validate(
+            {
+                "capability_id": "governance.query_population_metrics",
+                "capability_version": "1.0.0",
+                "adapter_ref": "adapter://test/population",
+                "model_takeover": True,
+            }
+        )
 
 
 # ---------------------------------------------------------------------------

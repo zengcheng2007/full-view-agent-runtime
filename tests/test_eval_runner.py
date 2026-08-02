@@ -601,7 +601,10 @@ async def test_housing_fault_gate_fails_once_before_business_adapter(
     assert trace.terminal_status == "failed"
     assert trace.outcome == "failed"
     assert trace.completion_reason_code == reason_code
-    assert trace.tool_ids.count("governance.query_housing_metrics") == 1
+    # 模型只调用统一语义入口；内部仍编译到住房规范 Tool，并在故障注入
+    # 层命中一次后停止，不能通过重新暴露规范 Tool 绕过语义门禁。
+    assert trace.tool_ids.count("governance.semantic_query") == 1
+    assert "governance.query_housing_metrics" not in trace.tool_ids
     assert trace.event_types.count("tool.failed") == 1
     assert "result.available" not in trace.event_types
     assert "evidence.available" not in trace.event_types

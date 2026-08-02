@@ -10,7 +10,6 @@
 
 from full_view_agent.semantic.action_resolver import (
     AUTHORIZATION_VIOLATION_CODES,
-    S1A_BINDABLE_SUBJECTS,
     SEMANTIC_QUERY_TOOL_ID,
     SEMANTIC_QUERY_TOOL_VERSION,
     DeniedSemanticAction,
@@ -67,7 +66,6 @@ from full_view_agent.semantic.validator import (
 
 __all__ = [
     "AUTHORIZATION_VIOLATION_CODES",
-    "S1A_BINDABLE_SUBJECTS",
     "SEMANTIC_CATALOG_VERSION",
     "SEMANTIC_QUERY_TOOL_ID",
     "SEMANTIC_QUERY_TOOL_VERSION",

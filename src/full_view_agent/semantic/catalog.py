@@ -17,6 +17,14 @@ Catalog 只声明当前生产 HTTP Adapter 已逐项验证的能力，证据来�
 可见性除授权面/数据集/字段策略外，还要求授权区域至少存在一个可支持
 的 scope（授权区域本级在主题 scope_levels，或含下级且其下存在受支持
 层级），避免模型看到无法真正查询的主题。
+
+可执行主题（``bindable_subject_ids``）同样由 Catalog 派生：只有在目录
+声明且存在已验证能力绑定的主题才能进入语义入口解析链路。没有硬编码
+主题白名单——绑定增减时可执行集合随之变化；声明存在但缺少绑定的主题
+由解析层结构化拒绝（``SUBJECT_NOT_BINDABLE``），不被执行。
+
+已绑定主题统一由 ``semantic_query`` 面向模型承载；规范 Tool 继续保留在
+内部 Registry/CapabilityService，供语义编译结果兼容执行，但不并行暴露。
 """
 
 from collections.abc import Mapping
@@ -196,7 +204,7 @@ def _population() -> SubjectDefinition:
     )
 
 
-def _housing(*, next_area_enabled: bool = True) -> SubjectDefinition:
+def _housing(*, next_area_enabled: bool = False) -> SubjectDefinition:
     return SubjectDefinition(
         subject_id="housing",
         display_name="出租房指标",
@@ -269,8 +277,6 @@ def _event() -> SubjectDefinition:
     )
 
 
-_DEFAULT_SUBJECTS: tuple[SubjectDefinition, ...] = (_population(), _housing(), _event())
-
 _DEFAULT_BINDINGS: tuple[tuple[str, CapabilityBinding], ...] = (
     (
         "population",
@@ -323,7 +329,7 @@ class SemanticCatalog:
 
     @classmethod
     def default(
-        cls, *, housing_next_area_enabled: bool = True
+        cls, *, housing_next_area_enabled: bool = False
     ) -> "SemanticCatalog":
         subjects = (_population(), _housing(
             next_area_enabled=housing_next_area_enabled
@@ -373,6 +379,15 @@ class SemanticCatalog:
 
     def subject_ids(self) -> list[str]:
         return sorted(self._subjects)
+
+    def bindable_subject_ids(self) -> frozenset[str]:
+        """可执行主题集合：由声明主题与已验证能力绑定取交集派生。
+
+        没有硬编码主题白名单：绑定增减时可执行集合随之变化。声明存在
+        但缺少绑定的主题不在集合内，由解析层结构化拒绝
+        （``SUBJECT_NOT_BINDABLE``），不被执行。
+        """
+        return frozenset(set(self._subjects) & set(self._bindings))
 
     def subject(self, subject_id: str) -> SubjectDefinition | None:
         return self._subjects.get(subject_id)
