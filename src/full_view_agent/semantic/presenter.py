@@ -21,6 +21,7 @@ from full_view_agent.semantic.action_resolver import (
 )
 from full_view_agent.semantic.authorization import SubjectAuthorization
 from full_view_agent.semantic.catalog import (
+    ResultShapeSummary,
     SemanticCatalog,
     SubjectCapabilityView,
 )
@@ -134,10 +135,15 @@ class SemanticToolPresenter:
     def _describe_subject(subject: SubjectCapabilityView) -> str:
         group_by = (
             "、".join(
-                f"{item.value}(scope层级{list(item.allowed_scope_levels)})"
+                f"{item.value}（{item.label}）"
+                f"(scope层级{list(item.allowed_scope_levels)})"
                 for item in subject.group_by
             )
             or "无"
+        )
+        result_grains = "；".join(
+            SemanticToolPresenter._describe_result_shape(shape)
+            for shape in subject.result_shapes
         )
         filters = (
             "、".join(
@@ -162,5 +168,20 @@ class SemanticToolPresenter:
             f"group_by {group_by}；"
             f"filters {filters}；"
             f"{required_filter_description}"
-            f"输出形态 {list(subject.output_forms)}。"
+            f"输出形态 {list(subject.output_forms)}；"
+            f"结果粒度 {result_grains}。"
+        )
+
+    @staticmethod
+    def _describe_result_shape(shape: ResultShapeSummary) -> str:
+        selection = shape.group_by_selection
+        if selection == ():
+            group_by = "group_by=[]（不传 group_by）"
+        elif selection is None:
+            group_by = "任一已声明 group_by"
+        else:
+            group_by = f"group_by={list(selection)}"
+        return (
+            f"{group_by} -> {shape.grain_label}，"
+            f"返回行字段 {list(shape.row_fields)}"
         )

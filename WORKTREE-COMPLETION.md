@@ -156,3 +156,49 @@
 `finish_answer`，未获得 `semantic_query/query_event_metrics`。实际 `tool_ids`
 仅 `resolve_area`、Evidence 为 1、answer 为 null。该阻塞属于
 semantic/catalog/tool-surface，不在本补丁边界内。
+
+---
+
+# P1 Live Semantic Result Grain Fix
+
+## Outcome
+
+- `SubjectCapabilityView` now derives a safe result-shape summary from the
+  Catalog: `group_by_selection`, business `grain_label`, and logical
+  `row_fields` only.
+- `GroupBySummary` now carries the Catalog business label, so `next_area` is
+  presented as the direct-child-area dimension instead of an unexplained token.
+- `SemanticToolPresenter` maps every group-by selection to its returned row
+  grain. Housing explicitly advertises:
+  - `group_by=[]` (omit `group_by`) -> lease-type aggregation with
+    `lease_type` rows.
+  - `group_by=['next_area']` -> direct-child-area aggregation.
+- Production `housing_next_area_enabled=False` remains unchanged and covered:
+  when the gate is closed, `next_area` is absent from the model surface.
+- The three open housing/event Eval cases now use
+  `governance_analyst_v1`; the event case expects the unified
+  `governance.semantic_query` entry.
+
+No schema reference, adapter reference, URL, endpoint, table, or physical
+column metadata is exposed by the new model-visible summary.
+
+## TDD Evidence
+
+The new Catalog/Presenter tests were run before implementation and failed
+because `GroupBySummary` had no label, `SubjectCapabilityView` had no result
+shapes, and the Presenter had no result-grain mapping. The same tests pass after
+the minimal Catalog-derived implementation.
+
+## Verification
+
+- Focused semantic + production wiring: 85 passed.
+- Full test suite: 645 passed, 16 skipped (661 collected).
+- Ruff: passed.
+- Pyright: 0 errors, 0 warnings.
+- `compileall`: passed.
+- Live model Eval (`qwen3.7-max`): passed.
+  - case: `open-housing-cuiyuan`
+  - tools: `governance.resolve_area` then `governance.semantic_query`
+  - semantic spec used `subject=housing` and `group_by=[]`
+  - terminal status/outcome: `completed/success`
+  - trace: `C:\Users\zengc\AppData\Local\Temp\p1-live-housing-3a696c0ca4684929972ce3b0191b57a1.json`

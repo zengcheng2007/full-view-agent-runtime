@@ -372,6 +372,41 @@ def test_model_view_exposes_scope_levels_and_group_by_levels(
     assert by_id["event"].group_by == ()
 
 
+def test_model_view_exposes_safe_catalog_derived_result_grains(
+    catalog: SemanticCatalog,
+) -> None:
+    view = catalog.model_capability_view(FULL_AUTH)
+    housing = next(
+        subject for subject in view.subjects if subject.subject_id == "housing"
+    )
+
+    assert [rule.model_dump(mode="json") for rule in housing.group_by] == [
+        {
+            "value": "next_area",
+            "label": "直接下级区划",
+            "allowed_scope_levels": [4, 6, 9, 12],
+        }
+    ]
+    assert [shape.model_dump(mode="json") for shape in housing.result_shapes] == [
+        {
+            "group_by_selection": [],
+            "grain_label": "按租赁类型汇总",
+            "row_fields": ["lease_type", "dwelling_count"],
+        },
+        {
+            "group_by_selection": ["next_area"],
+            "grain_label": "按直接下级区划汇总",
+            "row_fields": ["area_code", "area_name", "dwelling_count"],
+        },
+    ]
+
+    serialized = housing.model_dump_json()
+    assert "data_schema_ref" not in serialized
+    assert "schema://" not in serialized
+    for token in PHYSICAL_TOKENS:
+        assert token not in serialized
+
+
 # ---------------------------------------------------------------------------
 # 内部绑定：与生产 Registry manifest 逐项一致（binding 不出现在模型视图）
 # ---------------------------------------------------------------------------

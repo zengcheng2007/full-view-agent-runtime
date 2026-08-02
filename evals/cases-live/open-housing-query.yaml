@@ -9,6 +9,7 @@ auth:
   area_codes: ["330106"]
   datasets: [administrative_area, housing]
   entitlements: [governance.area.read, governance.housing.aggregate.read]
+  field_policy_set: governance_analyst_v1
 # model_steps 留空 → 使用真实模型
 model_steps: []
 expected:

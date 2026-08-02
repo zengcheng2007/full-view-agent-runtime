@@ -462,6 +462,62 @@ def test_presenter_description_advertises_all_authorized_bound_subjects() -> Non
         assert token not in description
 
 
+def test_presenter_explains_catalog_derived_housing_result_grains() -> None:
+    auth = _subject_auth("housing")
+    presentation = SemanticToolPresenter(
+        catalog=SemanticCatalog.default(housing_next_area_enabled=True)
+    ).present(auth_context=auth)
+
+    assert presentation is not None
+    description = presentation.description
+    assert "group_by=[]（不传 group_by）" in description
+    assert "按租赁类型汇总" in description
+    assert "lease_type" in description
+    assert "group_by=['next_area']" in description
+    assert "next_area（直接下级区划）" in description
+    assert "按直接下级区划汇总" in description
+    assert "area_code" in description
+    for token in ("schema://", "data_schema_ref", "adapter://", "getNextSiteData"):
+        assert token not in description
+
+
+def test_presenter_keeps_next_area_absent_when_production_gate_is_closed() -> None:
+    presentation = SemanticToolPresenter(catalog=SemanticCatalog.default()).present(
+        auth_context=_subject_auth("housing")
+    )
+
+    assert presentation is not None
+    assert "group_by=[]（不传 group_by）" in presentation.description
+    assert "按租赁类型汇总" in presentation.description
+    assert "next_area" not in presentation.description
+
+
+def test_presenter_result_grains_follow_catalog_changes_automatically() -> None:
+    base = SemanticCatalog.default(housing_next_area_enabled=True)
+    housing = base.require_subject("housing")
+    changed_shapes = (
+        housing.result_shapes[0].model_copy(
+            update={"grain_label": "按目录定义的自定义业务粒度"}
+        ),
+    ) + housing.result_shapes[1:]
+    changed = SemanticCatalog(
+        catalog_version=base.catalog_version,
+        supported_spec_versions=base.supported_spec_versions,
+        subjects={
+            **base.subjects,
+            "housing": housing.model_copy(update={"result_shapes": changed_shapes}),
+        },
+        bindings=base.bindings,
+    )
+
+    presentation = SemanticToolPresenter(catalog=changed).present(
+        auth_context=_subject_auth("housing")
+    )
+
+    assert presentation is not None
+    assert "按目录定义的自定义业务粒度" in presentation.description
+
+
 @pytest.mark.asyncio
 async def test_context_builder_hides_semantic_tool_without_authorization() -> None:
     store = InMemoryAgentStore()

@@ -83,6 +83,7 @@ class ResultShape(ContractModel):
     shape_id: str = Field(min_length=1, max_length=64)
     kind: Literal["table"] = "table"
     data_schema_ref: str = Field(min_length=1, max_length=200)
+    grain_label: str = Field(min_length=1, max_length=100)
     row_fields: tuple[str, ...] = Field(min_length=1)
     # None = 适用于该主题的所有合法 group_by；元组 = 精确匹配 group_by。
     group_by_selection: tuple[str, ...] | None = None
@@ -134,7 +135,16 @@ class GroupBySummary(ContractModel):
     """模型可见的分组维度摘要：携带适用层级，避免只看到维度名。"""
 
     value: str
+    label: str
     allowed_scope_levels: tuple[int, ...]
+
+
+class ResultShapeSummary(ContractModel):
+    """模型可见的安全结果粒度；不含 schema/adapter 等物理绑定。"""
+
+    group_by_selection: tuple[str, ...] | None
+    grain_label: str
+    row_fields: tuple[str, ...]
 
 
 class SubjectCapabilityView(ContractModel):
@@ -149,6 +159,7 @@ class SubjectCapabilityView(ContractModel):
     filters: tuple[FilterSummary, ...]
     required_filters: tuple[RequiredFilterSummary, ...] = ()
     output_forms: tuple[str, ...]
+    result_shapes: tuple[ResultShapeSummary, ...]
 
 
 class ModelCapabilityView(ContractModel):
@@ -198,6 +209,7 @@ def _population() -> SubjectDefinition:
             ResultShape(
                 shape_id="population_metric_table",
                 data_schema_ref="schema://data/population-metric-table/1.0.0",
+                grain_label="按直接下级区划汇总",
                 row_fields=("area_code", "area_name", "person_count"),
             ),
         ),
@@ -233,6 +245,7 @@ def _housing(*, next_area_enabled: bool = False) -> SubjectDefinition:
             ResultShape(
                 shape_id="housing_lease_type_table",
                 data_schema_ref="schema://data/housing-lease-type-table/1.0.0",
+                grain_label="按租赁类型汇总",
                 row_fields=("lease_type", "dwelling_count"),
                 group_by_selection=(),
             ),
@@ -242,6 +255,7 @@ def _housing(*, next_area_enabled: bool = False) -> SubjectDefinition:
                 ResultShape(
                     shape_id="housing_area_group_table",
                     data_schema_ref="schema://data/housing-area-group-table/1.0.0",
+                    grain_label="按直接下级区划汇总",
                     row_fields=("area_code", "area_name", "dwelling_count"),
                     group_by_selection=("next_area",),
                 ),
@@ -271,6 +285,7 @@ def _event() -> SubjectDefinition:
             ResultShape(
                 shape_id="event_finish_rate_table",
                 data_schema_ref="schema://data/event-finish-rate-table/1.0.0",
+                grain_label="按网格、村社、镇街层级返回办结率快照",
                 row_fields=("level", "finish_rate"),
             ),
         ),
@@ -459,6 +474,7 @@ class SemanticCatalog:
                         group_by=tuple(
                             GroupBySummary(
                                 value=rule.value,
+                                label=rule.label,
                                 allowed_scope_levels=rule.allowed_scope_levels,
                             )
                             for rule in subject.group_by_rules
@@ -481,6 +497,14 @@ class SemanticCatalog:
                             for required_filter in subject.required_filters
                         ),
                         output_forms=tuple(subject.output_forms),
+                        result_shapes=tuple(
+                            ResultShapeSummary(
+                                group_by_selection=shape.group_by_selection,
+                                grain_label=shape.grain_label,
+                                row_fields=shape.row_fields,
+                            )
+                            for shape in subject.result_shapes
+                        ),
                     )
                 )
         return ModelCapabilityView(

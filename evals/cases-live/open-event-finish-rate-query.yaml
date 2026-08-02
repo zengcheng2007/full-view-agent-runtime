@@ -6,12 +6,13 @@ auth:
   area_codes: ["3301"]
   datasets: [administrative_area, event]
   entitlements: [governance.area.read, governance.event.aggregate.read]
+  field_policy_set: governance_analyst_v1
 model_steps: []
 expected:
   terminal_status: completed
   outcome: success
   completion_reason_code: goal_completed
-  tool_ids: [governance.resolve_area, governance.query_event_metrics]
+  tool_ids: [governance.resolve_area, governance.semantic_query]
   min_evidence_count: 2
   required_event_types: [tool.completed, result.available, evidence.available, run.completed]
   required_answer_substrings: ["办结率"]
