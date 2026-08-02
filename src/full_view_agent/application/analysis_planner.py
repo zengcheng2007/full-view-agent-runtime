@@ -30,7 +30,9 @@
 
 from collections.abc import Sequence
 
-from full_view_agent.application.fingerprints import canonical_fingerprint
+from full_view_agent.application.analysis_plan_integrity import (
+    compute_analysis_plan_id,
+)
 from full_view_agent.domain.analysis_plan import (
     ANALYSIS_GOAL_ORDER,
     ANALYSIS_PLAN_SCHEMA_VERSION,
@@ -119,21 +121,16 @@ class AnalysisPlanner:
             else:
                 omissions.append(outcome)
 
-        plan_id = canonical_fingerprint(
-            domain="analysis-plan:1.0",
-            value={
-                "schema_version": ANALYSIS_PLAN_SCHEMA_VERSION,
-                "catalog_version": self._catalog.catalog_version,
-                "catalog_fingerprint": self._catalog.execution_fingerprint,
-                "request_id": request.request_id,
-                "goals": list(goals),
-                "scope_ref": request.scope_ref.model_dump(mode="json"),
-                "steps": [step.model_dump(mode="json") for step in steps],
-                "omissions": [
-                    omission.model_dump(mode="json") for omission in omissions
-                ],
-                "constraints": constraints.model_dump(mode="json"),
-            },
+        plan_id = compute_analysis_plan_id(
+            schema_version=ANALYSIS_PLAN_SCHEMA_VERSION,
+            catalog_version=self._catalog.catalog_version,
+            catalog_fingerprint=self._catalog.execution_fingerprint,
+            request_id=request.request_id,
+            goals=goals,
+            scope_ref=request.scope_ref,
+            steps=steps,
+            omissions=omissions,
+            constraints=constraints,
         )
         return AnalysisPlan(
             plan_id=plan_id,

@@ -8,6 +8,11 @@
 import asyncio
 from typing import Protocol
 
+from pydantic import ValidationError
+
+from full_view_agent.application.analysis_plan_integrity import (
+    recompute_analysis_plan_id,
+)
 from full_view_agent.application.errors import ReauthenticationRequired
 from full_view_agent.application.fingerprints import canonical_fingerprint
 from full_view_agent.application.semantic_executor import SemanticToolExecutor
@@ -75,7 +80,12 @@ class AnalysisPlanExecutor:
         *,
         auth_context: AuthContext,
     ) -> AnalysisExecutionResult:
+        plan = self._revalidate_plan(plan)
         self._validate_plan_snapshot(plan)
+        semantic_arguments = {
+            step.step_id: self._semantic_arguments(plan, step)
+            for step in plan.steps
+        }
         completed: dict[str, AnalysisStepExecution] = {}
         call_counter = [0]
         try:
@@ -85,6 +95,7 @@ class AnalysisPlanExecutor:
                     auth_context=auth_context,
                     completed=completed,
                     call_counter=call_counter,
+                    semantic_arguments=semantic_arguments,
                 )
         except TimeoutError:
             # asyncio.timeout 只在自己的 deadline 到期时转为 TimeoutError。
@@ -112,6 +123,18 @@ class AnalysisPlanExecutor:
             tool_call_count=call_counter[0],
         )
 
+    @staticmethod
+    def _revalidate_plan(plan: AnalysisPlan) -> AnalysisPlan:
+        try:
+            return AnalysisPlan.model_validate(
+                plan.model_dump(mode="python", warnings="none")
+            )
+        except ValidationError as exc:
+            raise AnalysisExecutionRejected(
+                "PLAN_CONTRACT_INVALID",
+                "plan does not satisfy the current AnalysisPlan contract",
+            ) from exc
+
     def _validate_plan_snapshot(self, plan: AnalysisPlan) -> None:
         if plan.catalog_version != self._catalog.catalog_version:
             raise AnalysisExecutionRejected(
@@ -138,6 +161,32 @@ class AnalysisPlanExecutor:
                     "SCOPE_KIND_UNSUPPORTED",
                     f"step {step.step_id} does not use an executable area scope",
                 )
+        if plan.plan_id != recompute_analysis_plan_id(plan):
+            raise AnalysisExecutionRejected(
+                "PLAN_ID_MISMATCH",
+                "plan id does not match the canonical plan content",
+            )
+        for step in plan.steps:
+            if step.scope_ref != plan.scope_ref:
+                raise AnalysisExecutionRejected(
+                    "PLAN_SCOPE_MISMATCH",
+                    f"step {step.step_id} scope differs from the plan scope",
+                )
+            if any(goal != "overview" and goal != step.subject for goal in step.goals):
+                raise AnalysisExecutionRejected(
+                    "PLAN_GOAL_MISMATCH",
+                    f"step {step.step_id} carries a goal for another subject",
+                )
+            if any(goal not in plan.goals for goal in step.goals):
+                raise AnalysisExecutionRejected(
+                    "PLAN_GOAL_MISMATCH",
+                    f"step {step.step_id} carries a goal absent from the plan",
+                )
+            if step.step_id != f"step-{step.subject}":
+                raise AnalysisExecutionRejected(
+                    "PLAN_STEP_ID_MISMATCH",
+                    f"step id {step.step_id} does not match its subject",
+                )
 
     async def _run_dag(
         self,
@@ -146,9 +195,11 @@ class AnalysisPlanExecutor:
         auth_context: AuthContext,
         completed: dict[str, AnalysisStepExecution],
         call_counter: list[int],
+        semantic_arguments: dict[str, dict[str, object]],
     ) -> None:
         by_id = {step.step_id: step for step in plan.steps}
         active: dict[asyncio.Task[AnalysisStepExecution], str] = {}
+        scheduled_count = 0
         try:
             while len(completed) < len(plan.steps):
                 active_ids = set(active.values())
@@ -182,19 +233,21 @@ class AnalysisPlanExecutor:
                 ]
                 available = plan.constraints.max_parallel - len(active)
                 for step in ready[:available]:
-                    if call_counter[0] >= plan.constraints.max_tool_calls:
+                    if scheduled_count >= plan.constraints.max_tool_calls:
                         break
                     task = asyncio.create_task(
                         self._execute_step(
                             plan,
                             step,
                             auth_context=auth_context,
+                            raw_arguments=semantic_arguments[step.step_id],
+                            call_counter=call_counter,
                         )
                     )
                     active[task] = step.step_id
-                    call_counter[0] += 1
+                    scheduled_count += 1
 
-                if call_counter[0] >= plan.constraints.max_tool_calls:
+                if scheduled_count >= plan.constraints.max_tool_calls:
                     active_ids = set(active.values())
                     for step in plan.steps:
                         if step.step_id not in completed and step.step_id not in active_ids:
@@ -239,23 +292,16 @@ class AnalysisPlanExecutor:
         step: AnalysisStep,
         *,
         auth_context: AuthContext,
+        raw_arguments: dict[str, object],
+        call_counter: list[int],
     ) -> AnalysisStepExecution:
-        try:
-            raw_arguments = self._semantic_arguments(plan, step)
-        except AnalysisExecutionRejected as exc:
-            return self._step_result(
-                step,
-                status="failed",
-                reason_code=exc.code,
-                detail="catalog cannot derive a safe semantic query for this step",
-            )
-
         tool_call_id = canonical_fingerprint(
             domain="analysis-step-tool-call:1.0",
             value={"plan_id": plan.plan_id, "step_id": step.step_id},
         )
         try:
             async with asyncio.timeout(step.timeout_ms / 1000):
+                call_counter[0] += 1
                 result = await self._semantic_executor.execute(
                     tool_call_id=tool_call_id,
                     tool_id=SEMANTIC_QUERY_TOOL_ID,

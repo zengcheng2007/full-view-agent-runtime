@@ -265,8 +265,8 @@ including validation-bypass defense in depth and the unchanged production
 
 ## 验证证据
 
-- TDD 定向：`tests/test_analysis_executor.py` 14 项通过。
-- 全量：766 项收集，`uv run pytest -q` exit 0。
+- TDD 定向：`tests/test_analysis_executor.py` 21 项通过。
+- 全量：773 项收集，`uv run pytest -q` exit 0。
 - Ruff：通过。Pyright：`0 errors, 0 warnings`。Compileall：通过。
 
 ## 剩余接线点
@@ -274,3 +274,18 @@ including validation-bypass defense in depth and the unchanged production
 - 独立 Reviewer 需重放取消、重新认证、总超时和绑定漂移。
 - 审核通过后，后续任务把该端口接入 LangGraph 子图，再接 API/Eval；
   本 worktree 不越界接线。
+
+## 独立审核退回修复
+
+- 执行入口先用 `AnalysisPlan.model_validate` 重建完整契约，封住
+  `model_copy/model_construct` 绕过的重复 step、cycle、超预算和类型污染。
+- 抽取 `analysis_plan_integrity` 作为 Planner/Executor 共用的唯一
+  canonical plan ID 算法；旧 ID 内容篡改在零 Tool 调用前拒绝。
+- 即使攻击者按公开算法重算 SHA，step scope 也必须等于 plan scope，
+  step goal/subject/step_id 也必须符合首切片 Planner 契约。
+- 所有 step 的受控语义参数在调度前一次性预编译；任一 step
+  不可推导则整体零调用拒绝。`tool_call_count` 只在真正进入
+  `SemanticToolExecutor` 前增加，不再把创建 task 当成工具调用。
+- 信任边界：首期 Plan 只能由服务端生成并按 ID 加载，后续 API
+  不得接受客户端自报的 Plan 内容。Plan ID 是普通 canonical SHA，
+  用于完整性检测，不是认证签名或授权凭据。

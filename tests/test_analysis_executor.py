@@ -1,6 +1,7 @@
 """P1-2 AnalysisPlan 执行器的确定性、安全和预算契约。"""
 
 import asyncio
+import warnings
 from collections.abc import Mapping
 from typing import Literal
 
@@ -10,13 +11,22 @@ from full_view_agent.application.analysis_executor import (
     AnalysisExecutionRejected,
     AnalysisPlanExecutor,
 )
+from full_view_agent.application.analysis_plan_integrity import (
+    recompute_analysis_plan_id,
+)
 from full_view_agent.application.analysis_planner import AnalysisPlanner
 from full_view_agent.application.errors import ReauthenticationRequired
+from full_view_agent.application.fingerprints import canonical_fingerprint
 from full_view_agent.application.semantic_executor import SemanticToolExecutor
 from full_view_agent.application.semantic_wiring import build_semantic_capability_stack
 from full_view_agent.application.tool_registry import ToolRegistry
-from full_view_agent.domain.analysis_plan import AnalysisPlan, AnalysisStep, PlanBudget
-from full_view_agent.domain.models import AuthContext, ToolResult
+from full_view_agent.domain.analysis_plan import (
+    AnalysisPlan,
+    AnalysisStep,
+    AreaScopeRef,
+    PlanBudget,
+)
+from full_view_agent.domain.models import AuthContext, MetricQueryScope, ToolResult
 from full_view_agent.infrastructure.governance_adapter import InMemoryGovernanceAdapter
 from full_view_agent.semantic.action_resolver import (
     SEMANTIC_QUERY_TOOL_ID,
@@ -176,7 +186,7 @@ def _replace_steps(
     *,
     constraints: PlanBudget | None = None,
 ) -> AnalysisPlan:
-    return AnalysisPlan(
+    replaced = AnalysisPlan(
         plan_id=plan.plan_id,
         catalog_version=plan.catalog_version,
         catalog_fingerprint=plan.catalog_fingerprint,
@@ -186,6 +196,29 @@ def _replace_steps(
         steps=steps,
         omissions=plan.omissions,
         constraints=constraints or plan.constraints,
+    )
+    return replaced.model_copy(
+        update={"plan_id": recompute_analysis_plan_id(replaced)}
+    )
+
+
+def _attacker_recomputed_plan_id(plan: AnalysisPlan) -> str:
+    """模拟攻击者知道公开算法后重算 ID；ID 不是签名。"""
+    return canonical_fingerprint(
+        domain="analysis-plan:1.0",
+        value={
+            "schema_version": plan.schema_version,
+            "catalog_version": plan.catalog_version,
+            "catalog_fingerprint": plan.catalog_fingerprint,
+            "request_id": plan.request_id,
+            "goals": list(plan.goals),
+            "scope_ref": plan.scope_ref.model_dump(mode="json"),
+            "steps": [step.model_dump(mode="json") for step in plan.steps],
+            "omissions": [
+                omission.model_dump(mode="json") for omission in plan.omissions
+            ],
+            "constraints": plan.constraints.model_dump(mode="json"),
+        },
     )
 
 
@@ -377,7 +410,7 @@ async def test_catalog_binding_adapter_change_is_detected_by_fingerprint() -> No
 
 
 @pytest.mark.asyncio
-async def test_max_tool_calls_is_enforced_at_runtime() -> None:
+async def test_model_copy_steps_over_budget_is_rejected_before_any_call() -> None:
     executor, port, catalog = _executor()
     plan = _overview_plan(catalog)
     # model_copy 模拟持久化层绕过 Pydantic 构造校验的污染对象；
@@ -386,14 +419,11 @@ async def test_max_tool_calls_is_enforced_at_runtime() -> None:
         update={"constraints": PlanBudget(max_parallel=2, max_tool_calls=1)}
     )
 
-    result = await executor.execute(plan, auth_context=_full_auth_context())
+    with pytest.raises(AnalysisExecutionRejected) as exc_info:
+        await executor.execute(plan, auth_context=_full_auth_context())
 
-    assert result.tool_call_count == 1
-    assert port.calls == ["event"]
-    assert [step.reason_code for step in result.steps[1:]] == [
-        "TOOL_CALL_BUDGET_EXCEEDED",
-        "TOOL_CALL_BUDGET_EXCEEDED",
-    ]
+    assert exc_info.value.code == "PLAN_CONTRACT_INVALID"
+    assert port.calls == []
 
 
 @pytest.mark.asyncio
@@ -445,3 +475,126 @@ def test_executor_rejects_semantic_executor_with_a_different_resolver() -> None:
             resolver=first.resolver,
             semantic_executor=second.executor,
         )
+
+
+@pytest.mark.asyncio
+async def test_changed_step_scope_with_old_plan_id_is_rejected_before_calls() -> None:
+    executor, port, catalog = _executor()
+    plan = _overview_plan(catalog)
+    changed_scope = AreaScopeRef(scope=MetricQueryScope(area_code="330106001"))
+    changed = plan.steps[0].model_copy(update={"scope_ref": changed_scope})
+    tampered = plan.model_copy(update={"steps": (changed, *plan.steps[1:])})
+
+    with pytest.raises(AnalysisExecutionRejected) as exc_info:
+        await executor.execute(tampered, auth_context=_full_auth_context())
+
+    assert exc_info.value.code == "PLAN_ID_MISMATCH"
+    assert port.calls == []
+
+
+@pytest.mark.asyncio
+async def test_recomputed_plan_id_cannot_authorize_cross_scope_step() -> None:
+    executor, port, catalog = _executor()
+    plan = _overview_plan(catalog)
+    changed_scope = AreaScopeRef(scope=MetricQueryScope(area_code="330106001"))
+    changed = plan.steps[0].model_copy(update={"scope_ref": changed_scope})
+    tampered = plan.model_copy(update={"steps": (changed, *plan.steps[1:])})
+    tampered = tampered.model_copy(
+        update={"plan_id": _attacker_recomputed_plan_id(tampered)}
+    )
+
+    with pytest.raises(AnalysisExecutionRejected) as exc_info:
+        await executor.execute(tampered, auth_context=_full_auth_context())
+
+    assert exc_info.value.code == "PLAN_SCOPE_MISMATCH"
+    assert port.calls == []
+
+
+@pytest.mark.asyncio
+async def test_model_copy_duplicate_step_ids_is_rejected_before_calls() -> None:
+    executor, port, catalog = _executor()
+    plan = _overview_plan(catalog)
+    tampered = plan.model_copy(update={"steps": (*plan.steps, plan.steps[0])})
+
+    with pytest.raises(AnalysisExecutionRejected) as exc_info:
+        await executor.execute(tampered, auth_context=_full_auth_context())
+
+    assert exc_info.value.code == "PLAN_CONTRACT_INVALID"
+    assert port.calls == []
+
+
+@pytest.mark.asyncio
+async def test_model_copy_cycle_is_rejected_before_calls() -> None:
+    executor, port, catalog = _executor()
+    plan = _overview_plan(catalog)
+    first, second, third = plan.steps
+    first = first.model_copy(update={"depends_on": (second.step_id,)})
+    second = second.model_copy(update={"depends_on": (first.step_id,)})
+    tampered = plan.model_copy(update={"steps": (first, second, third)})
+
+    with pytest.raises(AnalysisExecutionRejected) as exc_info:
+        await executor.execute(tampered, auth_context=_full_auth_context())
+
+    assert exc_info.value.code == "PLAN_CONTRACT_INVALID"
+    assert port.calls == []
+
+
+@pytest.mark.asyncio
+async def test_model_construct_pollution_is_rejected_with_stable_code() -> None:
+    executor, port, catalog = _executor()
+    plan = _overview_plan(catalog)
+    payload = plan.model_dump(mode="python")
+    payload["steps"] = ("polluted-step",)
+    polluted = AnalysisPlan.model_construct(**payload)
+
+    with warnings.catch_warnings(record=True) as caught, pytest.raises(
+        AnalysisExecutionRejected
+    ) as exc_info:
+        await executor.execute(polluted, auth_context=_full_auth_context())
+
+    assert exc_info.value.code == "PLAN_CONTRACT_INVALID"
+    assert port.calls == []
+    assert not [item for item in caught if "Pydantic serializer" in str(item.message)]
+
+
+@pytest.mark.asyncio
+async def test_recomputed_id_cannot_attach_unrelated_goal_to_step() -> None:
+    executor, port, catalog = _executor()
+    plan = _overview_plan(catalog)
+    changed = plan.steps[0].model_copy(update={"goals": ("event",)})
+    tampered = plan.model_copy(update={"steps": (changed, *plan.steps[1:])})
+    tampered = tampered.model_copy(
+        update={"plan_id": _attacker_recomputed_plan_id(tampered)}
+    )
+
+    with pytest.raises(AnalysisExecutionRejected) as exc_info:
+        await executor.execute(tampered, auth_context=_full_auth_context())
+
+    assert exc_info.value.code == "PLAN_GOAL_MISMATCH"
+    assert port.calls == []
+
+
+@pytest.mark.asyncio
+async def test_non_derivable_step_is_rejected_before_any_tool_call() -> None:
+    base = SemanticCatalog.default()
+    population = base.subjects["population"].model_copy(
+        update={"scope_levels": (*base.subjects["population"].scope_levels, 15)}
+    )
+    catalog = SemanticCatalog(
+        catalog_version=base.catalog_version,
+        supported_spec_versions=base.supported_spec_versions,
+        subjects={**base.subjects, "population": population},
+        bindings=base.bindings,
+    )
+    executor, port, _catalog = _executor(catalog=catalog)
+    plan = AnalysisPlanner(catalog).plan(
+        area_request("overview", area_code="330106001001001"),
+        authorization=SubjectAuthorization.from_auth_context(_full_auth_context()),
+    )
+    assert [step.subject for step in plan.steps] == ["event", "housing", "population"]
+
+    with pytest.raises(AnalysisExecutionRejected) as exc_info:
+        await executor.execute(plan, auth_context=_full_auth_context())
+
+    assert exc_info.value.code == "QUERY_SPEC_NOT_DERIVABLE"
+    assert port.calls == []
