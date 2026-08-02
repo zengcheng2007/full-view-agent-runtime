@@ -36,6 +36,14 @@
    - 最大/最小判断同时支持“标签在前”和“最高/最低的是标签”倒装表达；
    - 第一次修订后，第二次无论返回 `revise`、`reject` 还是空答案，均确定性
      采用经复核的安全摘录或固定安全结束语，不再触发 `loop_detected`。
+6. P1-R 第三轮阻断修复：
+   - 标签完全来自 Result；可区分简称按标签集合动态计算唯一前缀，不维护
+     固定场景词表；
+   - 标签后的相邻数值不再要求空格或固定计量单位，覆盖连续中文、冒号和
+     无单位表达；
+   - 同结构多 Result 出现同名标签时，按该标签的来源值集合核验，避免用
+     Result A 的回答逐项对照 Result B 而产生交叉误拒；单 Result 仍保持
+     严格标签和值绑定。
 
 ## TDD 证据
 
@@ -62,6 +70,8 @@ GREEN 后新增覆盖：
 - 区划后接“有/为/最多”；
 - 倒装最高/最低判断；
 - 第一次修订后第二次空答案，在 `max_no_progress=1` 下仍安全结束。
+- 连续中文标签和数字、动态可区分简称、冒号及无单位错配表达；
+- 两个同结构 Result 同名标签不同值时，单独回答 A 或同时回答 A/B 均通过。
 
 ## Fresh 验证
 
@@ -72,7 +82,7 @@ GREEN 后新增覆盖：
   `uv run pytest tests/test_harness.py tests/test_context_builder.py
   tests/test_eval_runner.py tests/test_eval_suite.py tests/test_eval_cli.py -q`
   通过。
-- 全量：`uv run pytest -q`，537 passed / 18 skipped。
+- 全量：`uv run pytest -q -o addopts=''`，542 passed / 18 skipped。
 - Ruff：`uv run ruff check .`，通过。
 - Pyright：`uv run pyright`，0 errors / 0 warnings。
 - 编译：`uv run python -m compileall -q src tests`，通过。

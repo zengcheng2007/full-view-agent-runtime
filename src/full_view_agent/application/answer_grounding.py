@@ -169,6 +169,7 @@ def _unsupported_judgements(
     summary: str, ledger: AnswerFactLedger
 ) -> set[str]:
     violations: set[str] = set()
+    violations.update(_label_value_violations(summary, ledger.comparisons))
     if (
         any(pattern in summary for pattern in _ALL_SAME_PATTERNS)
         and not any(
@@ -183,7 +184,6 @@ def _unsupported_judgements(
         values = facts.values_by_label
         if not values:
             continue
-        violations.update(_label_value_violations(summary, values))
         maximum = max(values.values())
         minimum = min(values.values())
         for label, value in values.items():
@@ -222,40 +222,77 @@ def _unsupported_judgements(
 
 
 def _label_value_violations(
-    summary: str, values_by_label: dict[str, Decimal]
+    summary: str, comparisons: list[ComparisonFacts]
 ) -> set[str]:
     """Reject locally bound label/value pairs that contradict their source row."""
     violations: set[str] = set()
+    values_by_label: dict[str, set[Decimal]] = {}
+    for facts in comparisons:
+        for label, value in facts.values_by_label.items():
+            values_by_label.setdefault(label, set()).add(value)
+    aliases = _distinguishable_label_aliases(set(values_by_label))
     value_pattern = re.compile(
-        r"(?<![\w])(?P<value>\d[\d,]*(?:\.\d+)?)\s*"
-        r"(?:套|人|户|件|个|栋|幢)"
+        r"(?P<value>\d[\d,]*(?:\.\d+)?)(?![\d,.])"
     )
     for clause in re.split(r"[，。；\n]", summary):
-        labels = sorted(
-            (
-                (match.start(), label)
-                for label in values_by_label
-                for match in re.finditer(re.escape(label), clause)
-            ),
-            key=lambda item: item[0],
-        )
+        labels = _label_mentions(clause, aliases)
         value_matches = list(value_pattern.finditer(clause))
         if "分别" in clause and len(labels) == len(value_matches) and len(labels) > 1:
-            for (_, label), match in zip(labels, value_matches, strict=True):
+            for (_, label, _), match in zip(labels, value_matches, strict=True):
                 actual = _normalize_number(match.group("value"))
-                if actual != _normalize_decimal(values_by_label[label]):
+                allowed = {
+                    _normalize_decimal(value) for value in values_by_label[label]
+                }
+                if actual not in allowed:
                     violations.add(f"{label}:{actual}")
             continue
-        for index, (position, label) in enumerate(labels):
+        for index, (position, label, alias) in enumerate(labels):
             segment_end = labels[index + 1][0] if index + 1 < len(labels) else len(clause)
-            segment = clause[position + len(label) : segment_end]
-            match = value_pattern.search(segment)
+            segment = clause[position + len(alias) : segment_end]
+            match = re.match(
+                r"\s*(?:(?:数量|数值)?\s*(?:为|是|有|共|约|达(?:到)?)?\s*|[:：]\s*)"
+                + value_pattern.pattern,
+                segment,
+            )
             if match is None:
                 continue
             actual = _normalize_number(match.group("value"))
-            if actual != _normalize_decimal(values_by_label[label]):
+            allowed = {_normalize_decimal(value) for value in values_by_label[label]}
+            if actual not in allowed:
                 violations.add(f"{label}:{actual}")
     return violations
+
+
+def _distinguishable_label_aliases(labels: set[str]) -> dict[str, str]:
+    aliases = {label: label for label in labels}
+    for label in labels:
+        for length in range(2, len(label)):
+            prefix = label[:length]
+            if all(other == label or not other.startswith(prefix) for other in labels):
+                aliases[prefix] = label
+                break
+    return aliases
+
+
+def _label_mentions(
+    clause: str, aliases: dict[str, str]
+) -> list[tuple[int, str, str]]:
+    candidates = sorted(
+        (
+            (match.start(), -len(alias), alias, canonical_label)
+            for alias, canonical_label in aliases.items()
+            for match in re.finditer(re.escape(alias), clause)
+        ),
+        key=lambda item: (item[0], item[1]),
+    )
+    mentions: list[tuple[int, str, str]] = []
+    occupied_until = -1
+    for position, _, alias, canonical_label in candidates:
+        if position < occupied_until:
+            continue
+        mentions.append((position, canonical_label, alias))
+        occupied_until = position + len(alias)
+    return mentions
 
 
 def _collect_named_facts(data: dict[str, Any], ledger: AnswerFactLedger) -> None:

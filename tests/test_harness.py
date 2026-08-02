@@ -125,6 +125,31 @@ def successful_housing_result(
     )
 
 
+def housing_comparison_result(
+    *, result_id: str, residential: int, commercial: int
+) -> ToolResult:
+    return successful_housing_result().model_copy(
+        update={
+            "data_result": TableDataResult(
+                result_id=result_id,
+                data_schema_ref="schema://data/housing-lease-type-table/1.0.0",
+                result_fingerprint=f"sha256:{result_id}",
+                data=HousingLeaseTypeTable(
+                    rows=[
+                        HousingLeaseTypeRow(
+                            lease_type="住宅出租", dwelling_count=residential
+                        ),
+                        HousingLeaseTypeRow(
+                            lease_type="商铺出租", dwelling_count=commercial
+                        ),
+                    ]
+                ),
+                row_count=2,
+            )
+        }
+    )
+
+
 class SuccessfulToolExecutor:
     async def execute(
         self, *, tool_call_id, tool_id, raw_arguments, auth_context
@@ -508,6 +533,59 @@ async def test_deterministic_validator_rejects_label_number_mismatch() -> None:
 
     assert assessment.status == "revise"
     assert assessment.reason_code == "unsupported_judgement"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "summary",
+    (
+        "住宅出租为850套，商铺出租为3200套。",
+        "住宅850套，商铺3200套。",
+        "住宅出租：850，商铺出租：3200。",
+    ),
+)
+async def test_deterministic_validator_rejects_adjacent_label_number_mismatch(
+    summary: str,
+) -> None:
+    result = housing_comparison_result(
+        result_id="res-adjacent-values", residential=3200, commercial=850
+    )
+
+    assessment = await DeterministicCompletionValidator().assess(
+        HarnessState(tool_results=(result,)), FinishAction(summary=summary)
+    )
+
+    assert assessment.status == "revise"
+    assert assessment.reason_code == "unsupported_judgement"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "summary",
+    (
+        "住宅出租3200套，商铺出租850套。",
+        (
+            "结果A：住宅出租3200套，商铺出租850套；"
+            "结果B：住宅出租1000套，商铺出租500套。"
+        ),
+    ),
+)
+async def test_deterministic_validator_keeps_same_labels_scoped_across_results(
+    summary: str,
+) -> None:
+    result_a = housing_comparison_result(
+        result_id="res-source-a", residential=3200, commercial=850
+    )
+    result_b = housing_comparison_result(
+        result_id="res-source-b", residential=1000, commercial=500
+    )
+
+    assessment = await DeterministicCompletionValidator().assess(
+        HarnessState(tool_results=(result_a, result_b)),
+        FinishAction(summary=summary),
+    )
+
+    assert assessment.status == "accept"
 
 
 @pytest.mark.asyncio
