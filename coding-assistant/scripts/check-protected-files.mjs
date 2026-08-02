@@ -46,9 +46,8 @@ process.stdin.on('end', () => {
 
 function checkBoundary(targetFile, toolName) {
   const cwd = process.cwd();
-  const relTarget = targetFile.startsWith(cwd)
-    ? relative(cwd, targetFile).replace(/\\/g, '/')
-    : targetFile;
+  const absoluteTarget = resolve(cwd, targetFile);
+  const relTarget = relative(cwd, absoluteTarget).replace(/\\/g, '/');
 
   // Collect all allowed (readWrite) and blocked (readOnly + forbidden) paths
   const allowed = [];
