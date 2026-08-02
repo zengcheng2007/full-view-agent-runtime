@@ -16,8 +16,8 @@ expected:
   terminal_status: completed
   outcome: success
   completion_reason_code: goal_completed
-  # 不指定 tool_ids —— 模型可能先 resolve_area 再 query_housing_metrics，也可能直接传区划编码
-  tool_ids: []
+  # 住房主题由统一语义入口承载；规范 Tool 仅供内部编译执行。
+  tool_ids: [governance.resolve_area, governance.semantic_query]
   min_evidence_count: 2
   required_event_types: [tool.completed, result.available, evidence.available, run.completed]
   # 只校验回答里应该包含的关键词

@@ -27,10 +27,11 @@ Catalog 只声明当前生产 HTTP Adapter 已逐项验证的能力，证据来�
 内部 Registry/CapabilityService，供语义编译结果兼容执行，但不并行暴露。
 """
 
+import re
 from collections.abc import Mapping
 from typing import Literal
 
-from pydantic import Field
+from pydantic import Field, field_validator
 
 from full_view_agent.application.authorization_scope import area_is_within_scope
 from full_view_agent.application.fingerprints import canonical_fingerprint
@@ -42,6 +43,38 @@ SEMANTIC_CATALOG_VERSION = "0.1.0-s0-candidate"
 SEMANTIC_SPEC_VERSIONS: tuple[str, ...] = ("s0.1",)
 
 OutputForm = Literal["table", "choropleth"]
+
+_DEFAULT_RESULT_GRAIN_LABEL = "按所选查询维度返回结果"
+_UNSAFE_BUSINESS_LABEL = re.compile(
+    r"(?i)(://|\bhttps?\b|\badapter\b|\bschema\b|"
+    r"\b(?:select|insert|update|delete|drop|alter|create|from|join|where|table)\b|"
+    r"[\\/]|[a-z]:)"
+)
+_BUSINESS_LABEL_CHARACTERS = re.compile(
+    r"^[\u4e00-\u9fffA-Za-z0-9 _、，。（）()%-]+$"
+)
+
+
+def _validated_business_label(value: str) -> str:
+    normalized = value.strip()
+    if (
+        not normalized
+        or _UNSAFE_BUSINESS_LABEL.search(normalized)
+        or _BUSINESS_LABEL_CHARACTERS.fullmatch(normalized) is None
+    ):
+        raise ValueError("grain_label must be safe business display text")
+    return normalized
+
+
+def _safe_model_grain_label(value: str | None) -> str:
+    if value is None:
+        return _DEFAULT_RESULT_GRAIN_LABEL
+    try:
+        return _validated_business_label(value)
+    except ValueError:
+        # Defense in depth for custom Catalog objects created through
+        # model_copy/model_construct without Pydantic validation.
+        return _DEFAULT_RESULT_GRAIN_LABEL
 
 
 class MetricDefinition(ContractModel):
@@ -83,10 +116,17 @@ class ResultShape(ContractModel):
     shape_id: str = Field(min_length=1, max_length=64)
     kind: Literal["table"] = "table"
     data_schema_ref: str = Field(min_length=1, max_length=200)
-    grain_label: str = Field(min_length=1, max_length=100)
+    grain_label: str | None = Field(default=None, max_length=100)
     row_fields: tuple[str, ...] = Field(min_length=1)
     # None = 适用于该主题的所有合法 group_by；元组 = 精确匹配 group_by。
     group_by_selection: tuple[str, ...] | None = None
+
+    @field_validator("grain_label")
+    @classmethod
+    def validate_grain_label(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        return _validated_business_label(value)
 
 
 class SubjectDefinition(ContractModel):
@@ -144,7 +184,6 @@ class ResultShapeSummary(ContractModel):
 
     group_by_selection: tuple[str, ...] | None
     grain_label: str
-    row_fields: tuple[str, ...]
 
 
 class SubjectCapabilityView(ContractModel):
@@ -370,7 +409,9 @@ class SemanticCatalog:
                 "catalog_version": self._catalog_version,
                 "supported_spec_versions": list(self._supported_spec_versions),
                 "subjects": {
-                    subject_id: self._subjects[subject_id].model_dump(mode="json")
+                    subject_id: self._execution_subject_payload(
+                        self._subjects[subject_id]
+                    )
                     for subject_id in sorted(self._subjects)
                 },
                 "bindings": {
@@ -379,6 +420,20 @@ class SemanticCatalog:
                 },
             },
         )
+
+    @staticmethod
+    def _execution_subject_payload(
+        subject: SubjectDefinition,
+    ) -> dict[str, object]:
+        payload = subject.model_dump(mode="json")
+        result_shapes = payload.get("result_shapes")
+        if isinstance(result_shapes, list):
+            for shape in result_shapes:
+                if isinstance(shape, dict):
+                    # Display-only metadata must not invalidate an otherwise
+                    # identical compiled semantic action.
+                    shape.pop("grain_label", None)
+        return payload
 
     @property
     def supported_spec_versions(self) -> tuple[str, ...]:
@@ -500,8 +555,9 @@ class SemanticCatalog:
                         result_shapes=tuple(
                             ResultShapeSummary(
                                 group_by_selection=shape.group_by_selection,
-                                grain_label=shape.grain_label,
-                                row_fields=shape.row_fields,
+                                grain_label=_safe_model_grain_label(
+                                    shape.grain_label
+                                ),
                             )
                             for shape in subject.result_shapes
                         ),

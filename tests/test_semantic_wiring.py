@@ -472,11 +472,11 @@ def test_presenter_explains_catalog_derived_housing_result_grains() -> None:
     description = presentation.description
     assert "group_by=[]（不传 group_by）" in description
     assert "按租赁类型汇总" in description
-    assert "lease_type" in description
     assert "group_by=['next_area']" in description
     assert "next_area（直接下级区划）" in description
     assert "按直接下级区划汇总" in description
-    assert "area_code" in description
+    for internal_field in ("lease_type", "area_name"):
+        assert internal_field not in description
     for token in ("schema://", "data_schema_ref", "adapter://", "getNextSiteData"):
         assert token not in description
 
@@ -492,12 +492,16 @@ def test_presenter_keeps_next_area_absent_when_production_gate_is_closed() -> No
     assert "next_area" not in presentation.description
 
 
-def test_presenter_result_grains_follow_catalog_changes_automatically() -> None:
+def test_presenter_result_grains_follow_catalog_without_internal_field_leak() -> None:
     base = SemanticCatalog.default(housing_next_area_enabled=True)
     housing = base.require_subject("housing")
     changed_shapes = (
         housing.result_shapes[0].model_copy(
-            update={"grain_label": "按目录定义的自定义业务粒度"}
+            update={
+                "grain_label": "按目录定义的自定义业务粒度",
+                "row_fields": ("dm_secret_table_column",),
+                "data_schema_ref": "schema://private/secret-table/9.9",
+            }
         ),
     ) + housing.result_shapes[1:]
     changed = SemanticCatalog(
@@ -516,6 +520,39 @@ def test_presenter_result_grains_follow_catalog_changes_automatically() -> None:
 
     assert presentation is not None
     assert "按目录定义的自定义业务粒度" in presentation.description
+    assert "dm_secret_table_column" not in presentation.description
+    assert "schema://private" not in presentation.description
+
+
+def test_presenter_never_leaks_unvalidated_grain_label_from_custom_catalog() -> None:
+    base = SemanticCatalog.default()
+    housing = base.require_subject("housing")
+    bypassed_validation_shape = housing.result_shapes[0].model_copy(
+        update={
+            "grain_label": "adapter://private/source SELECT secret FROM dm_table",
+            "row_fields": ("dm_secret_column",),
+        }
+    )
+    changed = SemanticCatalog(
+        catalog_version=base.catalog_version,
+        supported_spec_versions=base.supported_spec_versions,
+        subjects={
+            **base.subjects,
+            "housing": housing.model_copy(
+                update={"result_shapes": (bypassed_validation_shape,)}
+            ),
+        },
+        bindings=base.bindings,
+    )
+
+    presentation = SemanticToolPresenter(catalog=changed).present(
+        auth_context=_subject_auth("housing")
+    )
+
+    assert presentation is not None
+    assert "adapter://" not in presentation.description
+    assert "dm_secret" not in presentation.description
+    assert "按所选查询维度返回结果" in presentation.description
 
 
 @pytest.mark.asyncio

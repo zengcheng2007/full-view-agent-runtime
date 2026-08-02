@@ -164,8 +164,8 @@ semantic/catalog/tool-surface，不在本补丁边界内。
 ## Outcome
 
 - `SubjectCapabilityView` now derives a safe result-shape summary from the
-  Catalog: `group_by_selection`, business `grain_label`, and logical
-  `row_fields` only.
+  Catalog: `group_by_selection` and controlled business `grain_label` only.
+  Internal result-contract `row_fields` never enter the model view or Prompt.
 - `GroupBySummary` now carries the Catalog business label, so `next_area` is
   presented as the direct-child-area dimension instead of an unexplained token.
 - `SemanticToolPresenter` maps every group-by selection to its returned row
@@ -179,26 +179,38 @@ semantic/catalog/tool-surface，不在本补丁边界内。
   `governance_analyst_v1`; the event case expects the unified
   `governance.semantic_query` entry.
 
-No schema reference, adapter reference, URL, endpoint, table, or physical
-column metadata is exposed by the new model-visible summary.
+`grain_label` remains optional for backward compatibility. Valid labels use a
+strict business-display character set and reject URL/schema/adapter, path and
+SQL markers. Missing or validation-bypassing labels degrade to a server-fixed
+generic description. No schema reference, adapter reference, URL, endpoint,
+table, or physical column metadata is exposed by the model-visible summary.
+Display-only labels are excluded from the execution fingerprint, so relabeling
+does not invalidate compiled actions or require a Catalog version change.
 
 ## TDD Evidence
 
-The new Catalog/Presenter tests were run before implementation and failed
-because `GroupBySummary` had no label, `SubjectCapabilityView` had no result
-shapes, and the Presenter had no result-grain mapping. The same tests pass after
-the minimal Catalog-derived implementation.
+The Catalog/Presenter tests were run before each implementation step. The
+reviewer revision first failed on legacy `ResultShape` construction, raw
+`row_fields` disclosure, and a malicious custom-Catalog label. All now pass,
+including validation-bypass defense in depth and the unchanged production
+`next_area=False` gate.
 
 ## Verification
 
-- Focused semantic + production wiring: 85 passed.
-- Full test suite: 645 passed, 16 skipped (661 collected).
+- Focused semantic + production wiring: 89 passed.
+- All tests except the shared-contract export assertion: 647 passed,
+  16 skipped, 1 deselected (664 collected).
+- The sole full-suite failure is environmental: `tests/test_contract_export.py`
+  resolves `../.worktrees/contracts`, whose shared symlink was concurrently
+  updated by the integration/P1-2 line with Chinese field metadata. This branch
+  still exports its own pre-P1-2 English metadata. No contract files are in this
+  task scope; the integration branch must run the authoritative combined Gate.
 - Ruff: passed.
 - Pyright: 0 errors, 0 warnings.
 - `compileall`: passed.
 - Live model Eval (`qwen3.7-max`): passed.
   - case: `open-housing-cuiyuan`
   - tools: `governance.resolve_area` then `governance.semantic_query`
-  - semantic spec used `subject=housing` and `group_by=[]`
+  - semantic spec used `subject=housing` and explicit `group_by=[]`
   - terminal status/outcome: `completed/success`
-  - trace: `C:\Users\zengc\AppData\Local\Temp\p1-live-housing-3a696c0ca4684929972ce3b0191b57a1.json`
+  - trace: `C:\Users\zengc\AppData\Local\Temp\p1-live-housing-final-8ce345b4a70944a4a3fd9731198dfde5.json`

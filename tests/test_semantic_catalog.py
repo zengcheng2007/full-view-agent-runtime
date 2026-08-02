@@ -31,6 +31,7 @@ from full_view_agent.semantic import (
     SemanticQuerySpec,
     SubjectAuthorization,
 )
+from full_view_agent.semantic.catalog import ResultShape
 
 # 模型可见面（能力视图、QuerySpec）中不得出现的物理实现词元。
 PHYSICAL_TOKENS = (
@@ -391,20 +392,65 @@ def test_model_view_exposes_safe_catalog_derived_result_grains(
         {
             "group_by_selection": [],
             "grain_label": "按租赁类型汇总",
-            "row_fields": ["lease_type", "dwelling_count"],
         },
         {
             "group_by_selection": ["next_area"],
             "grain_label": "按直接下级区划汇总",
-            "row_fields": ["area_code", "area_name", "dwelling_count"],
         },
     ]
 
     serialized = housing.model_dump_json()
+    assert "row_fields" not in serialized
     assert "data_schema_ref" not in serialized
     assert "schema://" not in serialized
     for token in PHYSICAL_TOKENS:
         assert token not in serialized
+
+
+def test_result_shape_display_label_is_backward_compatible_and_safe() -> None:
+    legacy = ResultShape(
+        shape_id="legacy_table",
+        data_schema_ref="schema://internal/legacy-table/1.0",
+        row_fields=("internal_column",),
+    )
+    assert legacy.grain_label is None
+
+    for unsafe_label in (
+        "adapter://private/source",
+        "https://internal.example/data",
+        "schema://data/private",
+        "SELECT secret_column FROM dm_private_table",
+        r"C:\private\table.csv",
+    ):
+        with pytest.raises(ValidationError, match="business display text"):
+            ResultShape(
+                shape_id="unsafe_table",
+                data_schema_ref="schema://internal/unsafe-table/1.0",
+                grain_label=unsafe_label,
+                row_fields=("internal_column",),
+            )
+
+
+def test_display_only_grain_label_does_not_change_execution_fingerprint() -> None:
+    base = SemanticCatalog.default()
+    housing = base.require_subject("housing")
+    relabeled = housing.model_copy(
+        update={
+            "result_shapes": (
+                housing.result_shapes[0].model_copy(
+                    update={"grain_label": "按另一种安全业务标签展示"}
+                ),
+            )
+        }
+    )
+    changed = SemanticCatalog(
+        catalog_version=base.catalog_version,
+        supported_spec_versions=base.supported_spec_versions,
+        subjects={**base.subjects, "housing": relabeled},
+        bindings=base.bindings,
+    )
+
+    assert changed.execution_fingerprint == base.execution_fingerprint
 
 
 # ---------------------------------------------------------------------------

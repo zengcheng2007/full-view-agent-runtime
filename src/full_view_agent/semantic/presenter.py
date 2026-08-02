@@ -182,6 +182,5 @@ class SemanticToolPresenter:
         else:
             group_by = f"group_by={list(selection)}"
         return (
-            f"{group_by} -> {shape.grain_label}，"
-            f"返回行字段 {list(shape.row_fields)}"
+            f"{group_by} -> {shape.grain_label}"
         )
