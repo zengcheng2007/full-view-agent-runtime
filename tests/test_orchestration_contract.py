@@ -144,6 +144,7 @@ class _FinishOnlyPlanner:
         del state
         return FinishAction(
             summary="无法通过工具获取数据，当前无法完成该查询。",
+            legacy=True,
         )
 
 
@@ -153,10 +154,16 @@ class _HallucinatedPlanner:
         return FinishAction(summary="西湖区独居老人共 9999 人")
 
 
+class _DefaultPlainCapabilityPlanner:
+    async def decide(self, state: HarnessState) -> FinishAction:
+        del state
+        return FinishAction(summary="我可以确认住宅出租有999999套。")
+
+
 class _SingleToolPlanner:
     async def decide(self, state: HarnessState) -> ToolAction | FinishAction:
         if state.tool_results:
-            return FinishAction(summary="查询完成")
+            return FinishAction(summary="查询完成", legacy=True)
         return ToolAction(
             tool_id="governance.query_population_metrics",
             arguments={
@@ -583,6 +590,28 @@ async def test_production_plain_no_result_revises_then_stops_across_orchestrator
 
 
 @pytest.mark.asyncio
+async def test_default_custom_planner_cannot_reopen_plain_text_bypass(
+    orch_factory: OrchFactory,
+) -> None:
+    orch, store, events = orch_factory(planner=_DefaultPlainCapabilityPlanner())
+    run_id = await _make_run(store)
+
+    await orch.execute(user_id="u", run_id=run_id)
+
+    run = await store.get_run(user_id="u", run_id=run_id)
+    assert run.status == "completed"
+    messages = await store.list_messages(user_id="u", session_id=run.session_id)
+    answer = next(message for message in messages if message.role == "assistant")
+    assert answer.content[0].text == (
+        "抱歉，当前回答仍包含无法由查询结果核验的内容，已停止生成结论。"
+    )
+    assert "999999" not in answer.content[0].text
+    event_types = [event.type for event in await events.list_events(run_id=run_id)]
+    assert "tool.started" not in event_types
+    assert "run.failed" not in event_types
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize(
     ("kind", "expected_summary"),
     (
@@ -817,11 +846,17 @@ async def test_completion_rejects_hallucination(
     rid = await _make_run(store)
     await orch.execute(user_id="u", run_id=rid)
     t = await store.get_run(user_id="u", run_id=rid)
-    # Validator rejects → must be failed, not completed
-    assert t.status == "failed"
-    assert t.outcome == "failed"
+    assert t.status == "completed"
+    assert t.outcome == "success"
+    messages = await store.list_messages(user_id="u", session_id=t.session_id)
+    answer = next(message for message in messages if message.role == "assistant")
+    assert answer.content[0].text == (
+        "抱歉，当前回答仍包含无法由查询结果核验的内容，已停止生成结论。"
+    )
+    assert "9999" not in answer.content[0].text
     types = {e.type for e in await events.list_events(run_id=rid)}
-    assert "run.completed" not in types
+    assert "run.completed" in types
+    assert "run.failed" not in types
     assert "result.available" not in types
 
 

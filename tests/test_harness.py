@@ -28,6 +28,15 @@ from full_view_agent.domain.models import (
 )
 
 
+def test_finish_action_defaults_to_fail_closed_mode() -> None:
+    assert FinishAction(summary="我可以确认住宅出租有999999套。").legacy is False
+
+
+def legacy_finish(summary: str) -> FinishAction:
+    """Explicit adapter for tests that intentionally exercise the retired text gate."""
+    return FinishAction(summary=summary, legacy=True)
+
+
 def auth_context() -> AuthContext:
     return AuthContext.model_validate(
         {
@@ -188,7 +197,7 @@ class OneToolPlanner:
                 tool_id="governance.resolve_area",
                 arguments={"query": "西湖区"},
             )
-        return FinishAction(summary="已完成")
+        return FinishAction(summary="已完成", legacy=True)
 
 
 class RepeatingUnsupportedInferencePlanner:
@@ -211,7 +220,8 @@ class RepeatingUnsupportedInferencePlanner:
             summary=(
                 "西湖区出租房共 4420 套。\n"
                 "> 注：各类型相同，可能反映当前数据源采用固定统计口径。"
-            )
+            ),
+            legacy=True,
         )
 
 
@@ -222,7 +232,7 @@ class RepeatingUnsupportedAreaPlanner:
                 tool_id="governance.resolve_area",
                 arguments={"query": "西湖区"},
             )
-        return FinishAction(summary="拱墅区查询完成。")
+        return FinishAction(summary="拱墅区查询完成。", legacy=True)
 
 
 class RejectAfterRevisionPlanner:
@@ -233,8 +243,8 @@ class RejectAfterRevisionPlanner:
                 arguments={"query": "西湖区"},
             )
         if state.completion_revision_count == 0:
-            return FinishAction(summary="拱墅区查询完成。")
-        return FinishAction(summary="")
+            return FinishAction(summary="拱墅区查询完成。", legacy=True)
+        return FinishAction(summary="", legacy=True)
 
 
 @pytest.mark.asyncio
@@ -336,7 +346,7 @@ async def test_deterministic_validator_accepts_successful_tool_result() -> None:
         )
     )
     # denied only → no fabricated numbers → accept
-    assert await validator.validate(state, FinishAction(summary="抱歉，无权访问该区域")) is True
+    assert await validator.validate(state, legacy_finish("抱歉，无权访问该区域")) is True
 
 
 @pytest.mark.asyncio
@@ -348,11 +358,9 @@ async def test_deterministic_validator_requests_revision_for_unsupported_inferen
             successful_housing_result(),
         )
     )
-    action = FinishAction(
-        summary=(
-            "西湖区出租房共 4420 套。\n"
-            "> 注：各类型相同，可能反映当前数据源采用固定统计口径。"
-        )
+    action = legacy_finish(
+        "西湖区出租房共 4420 套。\n"
+        "> 注：各类型相同，可能反映当前数据源采用固定统计口径。"
     )
 
     assessment = await validator.assess(state, action)
@@ -372,16 +380,14 @@ async def test_deterministic_validator_checks_numbers_against_fact_ledger() -> N
 
     grounded = await validator.assess(
         state,
-        FinishAction(
-            summary=(
-                "共 5 类，每类 884 套，合计 4,420 套，"
-                "各类型占比均为 20%。"
-            )
+        legacy_finish(
+            "共 5 类，每类 884 套，合计 4,420 套，"
+            "各类型占比均为 20%。"
         ),
     )
     fabricated = await validator.assess(
         state,
-        FinishAction(summary="共 5 类，每类 884 套，合计 4,999 套。"),
+        legacy_finish("共 5 类，每类 884 套，合计 4,999 套。"),
     )
 
     assert grounded.status == "accept"
@@ -426,13 +432,13 @@ async def test_deterministic_validator_checks_area_and_object_facts() -> None:
     state = HarnessState(tool_results=(successful_area_result(), object_result))
 
     grounded = await validator.assess(
-        state, FinishAction(summary="西湖区的翠苑一区12幢查询完成。")
+        state, legacy_finish("西湖区的翠苑一区12幢查询完成。")
     )
     wrong_area = await validator.assess(
-        state, FinishAction(summary="拱墅区的翠苑一区12幢查询完成。")
+        state, legacy_finish("拱墅区的翠苑一区12幢查询完成。")
     )
     wrong_object = await validator.assess(
-        state, FinishAction(summary="西湖区的翠苑一区13幢查询完成。")
+        state, legacy_finish("西湖区的翠苑一区13幢查询完成。")
     )
 
     assert grounded.status == "accept"
@@ -447,9 +453,7 @@ async def test_deterministic_validator_does_not_treat_area_dimensions_as_names()
 
     assessment = await validator.assess(
         state,
-        FinishAction(
-            summary="杭州全市已按区县汇总，可查看各区县和排名靠前的几个街道。"
-        ),
+        legacy_finish("杭州全市已按区县汇总，可查看各区县和排名靠前的几个街道。"),
     )
 
     assert assessment.status == "accept"
@@ -484,16 +488,16 @@ async def test_deterministic_validator_checks_comparative_judgements() -> None:
     state = HarnessState(tool_results=(result,))
 
     maximum = await validator.assess(
-        state, FinishAction(summary="住宅出租最多，为 100 套。")
+        state, legacy_finish("住宅出租最多，为 100 套。")
     )
     tied = await validator.assess(
-        state, FinishAction(summary="商铺出租和公寓出租并列最少，均为 80 套。")
+        state, legacy_finish("商铺出租和公寓出租并列最少，均为 80 套。")
     )
     false_maximum = await validator.assess(
-        state, FinishAction(summary="商铺出租最多，为 80 套。")
+        state, legacy_finish("商铺出租最多，为 80 套。")
     )
     false_same = await validator.assess(
-        state, FinishAction(summary="三类出租房数量全部相同。")
+        state, legacy_finish("三类出租房数量全部相同。")
     )
 
     assert maximum.status == "accept"
@@ -528,7 +532,7 @@ async def test_deterministic_validator_rejects_label_number_mismatch() -> None:
 
     assessment = await validator.assess(
         HarnessState(tool_results=(result,)),
-        FinishAction(summary="住宅出租为 80 套，商铺出租为 100 套。"),
+        legacy_finish("住宅出租为 80 套，商铺出租为 100 套。"),
     )
 
     assert assessment.status == "revise"
@@ -552,7 +556,7 @@ async def test_deterministic_validator_rejects_adjacent_label_number_mismatch(
     )
 
     assessment = await DeterministicCompletionValidator().assess(
-        HarnessState(tool_results=(result,)), FinishAction(summary=summary)
+        HarnessState(tool_results=(result,)), legacy_finish(summary)
     )
 
     assert assessment.status == "revise"
@@ -582,7 +586,7 @@ async def test_deterministic_validator_keeps_same_labels_scoped_across_results(
 
     assessment = await DeterministicCompletionValidator().assess(
         HarnessState(tool_results=(result_a, result_b)),
-        FinishAction(summary=summary),
+        legacy_finish(summary),
     )
 
     assert assessment.status == "accept"
@@ -614,7 +618,7 @@ async def test_deterministic_validator_accepts_respective_label_values() -> None
 
     assessment = await validator.assess(
         HarnessState(tool_results=(result,)),
-        FinishAction(summary="住宅出租和商铺出租分别为 100 套和 80 套。"),
+        legacy_finish("住宅出租和商铺出租分别为 100 套和 80 套。"),
     )
 
     assert assessment.status == "accept"
@@ -636,7 +640,7 @@ async def test_deterministic_validator_checks_area_before_claim_verbs(
         HarnessState(
             tool_results=(successful_area_result(), successful_housing_result())
         ),
-        FinishAction(summary=summary),
+        legacy_finish(summary),
     )
 
     assert assessment.status == "revise"
@@ -675,7 +679,7 @@ async def test_deterministic_validator_checks_inverted_extrema(summary: str) -> 
     )
 
     assessment = await validator.assess(
-        HarnessState(tool_results=(result,)), FinishAction(summary=summary)
+        HarnessState(tool_results=(result,)), legacy_finish(summary)
     )
 
     assert assessment.status == "revise"
@@ -687,9 +691,7 @@ async def test_deterministic_validator_accepts_all_same_and_derived_percentages(
     validator = DeterministicCompletionValidator()
     assessment = await validator.assess(
         HarnessState(tool_results=(successful_housing_result(),)),
-        FinishAction(
-            summary="5 类出租房数量全部相同，每类 884 套，各占 20%。"
-        ),
+        legacy_finish("5 类出租房数量全部相同，每类 884 套，各占 20%。"),
     )
 
     assert assessment.status == "accept"
@@ -785,18 +787,18 @@ async def test_deterministic_validator_accepts_allowed_no_result_prefixes() -> N
     validator = DeterministicCompletionValidator()
     state = HarnessState()
     assert (
-        await validator.validate(state, FinishAction(summary="抱歉，无法完成该查询"))
+        await validator.validate(state, legacy_finish("抱歉，无法完成该查询"))
         is True
     )
     assert (
         await validator.validate(
-            state, FinishAction(summary="请提供具体的区划名称")
+            state, legacy_finish("请提供具体的区划名称")
         )
         is True
     )
     assert (
         await validator.validate(
-            state, FinishAction(summary="我可以查询授权范围内的治理数据。")
+            state, legacy_finish("我可以查询授权范围内的治理数据。")
         )
         is True
     )
@@ -824,21 +826,21 @@ async def test_deterministic_validator_rejects_hallucinated_data_without_tools()
     assert (
         await validator.validate(
             state,
-            FinishAction(summary="根据当前数据，西湖区独居老人共 1234 人"),
+            legacy_finish("根据当前数据，西湖区独居老人共 1234 人"),
         )
         is False
     )
     assert (
         await validator.validate(
             state,
-            FinishAction(summary="以下是查询结果：西湖区独居老人共 1234 人"),
+            legacy_finish("以下是查询结果：西湖区独居老人共 1234 人"),
         )
         is False
     )
     assert (
         await validator.validate(
             state,
-            FinishAction(summary="西湖区独居老人共 1234 人"),
+            legacy_finish("西湖区独居老人共 1234 人"),
         )
         is False
     )
@@ -853,14 +855,14 @@ async def test_deterministic_validator_rejects_fabrication_with_numbers() -> Non
     assert (
         await validator.validate(
             HarnessState(),
-            FinishAction(summary="该区域独居老人有1234人"),
+            legacy_finish("该区域独居老人有1234人"),
         )
         is False
     )
     assert (
         await validator.validate(
             HarnessState(),
-            FinishAction(summary="没有问题，西湖区独居老人1234人"),
+            legacy_finish("没有问题，西湖区独居老人1234人"),
         )
         is False
     )
@@ -880,7 +882,7 @@ async def test_deterministic_validator_rejects_fabrication_with_numbers() -> Non
                     ),
                 )
             ),
-            FinishAction(summary="Tool 失败后：查询成功，人数为1234人"),
+            legacy_finish("Tool 失败后：查询成功，人数为1234人"),
         )
         is False
     )
@@ -899,7 +901,7 @@ async def test_deterministic_validator_rejects_fabrication_with_numbers() -> Non
                     ),
                 )
             ),
-            FinishAction(summary="查询成功，西湖区独居老人1234人"),
+            legacy_finish("查询成功，西湖区独居老人1234人"),
         )
         is False
     )
@@ -923,7 +925,7 @@ async def test_deterministic_validator_accepts_failure_acknowledgement() -> None
     assert (
         await validator.validate(
             state,
-            FinishAction(summary="抱歉，上游服务暂时不可用，请稍后重试。"),
+            legacy_finish("抱歉，上游服务暂时不可用，请稍后重试。"),
         )
         is True
     )
@@ -954,7 +956,7 @@ async def test_deterministic_validator_accepts_real_data_result() -> None:
     assert (
         await validator.validate(
             state,
-            FinishAction(summary="西湖区独居老人共 1234 人"),
+            legacy_finish("西湖区独居老人共 1234 人"),
         )
         is True
     )

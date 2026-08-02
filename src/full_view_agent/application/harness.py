@@ -55,7 +55,7 @@ class FinishAction:
     summary: str
     structured_finish: StructuredFinish | None = None
     structured_finish_error: str | None = None
-    legacy: bool = True
+    legacy: bool = False
 
 
 HarnessAction = ToolAction | FinishAction
@@ -507,6 +507,8 @@ class AgentHarness:
                 return control, assessment.safe_summary or action.summary
             if control.state.completion_revision_count > 0:
                 if assessment.safe_summary:
+                    # This text was produced by deterministic server logic, not by the
+                    # model. Re-evaluate it through the retired text gate explicitly.
                     safe_assessment = await self._assess_completion(
                         control.state,
                         FinishAction(summary=assessment.safe_summary, legacy=True),

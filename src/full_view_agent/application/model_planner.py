@@ -72,6 +72,7 @@ class ModelPlanner:
         if any(tool.tool_id == FINISH_TOOL_ID for tool in request.tools):
             raise ModelContractError("reserved finish tool cannot be a business tool")
         if not request.tools and not state.tool_results:
+            # Server-authored authorization stop: no model text is being trusted.
             return FinishAction(
                 summary="抱歉，当前账号没有可用于该查询的授权能力。",
                 legacy=True,

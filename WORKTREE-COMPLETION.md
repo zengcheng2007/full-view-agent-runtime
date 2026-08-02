@@ -57,6 +57,9 @@
   状态，后两者必须绑定匹配的 denied/failed ToolResult，全部使用服务端固定模板。
 - Native/LangGraph 已覆盖“有授权 Tool、零 Tool 调用、伪造能力正文”的反例，
   并覆盖正常 capability/clarification 无模型数字泄漏。
+- `FinishAction.legacy` 默认值改为 `False`；新建或自定义 Planner 省略参数时自动
+  fail-closed。旧文本门禁测试、服务端固定文案重评和兼容 Planner 必须逐点显式
+  `legacy=True`，并在代码中说明信任来源。
 
 ## TDD 证据
 
@@ -80,7 +83,7 @@
 
 ## Fresh 验证
 
-- 全量测试：`594 passed, 18 skipped`（`612 collected`）。
+- 全量测试：`597 passed, 18 skipped`（`615 collected`）。
 - Ruff：`All checks passed!`。
 - Pyright：`0 errors, 0 warnings, 0 informations`。
 - Compileall：通过。

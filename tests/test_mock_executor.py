@@ -143,7 +143,7 @@ class DeniedCapability:
 class ResolveAreaPlanner:
     async def decide(self, state):
         if state.tool_results:
-            return FinishAction(summary="区划解析完成")
+            return FinishAction(summary="区划解析完成", legacy=True)
         return ToolAction(
             tool_id="governance.resolve_area",
             arguments={"query": "西湖区"},
@@ -152,7 +152,10 @@ class ResolveAreaPlanner:
 
 class DirectFinishPlanner:
     async def decide(self, _state):
-        return FinishAction(summary="我可以查询授权范围内的治理数据。")
+        return FinishAction(
+            summary="我可以查询授权范围内的治理数据。",
+            legacy=True,
+        )
 
 
 class TwoToolPlanner:
@@ -167,7 +170,7 @@ class TwoToolPlanner:
                 tool_id="governance.query_population_metrics",
                 arguments={"query": {"scope": {"area_code": "330106"}}},
             )
-        return FinishAction(summary="区划与人口查询均已完成")
+        return FinishAction(summary="区划与人口查询均已完成", legacy=True)
 
 
 class RetryFailedToolPlanner:

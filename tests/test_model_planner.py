@@ -255,7 +255,10 @@ async def test_model_planner_stops_without_calling_model_when_no_tools_are_autho
 
     action = await planner.decide(HarnessState())
 
-    assert action == FinishAction(summary="抱歉，当前账号没有可用于该查询的授权能力。")
+    assert action == FinishAction(
+        summary="抱歉，当前账号没有可用于该查询的授权能力。",
+        legacy=True,
+    )
     assert provider.requests == []
 
 
