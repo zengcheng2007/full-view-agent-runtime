@@ -104,3 +104,55 @@
 2. Result ID、fingerprint、row locator 和 operation 是否全部 fail-closed。
 3. Scripted replay 的 fingerprint 重绑定在多个同指纹 Result 时是否保持拒绝。
 4. Native/LangGraph 是否只复用 Harness，没有复制 Claim 校验逻辑。
+
+---
+
+# P1 业务标签服务端渲染补丁
+
+## 交付结果
+
+- `PopulationMetricRow` / `HousingLeaseTypeRow` / `HousingAreaGroupRow` /
+  `EventFinishRateRow` 以 Pydantic `Field` 元数据作为字段标签、单位和枚举
+  展示名的唯一来源。
+- Claims 仍只接受 logical field 与原始值；服务端从已验证
+  `DataResult.data` 的实际行模型解析展示元数据，未知元数据回退到
+  logical field/raw value。
+- 模型无法传入或伪造 `label/unit`；单位与枚举映射不取自
+  模型正文。
+- 数值统一经 `Decimal` 安全格式化，整数不会回退为 `85.0`。
+- 典型输出：`住宅出租的出租房数量为884套。`、`网格的办结率为85%。`。
+- 展示元数据不进入 `model_dump`，Result 指纹仍只基于数据值。
+
+## 生成契约
+
+使用现有 `scripts/export_contracts.py` 生成器刷新共享 `contracts/`。生成器
+证明仅以下文件发生变化：
+
+- `openapi/agent-api-v1.yaml`
+- `schemas/data/table-data-result.schema.json`
+- `schemas/data/tool-specific/event-finish-rate-table.schema.json`
+- `schemas/data/tool-specific/housing-area-group-table.schema.json`
+- `schemas/data/tool-specific/housing-lease-type-table.schema.json`
+- `schemas/data/tool-specific/population-metric-table.schema.json`
+- `schemas/tools/tool-result.schema.json`
+
+对新旧生成物递归移除 `title/unit/value_labels` 后逐文件完全一致；
+数据值、类型、枚举和 `required` 未变。
+
+## 验证
+
+- TDD RED：住房、人口、事件 4 个新断言均准确复现 logical field、
+  无单位、英文层级与 `85.0` 问题。
+- 全量 pytest：`734 passed, 18 skipped` (`752 collected`)。
+- Ruff：通过。
+- Pyright：`0 errors, 0 warnings`。
+- Compileall：通过。
+
+## 实际 Event Live
+
+`open-event-finish-rate-query.yaml` 已使用主 `agent-runtime/.env` 实跑，结果
+为 **FAIL**，但未进入 claims 渲染：模型第一轮仅获得
+`governance.resolve_area + full_view.finish_answer`，解析西湖区后第二轮只剩
+`finish_answer`，未获得 `semantic_query/query_event_metrics`。实际 `tool_ids`
+仅 `resolve_area`、Evidence 为 1、answer 为 null。该阻塞属于
+semantic/catalog/tool-surface，不在本补丁边界内。

@@ -1,10 +1,11 @@
 from __future__ import annotations
 
+from collections.abc import Mapping
 from dataclasses import dataclass
 from decimal import Decimal, InvalidOperation
 from typing import Literal
 
-from pydantic import Field, model_validator
+from pydantic import BaseModel, Field, model_validator
 
 from full_view_agent.domain.models import ContractModel, ToolResult
 
@@ -111,8 +112,14 @@ def assess_structured_finish(
         ):
             return ClaimAssessment(False, "claim_truncated_aggregate")
 
-        rows = _claim_collection(result, claim.collection)
+        collection = _claim_collection(result, claim.collection)
+        rows = collection.rows
         selected = [row for row in rows if _matches(row, claim.row_locator)]
+        selected_models = [
+            collection.models[index]
+            for index, row in enumerate(rows)
+            if _matches(row, claim.row_locator)
+        ]
         direct = claim.operation in {"value", "is_min", "is_max"}
         if not selected:
             return ClaimAssessment(False, "claim_row_not_found")
@@ -126,22 +133,33 @@ def assess_structured_finish(
             return ClaimAssessment(False, "claim_operation_mismatch")
         if not _values_equal(computed, claim.value):
             return ClaimAssessment(False, "claim_value_mismatch")
-        rendered.append(_render_claim(claim, computed))
+        rendered.append(_render_claim(claim, computed, selected_models))
     return ClaimAssessment(True, "grounded", "\n".join(rendered))
 
 
 _OPERATION_MISMATCH = object()
 
 
-def _claim_collection(result: object, collection: str) -> list[dict[str, ClaimScalar]]:
+@dataclass(frozen=True)
+class _ClaimCollection:
+    rows: list[dict[str, ClaimScalar]]
+    models: list[BaseModel]
+
+
+def _claim_collection(result: object, collection: str) -> _ClaimCollection:
     data = getattr(result, "data", None)
-    if data is None:
-        return []
+    if not isinstance(data, BaseModel):
+        return _ClaimCollection([], [])
     dumped = data.model_dump(mode="python")
     if collection == "root":
-        return [dumped]
-    rows = dumped.get("rows")
-    return rows if isinstance(rows, list) else []
+        return _ClaimCollection([dumped], [data])
+    row_models = getattr(data, "rows", None)
+    if not isinstance(row_models, list) or not all(
+        isinstance(row, BaseModel) for row in row_models
+    ):
+        return _ClaimCollection([], [])
+    rows = [row.model_dump(mode="python") for row in row_models]
+    return _ClaimCollection(rows, row_models)
 
 
 def _matches(row: dict[str, ClaimScalar], locator: dict[str, ClaimScalar]) -> bool:
@@ -209,33 +227,78 @@ def _values_equal(left: object, right: object) -> bool:
     return type(left) is type(right) and left == right
 
 
-def _render_claim(claim: AnswerClaim, value: object) -> str:
-    subject = "、".join(str(item) for item in claim.row_locator.values())
+def _render_claim(
+    claim: AnswerClaim,
+    value: object,
+    selected_models: list[BaseModel],
+) -> str:
+    model = selected_models[0] if selected_models else None
+    subject = "、".join(
+        _render_locator_value(model, field, item)
+        for field, item in claim.row_locator.items()
+    )
     prefix = f"{subject}的" if subject else ""
-    rendered_value = _render_value(value)
+    field_label, unit = _field_display(model, claim.field)
+    rendered_value = _render_value(value, unit=unit)
     if claim.operation == "sum":
-        return f"{prefix}{claim.field}合计为{rendered_value}。"
+        return f"{prefix}{field_label}合计为{rendered_value}。"
     if claim.operation == "count":
-        return f"{prefix}记录数为{rendered_value}。"
+        return f"{prefix}记录数为{_render_value(value)}。"
     if claim.operation == "min":
-        return f"{prefix}{claim.field}最小值为{rendered_value}。"
+        return f"{prefix}{field_label}最小值为{rendered_value}。"
     if claim.operation == "max":
-        return f"{prefix}{claim.field}最大值为{rendered_value}。"
+        return f"{prefix}{field_label}最大值为{rendered_value}。"
     if claim.operation == "is_min":
-        return f"{prefix}{claim.field}为{rendered_value}，且为最小值。"
+        return f"{prefix}{field_label}为{rendered_value}，且为最小值。"
     if claim.operation == "is_max":
-        return f"{prefix}{claim.field}为{rendered_value}，且为最大值。"
+        return f"{prefix}{field_label}为{rendered_value}，且为最大值。"
     if claim.operation == "all_equal":
-        return f"{prefix}{claim.field}全部相同。"
-    return f"{prefix}{claim.field}为{rendered_value}。"
+        return f"{prefix}{field_label}全部相同。"
+    return f"{prefix}{field_label}为{rendered_value}。"
 
 
-def _render_value(value: object) -> str:
-    if isinstance(value, Decimal):
-        normalized = value.normalize()
-        if normalized == normalized.to_integral():
-            return str(normalized.quantize(Decimal(1)))
-        return format(normalized, "f").rstrip("0").rstrip(".")
+def _field_extra(model: BaseModel | None, field: str) -> Mapping[str, object]:
+    if model is None:
+        return {}
+    field_info = type(model).model_fields.get(field)
+    if field_info is None or not isinstance(field_info.json_schema_extra, dict):
+        return {}
+    return field_info.json_schema_extra
+
+
+def _field_display(model: BaseModel | None, field: str) -> tuple[str, str]:
+    if model is None:
+        return field, ""
+    field_info = type(model).model_fields.get(field)
+    if field_info is None:
+        return field, ""
+    extra = _field_extra(model, field)
+    unit = extra.get("unit")
+    return field_info.title or field, unit if isinstance(unit, str) else ""
+
+
+def _render_locator_value(
+    model: BaseModel | None,
+    field: str,
+    value: ClaimScalar,
+) -> str:
+    labels = _field_extra(model, field).get("value_labels")
+    if isinstance(labels, dict):
+        label = labels.get(value)
+        if isinstance(label, str):
+            return label
+    return _render_value(value)
+
+
+def _render_value(value: object, *, unit: str = "") -> str:
     if isinstance(value, bool):
-        return "是" if value else "否"
-    return str(value)
+        rendered = "是" if value else "否"
+    elif isinstance(value, (int, float, Decimal)):
+        normalized = Decimal(str(value)).normalize()
+        if normalized == normalized.to_integral():
+            rendered = str(normalized.quantize(Decimal(1)))
+        else:
+            rendered = format(normalized, "f").rstrip("0").rstrip(".")
+    else:
+        rendered = str(value)
+    return f"{rendered}{unit}"

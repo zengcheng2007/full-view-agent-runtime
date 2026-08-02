@@ -1,4 +1,5 @@
 import pytest
+from pydantic import ValidationError
 
 from full_view_agent.application.answer_claims import (
     FINISH_TOOL_INPUT_SCHEMA,
@@ -11,9 +12,16 @@ from full_view_agent.application.harness import (
     HarnessState,
 )
 from full_view_agent.domain.models import (
+    EventFinishRateRow,
+    EventFinishRateTable,
     GovernanceObjectRef,
+    HousingAreaGroupRow,
+    HousingAreaGroupTable,
     ObjectProfileData,
     ObjectProfileResult,
+    PopulationMetricRow,
+    PopulationMetricTable,
+    TableDataResult,
     ToolResult,
 )
 
@@ -60,7 +68,127 @@ async def test_structured_claim_accepts_exact_row_value_and_renders_server_fact(
     )
 
     assert assessment.status == "accept"
-    assert assessment.safe_summary == "住宅出租的dwelling_count为884。"
+    assert assessment.safe_summary == "住宅出租的出租房数量为884套。"
+
+
+def metric_result(
+    *,
+    result_id: str,
+    data: PopulationMetricTable | HousingAreaGroupTable | EventFinishRateTable,
+) -> ToolResult:
+    rows = data.rows
+    return ToolResult(
+        tool_call_id=f"tc-{result_id}",
+        tool_id="governance.semantic_query",
+        tool_version="1.0.0",
+        status="success",
+        summary="查询成功",
+        data_result=TableDataResult(
+            result_id=result_id,
+            data_schema_ref=f"schema://data/{result_id}/1.0.0",
+            result_fingerprint=f"sha256:{result_id}",
+            data=data,
+            row_count=len(rows),
+        ),
+    )
+
+
+@pytest.mark.asyncio
+async def test_event_claim_renders_contract_label_unit_and_enum_label() -> None:
+    result = metric_result(
+        result_id="event",
+        data=EventFinishRateTable(
+            rows=[EventFinishRateRow(level="grid", finish_rate=85.0)]
+        ),
+    )
+    event_claim = claim(
+        result_id="event",
+        result_fingerprint="sha256:event",
+        locator={"level": "grid"},
+        field="finish_rate",
+        value=85,
+    )
+
+    assessment = await DeterministicCompletionValidator().assess(
+        HarnessState(tool_results=(result,)), finish(event_claim)
+    )
+
+    assert assessment.status == "accept"
+    assert assessment.safe_summary == "网格的办结率为85%。"
+
+
+@pytest.mark.asyncio
+async def test_population_claim_renders_contract_label_and_unit() -> None:
+    result = metric_result(
+        result_id="population",
+        data=PopulationMetricTable(
+            rows=[
+                PopulationMetricRow(
+                    area_code="330106", area_name="西湖区", person_count=1200
+                )
+            ]
+        ),
+    )
+    population_claim = claim(
+        result_id="population",
+        result_fingerprint="sha256:population",
+        locator={"area_name": "西湖区"},
+        field="person_count",
+        value=1200,
+    )
+
+    assessment = await DeterministicCompletionValidator().assess(
+        HarnessState(tool_results=(result,)), finish(population_claim)
+    )
+
+    assert assessment.status == "accept"
+    assert assessment.safe_summary == "西湖区的人口数量为1200人。"
+
+
+@pytest.mark.asyncio
+async def test_housing_area_claim_uses_same_contract_metadata() -> None:
+    result = metric_result(
+        result_id="housing-area",
+        data=HousingAreaGroupTable(
+            rows=[
+                HousingAreaGroupRow(
+                    area_code="330106", area_name="西湖区", dwelling_count=3200
+                )
+            ]
+        ),
+    )
+    area_claim = claim(
+        result_id="housing-area",
+        result_fingerprint="sha256:housing-area",
+        locator={"area_name": "西湖区"},
+        value=3200,
+    )
+
+    assessment = await DeterministicCompletionValidator().assess(
+        HarnessState(tool_results=(result,)), finish(area_claim)
+    )
+
+    assert assessment.status == "accept"
+    assert assessment.safe_summary == "西湖区的出租房数量为3200套。"
+
+
+def test_model_cannot_supply_claim_label_or_unit() -> None:
+    payload = claim().model_dump(mode="python") | {
+        "label": "伪造的安全字段",
+        "unit": "亿套",
+    }
+
+    with pytest.raises(ValidationError):
+        AnswerClaim.model_validate(payload)
+
+
+def test_display_metadata_does_not_enter_result_data_fingerprint_input() -> None:
+    row = EventFinishRateRow(level="grid", finish_rate=85.0)
+
+    assert row.model_dump(mode="python") == {
+        "level": "grid",
+        "finish_rate": 85.0,
+    }
 
 
 @pytest.mark.asyncio

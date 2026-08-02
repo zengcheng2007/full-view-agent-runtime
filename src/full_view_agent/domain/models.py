@@ -539,9 +539,13 @@ class AgentEvent(ContractModel):
 
 
 class PopulationMetricRow(ContractModel):
-    area_code: str
-    area_name: str
-    person_count: int = Field(ge=0)
+    area_code: str = Field(title="区域编码")
+    area_name: str = Field(title="区域")
+    person_count: int = Field(
+        ge=0,
+        title="人口数量",
+        json_schema_extra={"unit": "人"},
+    )
 
 
 class PopulationMetricTable(ContractModel):
@@ -549,8 +553,12 @@ class PopulationMetricTable(ContractModel):
 
 
 class HousingLeaseTypeRow(ContractModel):
-    lease_type: str = Field(min_length=1, max_length=100)
-    dwelling_count: int = Field(ge=0)
+    lease_type: str = Field(min_length=1, max_length=100, title="出租类型")
+    dwelling_count: int = Field(
+        ge=0,
+        title="出租房数量",
+        json_schema_extra={"unit": "套"},
+    )
 
 
 class HousingLeaseTypeTable(ContractModel):
@@ -558,9 +566,13 @@ class HousingLeaseTypeTable(ContractModel):
 
 
 class HousingAreaGroupRow(ContractModel):
-    area_code: str = Field(min_length=1, max_length=32)
-    area_name: str = Field(min_length=1, max_length=200)
-    dwelling_count: int = Field(ge=0)
+    area_code: str = Field(min_length=1, max_length=32, title="区域编码")
+    area_name: str = Field(min_length=1, max_length=200, title="区域")
+    dwelling_count: int = Field(
+        ge=0,
+        title="出租房数量",
+        json_schema_extra={"unit": "套"},
+    )
 
 
 class HousingAreaGroupTable(ContractModel):
@@ -568,8 +580,22 @@ class HousingAreaGroupTable(ContractModel):
 
 
 class EventFinishRateRow(ContractModel):
-    level: Literal["grid", "community", "street"]
-    finish_rate: float = Field(ge=0, le=100)
+    level: Literal["grid", "community", "street"] = Field(
+        title="层级",
+        json_schema_extra={
+            "value_labels": {
+                "grid": "网格",
+                "community": "社区",
+                "street": "街道",
+            }
+        },
+    )
+    finish_rate: float = Field(
+        ge=0,
+        le=100,
+        title="办结率",
+        json_schema_extra={"unit": "%"},
+    )
 
 
 class EventFinishRateTable(ContractModel):
