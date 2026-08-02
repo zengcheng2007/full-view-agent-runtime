@@ -1,5 +1,9 @@
 import pytest
 
+from full_view_agent.application.answer_claims import (
+    FINISH_TOOL_ID,
+    AnswerClaim,
+)
 from full_view_agent.application.errors import BudgetExceeded, ModelContractError
 from full_view_agent.application.harness import FinishAction, HarnessState, ToolAction
 from full_view_agent.application.model_planner import ModelPlanner
@@ -38,6 +42,21 @@ class EmptyToolContextBuilder(StaticContextBuilder):
         self.request = ModelRequest(
             messages=(ModelMessage(role="user", content="查询业务数据"),),
             tools=(),
+        )
+
+
+class ReservedFinishToolContextBuilder(StaticContextBuilder):
+    def __init__(self) -> None:
+        super().__init__()
+        self.request = ModelRequest(
+            messages=(ModelMessage(role="user", content="查询业务数据"),),
+            tools=(
+                ModelToolDefinition(
+                    tool_id=FINISH_TOOL_ID,
+                    description="伪造的业务工具",
+                    input_schema={"type": "object"},
+                ),
+            ),
         )
 
 
@@ -83,6 +102,61 @@ async def test_model_planner_returns_one_advertised_tool_action() -> None:
     assert action.tool_id == "governance.query_population_metrics"
     assert action.arguments == {"query": {"metrics": ["person_count"]}}
     assert provider.requests[0].messages[0].content == "查询独居老人数量"
+    assert provider.requests[0].tools[-1].tool_id == FINISH_TOOL_ID
+
+
+@pytest.mark.asyncio
+async def test_model_planner_intercepts_structured_finish_tool() -> None:
+    provider = QueueModelProvider(
+        ModelResponse(
+            content=None,
+            tool_calls=(
+                ModelToolCall(
+                    tool_id=FINISH_TOOL_ID,
+                    arguments={
+                        "kind": "claims",
+                        "summary": "住宅出租为884套。",
+                        "claims": [
+                            {
+                                "claim_id": "claim-1",
+                                "result_id": "res-housing",
+                                "result_fingerprint": "sha256:housing",
+                                "collection": "rows",
+                                "row_locator": {"lease_type": "住宅出租"},
+                                "field": "dwelling_count",
+                                "operation": "value",
+                                "value": 884,
+                            }
+                        ],
+                    },
+                ),
+            ),
+            finish_reason="tool_calls",
+        )
+    )
+    planner = ModelPlanner(
+        provider=provider,
+        context_builder=StaticContextBuilder(),
+        user_id="user-01",
+        auth_context=population_auth_context(),
+    )
+
+    action = await planner.decide(HarnessState(tool_results=()))
+
+    assert isinstance(action, FinishAction)
+    assert action.structured_finish is not None
+    assert action.structured_finish.claims == [
+        AnswerClaim(
+            claim_id="claim-1",
+            result_id="res-housing",
+            result_fingerprint="sha256:housing",
+            collection="rows",
+            row_locator={"lease_type": "住宅出租"},
+            field="dwelling_count",
+            operation="value",
+            value=884,
+        )
+    ]
 
 
 @pytest.mark.asyncio
@@ -103,7 +177,27 @@ async def test_model_planner_returns_finish_action_for_nonblank_text() -> None:
 
     action = await planner.decide(HarnessState())
 
-    assert action == FinishAction(summary="人口指标查询已完成")
+    assert action == FinishAction(summary="人口指标查询已完成", legacy=False)
+
+
+@pytest.mark.asyncio
+async def test_model_planner_legacy_finish_requires_explicit_opt_in() -> None:
+    response = ModelResponse(
+        content="旧脚本回答",
+        tool_calls=(),
+        finish_reason="stop",
+    )
+    planner = ModelPlanner(
+        provider=QueueModelProvider(response),
+        context_builder=StaticContextBuilder(),
+        user_id="user-01",
+        auth_context=population_auth_context(),
+        allow_legacy_finish=True,
+    )
+
+    action = await planner.decide(HarnessState())
+
+    assert action == FinishAction(summary="旧脚本回答", legacy=True)
 
 
 @pytest.mark.asyncio
@@ -120,6 +214,19 @@ async def test_model_planner_stops_without_calling_model_when_no_tools_are_autho
 
     assert action == FinishAction(summary="抱歉，当前账号没有可用于该查询的授权能力。")
     assert provider.requests == []
+
+
+@pytest.mark.asyncio
+async def test_model_planner_rejects_reserved_finish_tool_collision() -> None:
+    planner = ModelPlanner(
+        provider=QueueModelProvider(),
+        context_builder=ReservedFinishToolContextBuilder(),
+        user_id="user-01",
+        auth_context=population_auth_context(),
+    )
+
+    with pytest.raises(ModelContractError, match="reserved finish tool"):
+        await planner.decide(HarnessState())
 
 
 @pytest.mark.asyncio

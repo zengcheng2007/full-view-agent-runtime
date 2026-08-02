@@ -1,7 +1,7 @@
 import json
 from collections.abc import Iterable
 
-FULL_VIEW_SYSTEM_PROMPT_VERSION = "full-view-governance-readonly-v12"
+FULL_VIEW_SYSTEM_PROMPT_VERSION = "full-view-governance-readonly-v13"
 
 # 能力说明由注册表实际接线驱动：只有当前注册且授权可见的 Tool
 # 才会出现在系统提示中，未接线/未验证的能力不得宣称可用。
@@ -73,6 +73,9 @@ def build_full_view_system_prompt(
         "可以直接基于这些结果排序、筛选、解释或展示，无需重复调用 Tool；"
         "普通历史回答不属于已验证结果。"
         "Tool 返回后只能依据已验证观察作答；已有成功结果时不得重复相同调用。"
+        "完成业务数据回答时必须调用 full_view.finish_answer：每条事实必须绑定 result_id、"
+        "result_fingerprint、行定位、字段、运算和值；只需展示数据面板时使用"
+        "reference_only。不得用普通文本绕过结构化事实校验。"
         "可用能力概述：" + capabilities + " " + semantic_section
         + "Tool 返回 upstream_timeout、upstream_unavailable 或 upstream_contract_error"
         " 时，表示运行时已完成内部重试，不得重试相同 Tool；应说明失败并结束本次任务。"

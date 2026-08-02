@@ -1,99 +1,80 @@
-# P1-G 可信回答事实门禁交付报告
+# P1-G 结构化可信回答第一阶段交付报告
 
 ## 交付状态
 
-- 状态：完成，等待 P1-R reviewer 审核。
+- 状态：第一阶段最小闭环完成，等待 P1-R reviewer 审核。
 - 模式：编码智能体 V3.2 `module-dev`，独立 worktree。
-- 边界：只修改 P1-G 指定源码、对应测试和本报告；未修改语义入口、
-  前端、数据库、凭据、部署门禁、Eval 运行产物或 `coding-assistant/`。
+- 分支：`codex/p1-structured-finish`。
+- 边界：未合并、未推送；未修改前端、数据库、权限、业务 Tool、部署配置或
+  Eval 运行产物。
 
-## 实现摘要
+## 实现结果
 
-1. 建立 Result 事实账本：
-   - 记录原始数字、行数、合计、最大值、最小值和可复算占比；
-   - 记录区划名、对象标题和未脱敏对象字段；
-   - 每项事实保留来源 `result_id`，比较事实也保留来源 Result。
-2. 增加确定性事实核验：
-   - 拒绝 Result 中不存在的数字、正式区划名和对象名；
-   - 校验最大、最小、并列、全部相同等判断；
-   - 区分正式区划名与“按社区、几个街道、各区县、全市”等维度词。
-3. 稳定完成决策：
-   - 原因码包括 `unsupported_number`、`unsupported_area`、
-     `unsupported_object`、`unsupported_judgement` 和既有
-     `unsupported_inference`；
-   - 原因码和修订意见进入下一轮模型上下文；
-   - 仅允许一次模型修订；第二版仍不可信时，只采用重新核验通过的
-     安全摘录，否则返回固定安全结束语，不再进入无反馈循环。
-4. Eval 确定性 Grader：
-   - `EvalExpected.grounding_reason_code` 可声明期望事实核验结果；
-   - Grader 使用最终落库的 assistant 文本和本轮持久化 Result，
-     不依赖 LLM Judge；
-   - Native 与 LangGraph 继续复用同一 Harness 完成决策。
-5. P1-R 阻断修复：
-   - 将行标签与其数值建立局部绑定，拦截“数字存在但标签配错”的回答，
-     并正确处理多个标签和值按顺序“分别”对应的表达；
-   - 扩展区划断言边界，覆盖区划后接“有、为、最多、最少、最高、最低”；
-   - 最大/最小判断同时支持“标签在前”和“最高/最低的是标签”倒装表达；
-   - 第一次修订后，第二次无论返回 `revise`、`reject` 还是空答案，均确定性
-     采用经复核的安全摘录或固定安全结束语，不再触发 `loop_detected`。
-6. P1-R 第三轮阻断修复：
-   - 标签完全来自 Result；可区分简称按标签集合动态计算唯一前缀，不维护
-     固定场景词表；
-   - 标签后的相邻数值不再要求空格或固定计量单位，覆盖连续中文、冒号和
-     无单位表达；
-   - 同结构多 Result 出现同名标签时，按该标签的来源值集合核验，避免用
-     Result A 的回答逐项对照 Result B 而产生交叉误拒；单 Result 仍保持
-     严格标签和值绑定。
+1. 新增 provider-neutral `StructuredFinish` / `AnswerClaim`：
+   - 每条 Claim 明确绑定 `result_id`、`result_fingerprint`、集合、行定位、
+     字段、运算和值；
+   - 第一阶段支持 `rows/root` 与 `value/sum/count/min/max/is_min/is_max/all_equal`；
+   - OpenAI 兼容协议通过保留函数 `full_view__finish_answer` 提交。
+2. `ModelPlanner` 每轮追加 Finish Tool，并在 Planner 内截获：
+   - Finish 不进入业务 Tool、权限或执行链路；
+   - 真实生产 Planner 默认不接受普通文本作为成功数据回答；
+   - 旧脚本 Eval 只能通过 `allow_legacy_finish=True` 显式兼容。
+3. Harness 继续作为 Native/LangGraph 唯一完成校验边界：
+   - 确定性核验 Result、指纹、唯一行、字段、Decimal 值、聚合和极值；
+   - 多 Result 的每条 Claim 独立绑定，A/B 同标签值不能互换；
+   - `truncated` Result 禁止所有依赖全量数据的聚合、极值和全等判断；
+   - 通过后由服务端生成事实文本，不展示模型提供的事实正文；
+   - `reference_only` 输出固定数据面板文案。
+4. Fail-closed：
+   - 有 success/partial Result 时，生产普通文本进入
+     `structured_claims_required` 修订；
+   - 非 `claims/reference_only` 的结构化类型不能在成功数据后夹带事实正文；
+   - 仅允许一次修订，第二次仍缺失或非法时返回固定安全结束语，不触发
+     `loop_detected`。
+5. Eval：
+   - `EvalFinishStep` 保存完整 `structured_finish`；
+   - Recording/Scripted provider 可录制和回放 Claim；
+   - 回放时按稳定 `result_fingerprint` 将录制 Claim 重新绑定到本次 Result ID；
+   - Tool 观察增加 `result_fingerprint`，未增加凭据或内部地址。
+6. Prompt 升级为 `full-view-governance-readonly-v13`，明确结构化完成约束。
 
 ## TDD 证据
 
-初始 RED：
+先观察到预期 RED，再完成 GREEN，新增覆盖包括：
 
-- 定向测试出现 5 个预期失败：
-  - 区域和对象未校验；
-  - 比较判断未校验；
-  - 二次修订仍可能继续；
-  - 上下文无稳定原因码；
-  - Eval 无 grounding grade。
-
-GREEN 后新增覆盖：
-
-- 合法原始值、合计、占比；
-- 非法数字；
-- 合法与非法区域、对象；
-- 最大、最小、并列、全部相同；
-- 区划维度词不误报；
-- 二次修订失败安全结束；
-- 原因码进入模型反馈；
-- 确定性 Eval grounding grade。
-- 标签和数字错配、合法“分别”对应表达；
-- 区划后接“有/为/最多”；
-- 倒装最高/最低判断；
-- 第一次修订后第二次空答案，在 `max_no_progress=1` 下仍安全结束。
-- 连续中文标签和数字、动态可区分简称、冒号及无单位错配表达；
-- 两个同结构 Result 同名标签不同值时，单独回答 A 或同时回答 A/B 均通过。
+- 错值、错误指纹、行零匹配/多匹配、字段不存在；
+- 两个 Result 同标签时跨来源换值；
+- 错误 `is_max`；
+- 截断结果的 `sum/is_max`；
+- `sum/count/min/max/all_equal` 确定性复算；
+- `all_equal` 不能以单行伪装全等；
+- `rows` 与 `root` 两种集合；
+- 普通文本修订一次后安全终止；
+- `reference_only` 忽略模型错误正文；
+- capability 类型不能在成功结果后夹带事实；
+- OpenAI Finish Tool 往返；
+- Native/LangGraph 同一结构化 Claim 产生相同事实文本；
+- live Eval 录制后 Scripted replay 不丢 Claim。
 
 ## Fresh 验证
 
-- 定向测试：
-  `uv run pytest tests/test_harness.py tests/test_context_builder.py tests/test_eval_runner.py -q`
-  通过。
-- 扩展 Gate：
-  `uv run pytest tests/test_harness.py tests/test_context_builder.py
-  tests/test_eval_runner.py tests/test_eval_suite.py tests/test_eval_cli.py -q`
-  通过。
-- 全量：`uv run pytest -q -o addopts=''`，542 passed / 18 skipped。
-- Ruff：`uv run ruff check .`，通过。
-- Pyright：`uv run pyright`，0 errors / 0 warnings。
-- 编译：`uv run python -m compileall -q src tests`，通过。
+- 全量测试：`569 passed, 18 skipped`。
+- Ruff：`All checks passed!`。
+- Pyright：`0 errors, 0 warnings, 0 informations`。
+- Compileall：通过。
+- Eval：`46/46 pass@1=100%`。
+
+## 明确未完成（第二阶段）
+
+- 历史 Result 载荷水合后重新核验追问 Claim；当前只保留既有历史
+  `result_id/evidence_id` 信任边界。
+- 单条 Claim 的跨 Result 计算、百分比、趋势和表达式树。
+- 更自然的类型化 Answer Block/领域字段显示名；第一阶段采用服务端通用事实文本。
+- 删除旧自由文本正则兼容门禁；当前仅供显式 legacy Eval/既有内部 Planner 使用。
 
 ## Reviewer 重点
 
-1. 用真实住房查询复核第一版错误结论触发修订、第二版可信结论完成，
-   且成功 Tool 不重复调用。
-2. 同一脚本分别跑 Native/LangGraph，确认完成状态、最终安全文本和原因码一致。
-3. 当前继承历史 Result 的 Harness 状态只携带已验证
-   `result_id/evidence_id`，没有把历史 Result 载荷重新注入完成校验器；
-   本任务保持既有“同会话已验证引用可信”契约。若下一阶段要求对历史追问中的
-   每个新数字重新复算，需要在 Orchestrator/Store 边界增加历史 Result 水合，
-   超出本 worktree 文件边界。
+1. 生产 `ModelPlanner` 是否存在绕过 Finish Tool 的普通文本成功路径。
+2. Result ID、fingerprint、row locator 和 operation 是否全部 fail-closed。
+3. Scripted replay 的 fingerprint 重绑定在多个同指纹 Result 时是否保持拒绝。
+4. Native/LangGraph 是否只复用 Harness，没有复制 Claim 校验逻辑。

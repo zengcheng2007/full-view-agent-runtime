@@ -1,3 +1,4 @@
+from full_view_agent.application.answer_claims import FINISH_TOOL_ID, StructuredFinish
 from full_view_agent.application.errors import (
     ModelContractError,
     ModelProviderTimeout,
@@ -40,14 +41,32 @@ class RecordingModelProvider:
 
         if len(response.tool_calls) == 1:
             call = response.tool_calls[0]
-            self.consumed_steps.append(
-                EvalToolCallStep(
-                    type="tool_call",
-                    tool_id=call.tool_id,
-                    arguments=call.arguments,
-                    total_tokens=response.usage.total_tokens,
+            if call.tool_id == FINISH_TOOL_ID:
+                try:
+                    finish = StructuredFinish.model_validate(call.arguments)
+                except ValueError:
+                    self._record_error(
+                        "model_contract_error",
+                        "model returned invalid structured finish",
+                    )
+                else:
+                    self.consumed_steps.append(
+                        EvalFinishStep(
+                            type="finish",
+                            content=finish.summary,
+                            structured_finish=finish,
+                            total_tokens=response.usage.total_tokens,
+                        )
+                    )
+            else:
+                self.consumed_steps.append(
+                    EvalToolCallStep(
+                        type="tool_call",
+                        tool_id=call.tool_id,
+                        arguments=call.arguments,
+                        total_tokens=response.usage.total_tokens,
+                    )
                 )
-            )
         elif len(response.tool_calls) > 1:
             self._record_error(
                 "model_contract_error",

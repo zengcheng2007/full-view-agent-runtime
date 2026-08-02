@@ -1,7 +1,9 @@
+import json
 from pathlib import Path
 
 import pytest
 
+from full_view_agent.application.answer_claims import FINISH_TOOL_ID
 from full_view_agent.application.model_provider import (
     ModelRequest,
     ModelResponse,
@@ -26,7 +28,6 @@ class TwoStepLiveModelProvider:
         self.call_count = 0
 
     async def complete(self, request: ModelRequest) -> ModelResponse:
-        del request
         self.call_count += 1
         if self.call_count == 1:
             return ModelResponse(
@@ -58,10 +59,35 @@ class TwoStepLiveModelProvider:
                     total_tokens=100,
                 ),
             )
+        observation = json.loads(request.messages[-1].content or "{}")
+        data_result = observation["data_result"]
+        row = data_result["sample_rows"][0]
         return ModelResponse(
-            content="人口指标查询已完成",
-            tool_calls=(),
-            finish_reason="stop",
+            content=None,
+            tool_calls=(
+                ModelToolCall(
+                    tool_id=FINISH_TOOL_ID,
+                    arguments={
+                        "kind": "claims",
+                        "summary": "人口指标查询已完成",
+                        "claims": [
+                            {
+                                "claim_id": "claim-1",
+                                "result_id": data_result["result_id"],
+                                "result_fingerprint": data_result[
+                                    "result_fingerprint"
+                                ],
+                                "collection": "rows",
+                                "row_locator": {"area_code": row["area_code"]},
+                                "field": "person_count",
+                                "operation": "value",
+                                "value": row["person_count"],
+                            }
+                        ],
+                    },
+                ),
+            ),
+            finish_reason="tool_calls",
             usage=ModelUsage(
                 prompt_tokens=100,
                 completion_tokens=10,
@@ -406,8 +432,22 @@ async def test_eval_runner_records_live_provider_steps_and_version_metadata() ->
     assert trace.passed is True
     assert trace.model_provider == "openai_compatible"
     assert trace.model_name == "qwen-live-test"
-    assert trace.prompt_version == "full-view-governance-readonly-v12"
+    assert trace.prompt_version == "full-view-governance-readonly-v13"
     assert [step.type for step in trace.model_steps] == ["tool_call", "finish"]
+    finish_step = trace.model_steps[-1]
+    assert isinstance(finish_step, EvalFinishStep)
+    assert finish_step.structured_finish is not None
+    assert finish_step.structured_finish.claims[0].operation == "value"
+
+    replayed = await runner.replay(population_case(), trace)
+
+    assert replayed.passed is True
+    replay_finish = replayed.model_steps[-1]
+    assert isinstance(replay_finish, EvalFinishStep)
+    assert replay_finish.structured_finish is not None
+    assert replay_finish.structured_finish.claims[0].result_fingerprint == (
+        finish_step.structured_finish.claims[0].result_fingerprint
+    )
     assert trace.total_tokens == 210
     assert provider.call_count == 2
     tool_messages = [

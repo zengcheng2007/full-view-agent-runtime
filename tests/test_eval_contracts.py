@@ -52,6 +52,36 @@ expected:
     assert case.expected.min_evidence_count == 1
 
 
+def test_eval_finish_step_preserves_structured_claims() -> None:
+    step = EvalFinishStep.model_validate(
+        {
+            "type": "finish",
+            "content": "住宅出租为884套。",
+            "structured_finish": {
+                "kind": "claims",
+                "summary": "住宅出租为884套。",
+                "claims": [
+                    {
+                        "claim_id": "claim-1",
+                        "result_id": "res-housing",
+                        "result_fingerprint": "sha256:housing",
+                        "collection": "rows",
+                        "row_locator": {"lease_type": "住宅出租"},
+                        "field": "dwelling_count",
+                        "operation": "value",
+                        "value": 884,
+                    }
+                ],
+            },
+        }
+    )
+
+    restored = EvalFinishStep.model_validate(step.model_dump(mode="json"))
+
+    assert restored.structured_finish is not None
+    assert restored.structured_finish.claims[0].result_id == "res-housing"
+
+
 def test_load_eval_case_supports_normalized_model_error_steps(tmp_path: Path) -> None:
     case_path = tmp_path / "model-timeout.yaml"
     case_path.write_text(

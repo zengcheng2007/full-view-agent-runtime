@@ -632,7 +632,7 @@ def test_housing_prompt_treats_lease_types_as_dynamic_open_categories() -> None:
         {}, tool_ids=("governance.query_housing_metrics",)
     )
 
-    assert FULL_VIEW_SYSTEM_PROMPT_VERSION == "full-view-governance-readonly-v12"
+    assert FULL_VIEW_SYSTEM_PROMPT_VERSION == "full-view-governance-readonly-v13"
     assert "按上游当前返回的出租类型动态汇总" in prompt
     assert "类型集合由业务数据决定" in prompt
     assert "住宅出租、商铺出租、公寓出租、群租房、工业出租" not in prompt

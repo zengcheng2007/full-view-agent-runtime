@@ -321,7 +321,7 @@ async def test_context_builder_advertises_semantic_tool_and_prompt_section() -> 
     assert "语义查询入口说明" in prompt
     assert "semantic_query" in prompt
     assert "governance.query_population_metrics" not in prompt
-    assert request.prompt_version == "full-view-governance-readonly-v12"
+    assert request.prompt_version == "full-view-governance-readonly-v13"
 
 
 @pytest.mark.asyncio

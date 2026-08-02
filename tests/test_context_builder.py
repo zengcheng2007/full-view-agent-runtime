@@ -56,6 +56,7 @@ def test_tool_observation_keeps_all_twelve_district_aggregation_rows() -> None:
 
     data_result = observation["data_result"]
     assert isinstance(data_result, dict)
+    assert data_result["result_fingerprint"] == "sha256:housing-districts"
     assert len(data_result["sample_rows"]) == 12
     assert "truncated" not in data_result
 
@@ -91,7 +92,9 @@ async def test_context_builder_uses_messages_and_only_authorized_tools() -> None
     assert [tool.tool_id for tool in request.tools] == [
         "governance.query_population_metrics"
     ]
-    assert request.prompt_version == "full-view-governance-readonly-v12"
+    assert request.prompt_version == "full-view-governance-readonly-v13"
+    assert "full_view.finish_answer" in (request.messages[0].content or "")
+    assert "每条事实必须绑定 result_id" in (request.messages[0].content or "")
     assert "需要业务数据时必须调用" in request.messages[0].content
     assert "会话中已验证且仍可用的历史结果" in request.messages[0].content
     assert "solitary_elderly" in request.messages[0].content

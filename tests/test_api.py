@@ -1,5 +1,6 @@
 import asyncio
 import base64
+import json
 
 import httpx
 import pytest
@@ -9,6 +10,7 @@ from full_view_agent.api.app import (
     configured_p0_allowed_user_ids,
     create_app,
 )
+from full_view_agent.application.answer_claims import FINISH_TOOL_ID
 from full_view_agent.application.model_provider import (
     ModelResponse,
     ModelToolCall,
@@ -194,16 +196,46 @@ class QueueModelProvider:
                 ),
                 finish_reason="tool_calls",
             ),
-            ModelResponse(
-                content="根据已验证结果，人口指标查询已完成。",
-                tool_calls=(),
-                finish_reason="stop",
-            ),
         ]
 
     async def complete(self, request):
         self.requests.append(request)
-        return self.responses.pop(0)
+        if self.responses:
+            return self.responses.pop(0)
+        observation = json.loads(
+            next(
+                message.content
+                for message in reversed(request.messages)
+                if message.role == "tool"
+            )
+        )
+        data_result = observation["data_result"]
+        row = data_result["sample_rows"][0]
+        return ModelResponse(
+            content=None,
+            tool_calls=(
+                ModelToolCall(
+                    tool_id=FINISH_TOOL_ID,
+                    arguments={
+                        "kind": "claims",
+                        "summary": "根据已验证结果，人口指标查询已完成。",
+                        "claims": [
+                            {
+                                "claim_id": "claim-1",
+                                "result_id": data_result["result_id"],
+                                "result_fingerprint": data_result["result_fingerprint"],
+                                "collection": "rows",
+                                "row_locator": {"area_code": row["area_code"]},
+                                "field": "person_count",
+                                "operation": "value",
+                                "value": row["person_count"],
+                            }
+                        ],
+                    },
+                ),
+            ),
+            finish_reason="tool_calls",
+        )
 
 
 def run_request(*, message_id: str, client_instance_id: str) -> RunCreateRequest:

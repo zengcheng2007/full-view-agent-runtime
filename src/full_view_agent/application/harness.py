@@ -3,6 +3,10 @@ from dataclasses import dataclass, replace
 from time import time
 from typing import Literal, Protocol
 
+from full_view_agent.application.answer_claims import (
+    StructuredFinish,
+    assess_structured_finish,
+)
 from full_view_agent.application.answer_grounding import (
     assess_answer_grounding,
     remove_lines_with_numbers,
@@ -45,6 +49,8 @@ class ToolAction:
 @dataclass(frozen=True)
 class FinishAction:
     summary: str
+    structured_finish: StructuredFinish | None = None
+    legacy: bool = True
 
 
 HarnessAction = ToolAction | FinishAction
@@ -241,6 +247,29 @@ class DeterministicCompletionValidator:
         # Successful data does not authorize unsupported causal or
         # source-quality inferences.
         if success_results:
+            if action.structured_finish is not None:
+                claim_assessment = assess_structured_finish(
+                    action.structured_finish, tuple(success_results)
+                )
+                return CompletionAssessment(
+                    status="accept" if claim_assessment.accepted else "revise",
+                    reason_code=claim_assessment.reason_code,
+                    feedback=(
+                        None
+                        if claim_assessment.accepted
+                        else "结构化事实声明无法回指查询结果，请修正来源、行、字段、运算和值。"
+                    ),
+                    safe_summary=claim_assessment.rendered_summary,
+                )
+            if not action.legacy:
+                return CompletionAssessment(
+                    status="revise",
+                    reason_code="structured_claims_required",
+                    feedback=(
+                        "已有成功查询结果；最终回答必须调用结构化完成工具，"
+                        "提交可核验 claims，或使用 reference_only。"
+                    ),
+                )
             grounding = assess_answer_grounding(summary, tuple(success_results))
             if grounding.reason_code != "grounded":
                 return CompletionAssessment(
@@ -380,7 +409,7 @@ class AgentHarness:
                 )
             )
             if assessment.status == "accept":
-                return control, action.summary
+                return control, assessment.safe_summary or action.summary
             if control.state.completion_revision_count > 0:
                 if assessment.safe_summary:
                     safe_assessment = await self._assess_completion(

@@ -298,6 +298,7 @@ def _build_observation(result: object) -> dict[str, object]:
     if data_result is not None:
         data_ref: dict[str, object] = {
             "result_id": data_result.result_id,
+            "result_fingerprint": data_result.result_fingerprint,
             "kind": data_result.kind,
         }
         row_count = getattr(data_result, "row_count", None)
@@ -336,6 +337,7 @@ def _build_observation(result: object) -> dict[str, object]:
 def _build_inherited_result_observation(result: object) -> dict[str, object]:
     observation: dict[str, object] = {
         "result_id": result.result_id,  # type: ignore[attr-defined]
+        "result_fingerprint": result.result_fingerprint,  # type: ignore[attr-defined]
         "kind": result.kind,  # type: ignore[attr-defined]
         "data_schema_ref": result.data_schema_ref,  # type: ignore[attr-defined]
     }

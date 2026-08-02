@@ -5,6 +5,11 @@ import pytest
 from pydantic import SecretStr
 
 from full_view_agent.application import errors
+from full_view_agent.application.answer_claims import (
+    FINISH_TOOL_DESCRIPTION,
+    FINISH_TOOL_ID,
+    FINISH_TOOL_INPUT_SCHEMA,
+)
 from full_view_agent.application.model_provider import (
     ModelMessage,
     ModelRequest,
@@ -91,6 +96,70 @@ async def test_openai_compatible_provider_parses_a_structured_tool_call() -> Non
     assert response.tool_calls[0].tool_id == "governance.resolve_area"
     assert response.tool_calls[0].arguments == {"query": "西湖区"}
     assert response.usage.total_tokens == 140
+
+
+@pytest.mark.asyncio
+async def test_openai_provider_round_trips_reserved_finish_tool() -> None:
+    captured: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        captured.append(request)
+        return httpx.Response(
+            200,
+            json={
+                "choices": [
+                    {
+                        "finish_reason": "tool_calls",
+                        "message": {
+                            "content": None,
+                            "tool_calls": [
+                                {
+                                    "id": "finish-01",
+                                    "type": "function",
+                                    "function": {
+                                        "name": "full_view__finish_answer",
+                                        "arguments": json.dumps(
+                                            {
+                                                "kind": "reference_only",
+                                                "summary": "查询完成",
+                                                "claims": [],
+                                            },
+                                            ensure_ascii=False,
+                                        ),
+                                    },
+                                }
+                            ],
+                        },
+                    }
+                ],
+                "usage": {
+                    "prompt_tokens": 20,
+                    "completion_tokens": 5,
+                    "total_tokens": 25,
+                },
+            },
+        )
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        response = await OpenAICompatibleModelProvider(
+            base_url="http://model.test/v1", model="qwen-test", client=client
+        ).complete(
+            ModelRequest(
+                messages=(ModelMessage(role="user", content="展示结果"),),
+                tools=(
+                    ModelToolDefinition(
+                        tool_id=FINISH_TOOL_ID,
+                        description=FINISH_TOOL_DESCRIPTION,
+                        input_schema=FINISH_TOOL_INPUT_SCHEMA,
+                    ),
+                ),
+            )
+        )
+
+    payload = json.loads(captured[0].content)
+    assert payload["tools"][0]["function"]["name"] == "full_view__finish_answer"
+    assert response.tool_calls[0].tool_id == FINISH_TOOL_ID
+    assert response.tool_calls[0].arguments["kind"] == "reference_only"
 
 
 @pytest.mark.asyncio

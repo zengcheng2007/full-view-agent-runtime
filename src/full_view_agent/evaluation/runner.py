@@ -283,6 +283,7 @@ class EvalRunner:
                         semantic_presenter=stack.presenter,
                     ),
                     max_total_tokens=self._max_total_tokens,
+                    allow_legacy_finish=not use_live_provider,
                     initial_total_tokens=sum(
                         getattr(step, "total_tokens", 0)
                         for step in provider.consumed_steps

@@ -12,6 +12,7 @@ from typing import Protocol
 
 import pytest
 
+from full_view_agent.application.answer_claims import AnswerClaim, StructuredFinish
 from full_view_agent.application.capability_service import (
     CapabilityService,
     ToolAdapter,
@@ -160,6 +161,36 @@ class _SingleToolPlanner:
                     "group_by": ["street"],
                 }
             },
+        )
+
+
+class _StructuredSingleToolPlanner(_SingleToolPlanner):
+    async def decide(self, state: HarnessState) -> ToolAction | FinishAction:
+        if not state.tool_results:
+            return await super().decide(state)
+        data_result = state.tool_results[-1].data_result
+        assert data_result is not None
+        row = data_result.data.rows[0]  # type: ignore[union-attr]
+        finish = StructuredFinish(
+            kind="claims",
+            summary="模型自由正文不会作为最终事实文本。",
+            claims=[
+                AnswerClaim(
+                    claim_id="claim-1",
+                    result_id=data_result.result_id,
+                    result_fingerprint=data_result.result_fingerprint,
+                    collection="rows",
+                    row_locator={"area_code": row.area_code},
+                    field="person_count",
+                    operation="value",
+                    value=row.person_count,
+                )
+            ],
+        )
+        return FinishAction(
+            summary=finish.summary,
+            structured_finish=finish,
+            legacy=False,
         )
 
 
@@ -345,6 +376,22 @@ async def test_success(orch_factory: OrchFactory) -> None:
     types = {e.type for e in await events.list_events(run_id=rid)}
     assert {"run.started", "tool.started", "tool.completed",
             "result.available", "run.completed"} <= types
+
+
+@pytest.mark.asyncio
+async def test_structured_finish_is_identical_across_orchestrators(
+    orch_factory: OrchFactory,
+) -> None:
+    orch, store, _events = orch_factory(planner=_StructuredSingleToolPlanner())
+    rid = await _make_run(store)
+
+    await orch.execute(user_id="u", run_id=rid)
+
+    run = await store.get_run(user_id="u", run_id=rid)
+    messages = await store.list_messages(user_id="u", session_id=run.session_id)
+    answer = next(message for message in messages if message.role == "assistant")
+    assert answer.content[0].type == "text"
+    assert answer.content[0].text == "330106001的person_count为128。"  # type: ignore[union-attr]
 
 
 # ---------------------------------------------------------------------------

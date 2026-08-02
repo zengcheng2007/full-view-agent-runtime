@@ -3,6 +3,7 @@ from typing import Annotated, Literal
 
 from pydantic import Field
 
+from full_view_agent.application.answer_claims import StructuredFinish
 from full_view_agent.domain.models import ContractModel, RunOutcome, RunStatus
 
 
@@ -28,6 +29,7 @@ class EvalToolCallStep(ContractModel):
 class EvalFinishStep(ContractModel):
     type: Literal["finish"]
     content: str = Field(min_length=1, max_length=10_000)
+    structured_finish: StructuredFinish | None = None
     total_tokens: int = Field(default=0, ge=0)
 
 
