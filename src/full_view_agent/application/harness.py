@@ -381,10 +381,7 @@ class AgentHarness:
             )
             if assessment.status == "accept":
                 return control, action.summary
-            if (
-                assessment.status == "revise"
-                and control.state.completion_revision_count > 0
-            ):
+            if control.state.completion_revision_count > 0:
                 if assessment.safe_summary:
                     safe_assessment = await self._assess_completion(
                         control.state,
@@ -395,7 +392,11 @@ class AgentHarness:
                 return control, DeterministicCompletionValidator._SAFE_STOP_SUMMARY
             state = replace(
                 control.state,
-                no_progress_count=control.state.no_progress_count + 1,
+                no_progress_count=(
+                    control.state.no_progress_count
+                    if assessment.status == "revise"
+                    else control.state.no_progress_count + 1
+                ),
                 completion_feedback=assessment.feedback,
                 completion_feedback_code=assessment.reason_code,
                 completion_revision_count=(

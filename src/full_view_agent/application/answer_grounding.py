@@ -17,7 +17,7 @@ _ANSWER_NUMBER_RE = re.compile(r"(?<![\w])\d[\d,]*(?:\.\d+)?")
 _AREA_RE = re.compile(
     r"(?:^|[，。；：、\s的])"
     r"([\u4e00-\u9fff]{2,12}?(?:街道|社区|网格|区|县|市|镇|乡|村))"
-    r"(?=$|[，。；：、\s的]|查询|结果|出租|人口)"
+    r"(?=$|[，。；：、\s的]|查询|结果|出租|人口|有|为|最多|最少|最高|最低)"
 )
 _OBJECT_RE = re.compile(
     r"(?:^|[，。；：、\s的])"
@@ -183,6 +183,7 @@ def _unsupported_judgements(
         values = facts.values_by_label
         if not values:
             continue
+        violations.update(_label_value_violations(summary, values))
         maximum = max(values.values())
         minimum = min(values.values())
         for label, value in values.items():
@@ -190,12 +191,25 @@ def _unsupported_judgements(
                 rf"{re.escape(label)}.{{0,12}}?(最多|最高|最少|最低)",
                 summary,
             )
-            if match is None:
-                continue
-            direction = match.group(1)
-            expected = maximum if direction in {"最多", "最高"} else minimum
-            if value != expected:
-                violations.add(f"{label}{direction}")
+            if match is not None:
+                direction = match.group(1)
+                expected = maximum if direction in {"最多", "最高"} else minimum
+                if value != expected:
+                    violations.add(f"{label}{direction}")
+            inverted_match = re.search(
+                rf"(最多|最高|最少|最低)(?:的)?(?:是|为)?\s*"
+                rf"{re.escape(label)}",
+                summary,
+            )
+            if inverted_match is not None:
+                inverted_direction = inverted_match.group(1)
+                inverted_expected = (
+                    maximum
+                    if inverted_direction in {"最多", "最高"}
+                    else minimum
+                )
+                if value != inverted_expected:
+                    violations.add(f"{inverted_direction}{label}")
         if (
             "并列最多" in summary or "并列最高" in summary
         ) and sum(value == maximum for value in values.values()) < 2:
@@ -204,6 +218,43 @@ def _unsupported_judgements(
             "并列最少" in summary or "并列最低" in summary
         ) and sum(value == minimum for value in values.values()) < 2:
             violations.add("并列最少")
+    return violations
+
+
+def _label_value_violations(
+    summary: str, values_by_label: dict[str, Decimal]
+) -> set[str]:
+    """Reject locally bound label/value pairs that contradict their source row."""
+    violations: set[str] = set()
+    value_pattern = re.compile(
+        r"(?<![\w])(?P<value>\d[\d,]*(?:\.\d+)?)\s*"
+        r"(?:套|人|户|件|个|栋|幢)"
+    )
+    for clause in re.split(r"[，。；\n]", summary):
+        labels = sorted(
+            (
+                (match.start(), label)
+                for label in values_by_label
+                for match in re.finditer(re.escape(label), clause)
+            ),
+            key=lambda item: item[0],
+        )
+        value_matches = list(value_pattern.finditer(clause))
+        if "分别" in clause and len(labels) == len(value_matches) and len(labels) > 1:
+            for (_, label), match in zip(labels, value_matches, strict=True):
+                actual = _normalize_number(match.group("value"))
+                if actual != _normalize_decimal(values_by_label[label]):
+                    violations.add(f"{label}:{actual}")
+            continue
+        for index, (position, label) in enumerate(labels):
+            segment_end = labels[index + 1][0] if index + 1 < len(labels) else len(clause)
+            segment = clause[position + len(label) : segment_end]
+            match = value_pattern.search(segment)
+            if match is None:
+                continue
+            actual = _normalize_number(match.group("value"))
+            if actual != _normalize_decimal(values_by_label[label]):
+                violations.add(f"{label}:{actual}")
     return violations
 
 

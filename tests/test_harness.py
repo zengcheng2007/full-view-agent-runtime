@@ -200,6 +200,18 @@ class RepeatingUnsupportedAreaPlanner:
         return FinishAction(summary="拱墅区查询完成。")
 
 
+class RejectAfterRevisionPlanner:
+    async def decide(self, state: HarnessState):
+        if not state.tool_results:
+            return ToolAction(
+                tool_id="governance.resolve_area",
+                arguments={"query": "西湖区"},
+            )
+        if state.completion_revision_count == 0:
+            return FinishAction(summary="拱墅区查询完成。")
+        return FinishAction(summary="")
+
+
 @pytest.mark.asyncio
 async def test_harness_blocks_repeated_tool_call_loop_before_third_execution() -> None:
     executor = DeniedToolExecutor()
@@ -322,6 +334,7 @@ async def test_deterministic_validator_requests_revision_for_unsupported_inferen
 
     assert assessment.status == "revise"
     assert assessment.reason_code == "unsupported_inference"
+    assert assessment.feedback is not None
     assert "仅保留已验证事实" in assessment.feedback
     assert assessment.safe_summary == "西湖区出租房共 4420 套。"
     assert await validator.validate(state, action) is False
@@ -465,6 +478,133 @@ async def test_deterministic_validator_checks_comparative_judgements() -> None:
 
 
 @pytest.mark.asyncio
+async def test_deterministic_validator_rejects_label_number_mismatch() -> None:
+    validator = DeterministicCompletionValidator()
+    result = successful_housing_result().model_copy(
+        update={
+            "data_result": TableDataResult(
+                result_id="res-label-values",
+                data_schema_ref="schema://data/housing-lease-type-table/1.0.0",
+                result_fingerprint="sha256:label-values",
+                data=HousingLeaseTypeTable(
+                    rows=[
+                        HousingLeaseTypeRow(
+                            lease_type="住宅出租", dwelling_count=100
+                        ),
+                        HousingLeaseTypeRow(
+                            lease_type="商铺出租", dwelling_count=80
+                        ),
+                    ]
+                ),
+                row_count=2,
+            )
+        }
+    )
+
+    assessment = await validator.assess(
+        HarnessState(tool_results=(result,)),
+        FinishAction(summary="住宅出租为 80 套，商铺出租为 100 套。"),
+    )
+
+    assert assessment.status == "revise"
+    assert assessment.reason_code == "unsupported_judgement"
+
+
+@pytest.mark.asyncio
+async def test_deterministic_validator_accepts_respective_label_values() -> None:
+    validator = DeterministicCompletionValidator()
+    result = successful_housing_result().model_copy(
+        update={
+            "data_result": TableDataResult(
+                result_id="res-respective-values",
+                data_schema_ref="schema://data/housing-lease-type-table/1.0.0",
+                result_fingerprint="sha256:respective-values",
+                data=HousingLeaseTypeTable(
+                    rows=[
+                        HousingLeaseTypeRow(
+                            lease_type="住宅出租", dwelling_count=100
+                        ),
+                        HousingLeaseTypeRow(
+                            lease_type="商铺出租", dwelling_count=80
+                        ),
+                    ]
+                ),
+                row_count=2,
+            )
+        }
+    )
+
+    assessment = await validator.assess(
+        HarnessState(tool_results=(result,)),
+        FinishAction(summary="住宅出租和商铺出租分别为 100 套和 80 套。"),
+    )
+
+    assert assessment.status == "accept"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "summary",
+    (
+        "拱墅区有 884 套出租房。",
+        "拱墅区为本次查询范围。",
+        "拱墅区最多。",
+    ),
+)
+async def test_deterministic_validator_checks_area_before_claim_verbs(
+    summary: str,
+) -> None:
+    assessment = await DeterministicCompletionValidator().assess(
+        HarnessState(
+            tool_results=(successful_area_result(), successful_housing_result())
+        ),
+        FinishAction(summary=summary),
+    )
+
+    assert assessment.status == "revise"
+    assert assessment.reason_code == "unsupported_area"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "summary",
+    (
+        "最高的是商铺出租，为 80 套。",
+        "最低的是住宅出租，为 100 套。",
+    ),
+)
+async def test_deterministic_validator_checks_inverted_extrema(summary: str) -> None:
+    validator = DeterministicCompletionValidator()
+    result = successful_housing_result().model_copy(
+        update={
+            "data_result": TableDataResult(
+                result_id="res-inverted-rank",
+                data_schema_ref="schema://data/housing-lease-type-table/1.0.0",
+                result_fingerprint="sha256:inverted-rank",
+                data=HousingLeaseTypeTable(
+                    rows=[
+                        HousingLeaseTypeRow(
+                            lease_type="住宅出租", dwelling_count=100
+                        ),
+                        HousingLeaseTypeRow(
+                            lease_type="商铺出租", dwelling_count=80
+                        ),
+                    ]
+                ),
+                row_count=2,
+            )
+        }
+    )
+
+    assessment = await validator.assess(
+        HarnessState(tool_results=(result,)), FinishAction(summary=summary)
+    )
+
+    assert assessment.status == "revise"
+    assert assessment.reason_code == "unsupported_judgement"
+
+
+@pytest.mark.asyncio
 async def test_deterministic_validator_accepts_all_same_and_derived_percentages() -> None:
     validator = DeterministicCompletionValidator()
     assessment = await validator.assess(
@@ -515,6 +655,25 @@ async def test_harness_second_failed_revision_ends_with_stable_safe_summary() ->
     )
     assert result.state.completion_revision_count == 1
     assert result.state.completion_feedback_code == "unsupported_area"
+
+
+@pytest.mark.asyncio
+async def test_harness_reject_after_revision_ends_safely_without_loop() -> None:
+    harness = AgentHarness(
+        tool_executor=SuccessfulToolExecutor(),
+        validator=DeterministicCompletionValidator(),
+        limits=HarnessLimits(max_no_progress=1),
+    )
+
+    result = await harness.run(
+        planner=RejectAfterRevisionPlanner(),
+        auth_context=auth_context(),
+    )
+
+    assert result.summary == (
+        "抱歉，当前回答仍包含无法由查询结果核验的内容，已停止生成结论。"
+    )
+    assert result.state.completion_revision_count == 1
 
 
 @pytest.mark.asyncio

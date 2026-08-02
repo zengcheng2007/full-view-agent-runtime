@@ -29,6 +29,13 @@
    - Grader 使用最终落库的 assistant 文本和本轮持久化 Result，
      不依赖 LLM Judge；
    - Native 与 LangGraph 继续复用同一 Harness 完成决策。
+5. P1-R 阻断修复：
+   - 将行标签与其数值建立局部绑定，拦截“数字存在但标签配错”的回答，
+     并正确处理多个标签和值按顺序“分别”对应的表达；
+   - 扩展区划断言边界，覆盖区划后接“有、为、最多、最少、最高、最低”；
+   - 最大/最小判断同时支持“标签在前”和“最高/最低的是标签”倒装表达；
+   - 第一次修订后，第二次无论返回 `revise`、`reject` 还是空答案，均确定性
+     采用经复核的安全摘录或固定安全结束语，不再触发 `loop_detected`。
 
 ## TDD 证据
 
@@ -51,6 +58,10 @@ GREEN 后新增覆盖：
 - 二次修订失败安全结束；
 - 原因码进入模型反馈；
 - 确定性 Eval grounding grade。
+- 标签和数字错配、合法“分别”对应表达；
+- 区划后接“有/为/最多”；
+- 倒装最高/最低判断；
+- 第一次修订后第二次空答案，在 `max_no_progress=1` 下仍安全结束。
 
 ## Fresh 验证
 
@@ -61,10 +72,10 @@ GREEN 后新增覆盖：
   `uv run pytest tests/test_harness.py tests/test_context_builder.py
   tests/test_eval_runner.py tests/test_eval_suite.py tests/test_eval_cli.py -q`
   通过。
-- 全量：`uv run pytest -q` 通过，16 项按既有条件跳过。
+- 全量：`uv run pytest -q`，537 passed / 18 skipped。
 - Ruff：`uv run ruff check .`，通过。
 - Pyright：`uv run pyright`，0 errors / 0 warnings。
-- 编译：`uv run python -m compileall -q src`，通过。
+- 编译：`uv run python -m compileall -q src tests`，通过。
 
 ## Reviewer 重点
 
