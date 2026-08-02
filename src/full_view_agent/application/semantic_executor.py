@@ -74,6 +74,11 @@ class SemanticToolExecutor:
         )
         self._denial_recorder = denial_recorder
 
+    @property
+    def resolver(self) -> SemanticActionResolver:
+        """暴露只读组合信息，供上层验证 Catalog/Resolver 未错接。"""
+        return self._resolver
+
     async def execute(
         self,
         *,

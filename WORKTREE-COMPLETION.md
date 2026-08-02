@@ -232,3 +232,45 @@ including validation-bypass defense in depth and the unchanged production
   Catalog/Presenter task; no result-grain or canonical-Tool regression occurred.
   Trace:
   `C:\Users\zengc\AppData\Local\Temp\p1-live-housing-token-boundary-3c67603e39bb40b08c0a2f9ac20d9266.json`.
+
+---
+
+# P1-2 AnalysisPlan 确定性执行器交付报告
+
+## 交付状态
+
+- 分支：`codex/p1-analysis-execution`，基线 `18dc5fc`。
+- 边界：仅新增应用层执行器、执行结果契约和单测；未接 API/前端，
+  未修改 Native/LangGraph 图，未实现派生指标、LLM narrative 或地图命令。
+- 状态：纵向切片完成，待独立 Reviewer 审核和集成分支接收。
+
+## 实现结果
+
+1. 新增 `AnalysisPlanExecutionPort` / `AnalysisPlanExecutor` 与结构化
+   `AnalysisExecutionResult` / `AnalysisStepExecution` 契约。
+2. 执行前对 Catalog version、execution fingerprint 和每个 step 的
+   capability id/version 进行整体 fail-closed 校验，失配时零 Tool 调用。
+3. 每个步骤仅从 Catalog 业务定义生成 `semantic_query`，强制依赖
+   已有 `SemanticToolExecutor`，并校验它与执行器共用同一
+   Resolver/Catalog；没有 adapter、URL、SQL 或物理字段执行分支。
+4. 调度器按 DAG ready set 和计划顺序启动步骤，实际执行
+   `max_parallel`、`max_tool_calls`、每步 `timeout_ms` 和总
+   `total_timeout_ms` 限制。
+5. 独立主题失败/拒绝/超时不中断其他主题；依赖失败步骤使用
+   稳定 reason code 跳过，终态确定为 `completed/partial/failed`，
+   输出顺序不受完成时间影响。
+6. 外部 `CancelledError` 和 `ReauthenticationRequired` 原样透传，并取消、
+   等待所有在途任务；总预算到期转为结构化
+   `TOTAL_TIMEOUT_EXCEEDED`。
+
+## 验证证据
+
+- TDD 定向：`tests/test_analysis_executor.py` 14 项通过。
+- 全量：766 项收集，`uv run pytest -q` exit 0。
+- Ruff：通过。Pyright：`0 errors, 0 warnings`。Compileall：通过。
+
+## 剩余接线点
+
+- 独立 Reviewer 需重放取消、重新认证、总超时和绑定漂移。
+- 审核通过后，后续任务把该端口接入 LangGraph 子图，再接 API/Eval；
+  本 worktree 不越界接线。
