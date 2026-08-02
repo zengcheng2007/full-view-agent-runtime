@@ -306,3 +306,50 @@ including validation-bypass defense in depth and the unchanged production
   不能仅通过重算 SHA 放行。
 - 服务端 Planner 自身的 default budget 仍是上限；加载计划的 constraints
   只能收紧，不能成为自报的信任上限。
+
+---
+
+# P1 AnalysisPlan Trusted Store
+
+## Delivery boundary
+
+- Branch: `codex/p1-plan-store`, based on `e7d297b`.
+- Server-side storage slice only. No composition-root, API, Tool, frontend, or
+  shared-contract wiring was added.
+- `AnalysisPlanRepository` is now an independent application port with
+  `save/get`; the existing executor depends on that port without changing its
+  public execution API.
+
+## Trust and isolation guarantees
+
+- Every record namespace is derived from all four authority components:
+  `tenant_id + user_id + run_id + plan_id`.
+- Save revalidates the full Pydantic contract and recomputes the content-derived
+  `plan_id` before any write.
+- Repeated identical writes are idempotent. Existing different content is
+  rejected as `PLAN_CONFLICT`; neither implementation overwrites it.
+- Get reconstructs `AnalysisPlan` from JSON and checks the requested plan ID,
+  canonical ID, request ID, Catalog version, and Catalog fingerprint. Corrupt
+  authority data fails closed with a stable reason code.
+- Cross-tenant, cross-user, and cross-run reads return no record.
+
+## Implementations and migration
+
+- `InMemoryAnalysisPlanRepository` uses the same validation path as production
+  and serializes records instead of retaining mutable object references.
+- `PostgresAnalysisPlanRepository` uses transactional inserts and portable TEXT
+  payload storage; it requires no database extension.
+- Forward migration `V003_analysis_plans.sql` adds authority columns, composite
+  scope/request indexes, and schema version 3 without modifying earlier
+  migrations.
+
+## Verification
+
+- TDD RED observed first: repository modules were absent and test collection
+  failed with `ModuleNotFoundError`.
+- Focused repository suite against the running PostgreSQL test database:
+  `18 passed`.
+- Full suite with PostgreSQL enabled: `808 collected`, `806 passed`, `2 skipped`.
+- Ruff: all checks passed.
+- Pyright: `0 errors, 0 warnings`.
+- Compileall: passed.

@@ -13,6 +13,7 @@ from pydantic import ValidationError
 from full_view_agent.application.analysis_plan_integrity import (
     recompute_analysis_plan_id,
 )
+from full_view_agent.application.analysis_plan_repository import AnalysisPlanRepository
 from full_view_agent.application.analysis_planner import AnalysisPlanner
 from full_view_agent.application.errors import ReauthenticationRequired
 from full_view_agent.application.fingerprints import canonical_fingerprint
@@ -48,19 +49,6 @@ class AnalysisPlanExecutionPort(Protocol):
         request_id: str,
         auth_context: AuthContext,
     ) -> AnalysisExecutionResult: ...
-
-
-class AnalysisPlanRepository(Protocol):
-    """服务端可信计划源；首期不接受客户端计划正文。"""
-
-    async def get(
-        self,
-        *,
-        tenant_id: str,
-        user_id: str,
-        run_id: str,
-        plan_id: str,
-    ) -> AnalysisPlan | None: ...
 
 
 class AnalysisExecutionRejected(Exception):
