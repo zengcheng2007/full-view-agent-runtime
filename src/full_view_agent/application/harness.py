@@ -4,6 +4,10 @@ from time import time
 from typing import Literal, Protocol
 
 from full_view_agent.application.answer_claims import (
+    CAPABILITY_SUMMARY,
+    CLARIFICATION_SUMMARY,
+    DENIAL_SUMMARY,
+    FAILURE_SUMMARY,
     StructuredFinish,
     assess_structured_finish,
 )
@@ -310,9 +314,50 @@ class DeterministicCompletionValidator:
             return CompletionAssessment(status="accept")
 
         if action.structured_finish is not None:
+            finish_kind = action.structured_finish.kind
             has_inherited_reference = bool(
                 state.inherited_result_ids and state.inherited_evidence_ids
             )
+            non_data_summary = {
+                "capability": CAPABILITY_SUMMARY,
+                "clarification": CLARIFICATION_SUMMARY,
+                "denial": DENIAL_SUMMARY,
+                "failure": FAILURE_SUMMARY,
+            }.get(finish_kind)
+            if finish_kind in {"capability", "clarification"}:
+                accepted = not state.tool_results and not has_inherited_reference
+                return CompletionAssessment(
+                    status="accept" if accepted else "revise",
+                    reason_code=(
+                        finish_kind if accepted else f"structured_{finish_kind}_state_mismatch"
+                    ),
+                    safe_summary=non_data_summary if accepted else None,
+                    feedback=(
+                        None
+                        if accepted
+                        else "当前已有查询状态，不能用能力说明或参数澄清替代结果处理。"
+                    ),
+                )
+            if finish_kind == "denial":
+                accepted = bool(denied_results) and not failed_results
+                return CompletionAssessment(
+                    status="accept" if accepted else "revise",
+                    reason_code=(
+                        "denial" if accepted else "structured_denial_state_mismatch"
+                    ),
+                    safe_summary=DENIAL_SUMMARY if accepted else None,
+                    feedback=None if accepted else "当前没有匹配的权限拒绝结果。",
+                )
+            if finish_kind == "failure":
+                accepted = bool(failed_results)
+                return CompletionAssessment(
+                    status="accept" if accepted else "revise",
+                    reason_code=(
+                        "failure" if accepted else "structured_failure_state_mismatch"
+                    ),
+                    safe_summary=FAILURE_SUMMARY if accepted else None,
+                    feedback=None if accepted else "当前没有匹配的执行失败结果。",
+                )
             claim_assessment = assess_structured_finish(
                 action.structured_finish,
                 (),
@@ -330,6 +375,16 @@ class DeterministicCompletionValidator:
                     )
                 ),
                 safe_summary=claim_assessment.rendered_summary,
+            )
+
+        if not action.legacy:
+            return CompletionAssessment(
+                status="revise",
+                reason_code="structured_finish_required",
+                feedback=(
+                    "最终回答必须调用结构化完成工具；业务事实、能力说明、参数澄清、"
+                    "权限拒绝和执行失败均不得使用普通文本完成。"
+                ),
             )
 
         has_fabricated_number = bool(self._NUMBER_RE.search(summary))
@@ -454,7 +509,7 @@ class AgentHarness:
                 if assessment.safe_summary:
                     safe_assessment = await self._assess_completion(
                         control.state,
-                        FinishAction(summary=assessment.safe_summary),
+                        FinishAction(summary=assessment.safe_summary, legacy=True),
                     )
                     if safe_assessment.status == "accept":
                         return control, assessment.safe_summary

@@ -78,7 +78,7 @@ class RunPlannerFactory(Protocol):
 class PopulationQueryPlanner:
     async def decide(self, state: HarnessState) -> ToolAction | FinishAction:
         if state.tool_results:
-            return FinishAction(summary="人口指标查询已完成")
+            return FinishAction(summary="人口指标查询已完成", legacy=True)
         return ToolAction(
             tool_id="governance.query_population_metrics",
             arguments={

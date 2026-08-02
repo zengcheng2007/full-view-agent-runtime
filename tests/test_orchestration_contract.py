@@ -296,6 +296,40 @@ class _MalformedFinishProvider:
         return self.responses.pop(0)
 
 
+class _PlainNoResultProvider:
+    def __init__(self) -> None:
+        response = ModelResponse(
+            content="我可以确认住宅出租有999999套。",
+            tool_calls=(),
+            finish_reason="stop",
+        )
+        self.responses = [response, response]
+
+    async def complete(self, _request: ModelRequest) -> ModelResponse:
+        return self.responses.pop(0)
+
+
+class _StructuredNonDataProvider:
+    def __init__(self, kind: str) -> None:
+        self.response = ModelResponse(
+            content=None,
+            tool_calls=(
+                ModelToolCall(
+                    tool_id=FINISH_TOOL_ID,
+                    arguments={
+                        "kind": kind,
+                        "summary": "我可以确认住宅出租有999999套。",
+                        "claims": [],
+                    },
+                ),
+            ),
+            finish_reason="tool_calls",
+        )
+
+    async def complete(self, _request: ModelRequest) -> ModelResponse:
+        return self.response
+
+
 # ---------------------------------------------------------------------------
 # Factory fixture – swap impl via conftest parametrization in R2
 # ---------------------------------------------------------------------------
@@ -515,6 +549,71 @@ async def test_malformed_structured_finish_revises_then_stops_across_orchestrato
     )
     assert context_builder.feedback_codes == [None, None, "invalid_structured_finish"]
     types = [event.type for event in await events.list_events(run_id=run_id)]
+    assert "run.failed" not in types
+
+
+@pytest.mark.asyncio
+async def test_production_plain_no_result_revises_then_stops_across_orchestrators(
+    orch_factory: OrchFactory,
+) -> None:
+    context_builder = _MalformedFinishContextBuilder()
+    planner = ModelPlanner(
+        provider=_PlainNoResultProvider(),
+        context_builder=context_builder,
+        user_id="u",
+        auth_context=population_auth_context(),
+    )
+    orch, store, events = orch_factory(planner=planner)
+    run_id = await _make_run(store)
+
+    await orch.execute(user_id="u", run_id=run_id)
+
+    run = await store.get_run(user_id="u", run_id=run_id)
+    assert run.status == "completed"
+    messages = await store.list_messages(user_id="u", session_id=run.session_id)
+    answer = next(message for message in messages if message.role == "assistant")
+    assert answer.content[0].text == (
+        "抱歉，当前回答仍包含无法由查询结果核验的内容，已停止生成结论。"
+    )
+    assert "999999" not in answer.content[0].text
+    assert context_builder.feedback_codes == [None, "structured_finish_required"]
+    types = [event.type for event in await events.list_events(run_id=run_id)]
+    assert "tool.started" not in types
+    assert "run.failed" not in types
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("kind", "expected_summary"),
+    (
+        ("capability", "我可以协助使用当前已授权的治理查询能力。"),
+        ("clarification", "请补充查询所需的区域、对象或统计口径。"),
+    ),
+)
+async def test_structured_non_data_finish_uses_safe_template_across_orchestrators(
+    orch_factory: OrchFactory,
+    kind: str,
+    expected_summary: str,
+) -> None:
+    planner = ModelPlanner(
+        provider=_StructuredNonDataProvider(kind),
+        context_builder=_MalformedFinishContextBuilder(),
+        user_id="u",
+        auth_context=population_auth_context(),
+    )
+    orch, store, events = orch_factory(planner=planner)
+    run_id = await _make_run(store)
+
+    await orch.execute(user_id="u", run_id=run_id)
+
+    run = await store.get_run(user_id="u", run_id=run_id)
+    assert run.status == "completed"
+    messages = await store.list_messages(user_id="u", session_id=run.session_id)
+    answer = next(message for message in messages if message.role == "assistant")
+    assert answer.content[0].text == expected_summary
+    assert "999999" not in answer.content[0].text
+    types = [event.type for event in await events.list_events(run_id=run_id)]
+    assert "tool.started" not in types
     assert "run.failed" not in types
 
 

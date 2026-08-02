@@ -216,7 +216,104 @@ async def test_reference_only_uses_fixed_server_summary() -> None:
 async def test_finish_tool_schema_only_exposes_implemented_kinds() -> None:
     kind_schema = FINISH_TOOL_INPUT_SCHEMA["properties"]["kind"]
 
-    assert kind_schema["enum"] == ["claims", "reference_only"]
+    assert kind_schema["enum"] == [
+        "claims",
+        "reference_only",
+        "capability",
+        "clarification",
+        "denial",
+        "failure",
+    ]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("kind", "tool_results", "expected_summary"),
+    (
+        (
+            "capability",
+            (),
+            "我可以协助使用当前已授权的治理查询能力。",
+        ),
+        (
+            "clarification",
+            (),
+            "请补充查询所需的区域、对象或统计口径。",
+        ),
+        (
+            "denial",
+            (
+                ToolResult(
+                    tool_call_id="tc-denied",
+                    tool_id="governance.query_population_metrics",
+                    tool_version="1.0.0",
+                    status="denied",
+                    summary="无权访问",
+                ),
+            ),
+            "当前查询因权限限制无法完成。",
+        ),
+        (
+            "failure",
+            (
+                ToolResult(
+                    tool_call_id="tc-failed",
+                    tool_id="governance.query_population_metrics",
+                    tool_version="1.0.0",
+                    status="failed",
+                    summary="上游失败",
+                ),
+            ),
+            "本次查询执行失败，未生成业务结论。",
+        ),
+    ),
+)
+async def test_non_data_structured_finish_uses_status_bound_server_template(
+    kind: str,
+    tool_results: tuple[ToolResult, ...],
+    expected_summary: str,
+) -> None:
+    structured = StructuredFinish(
+        kind=kind,
+        summary="我可以确认住宅出租有999999套。",
+        claims=[],
+    )
+
+    assessment = await DeterministicCompletionValidator().assess(
+        HarnessState(tool_results=tool_results),
+        FinishAction(
+            summary=structured.summary,
+            structured_finish=structured,
+            legacy=False,
+        ),
+    )
+
+    assert assessment.status == "accept"
+    assert assessment.safe_summary == expected_summary
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("kind", ("denial", "failure"))
+async def test_status_bound_finish_rejects_without_matching_tool_result(
+    kind: str,
+) -> None:
+    structured = StructuredFinish(
+        kind=kind,
+        summary="模型试图无依据结束。",
+        claims=[],
+    )
+
+    assessment = await DeterministicCompletionValidator().assess(
+        HarnessState(),
+        FinishAction(
+            summary=structured.summary,
+            structured_finish=structured,
+            legacy=False,
+        ),
+    )
+
+    assert assessment.status == "revise"
+    assert assessment.reason_code == f"structured_{kind}_state_mismatch"
 
 
 @pytest.mark.asyncio
@@ -337,7 +434,7 @@ async def test_inherited_unhydrated_result_only_allows_structured_reference() ->
     )
 
     assert plain.status == "revise"
-    assert plain.reason_code == "structured_claims_required"
+    assert plain.reason_code == "structured_finish_required"
     assert unverified_claim.status == "revise"
     assert unverified_claim.reason_code == "claim_result_not_found"
     assert safe_reference.status == "accept"

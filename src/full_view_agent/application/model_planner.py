@@ -72,7 +72,10 @@ class ModelPlanner:
         if any(tool.tool_id == FINISH_TOOL_ID for tool in request.tools):
             raise ModelContractError("reserved finish tool cannot be a business tool")
         if not request.tools and not state.tool_results:
-            return FinishAction(summary="抱歉，当前账号没有可用于该查询的授权能力。")
+            return FinishAction(
+                summary="抱歉，当前账号没有可用于该查询的授权能力。",
+                legacy=True,
+            )
         remaining_tokens = self._max_total_tokens - self._total_tokens
         if remaining_tokens <= 0:
             raise BudgetExceeded("model token budget exceeded")

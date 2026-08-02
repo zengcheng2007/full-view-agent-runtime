@@ -76,7 +76,8 @@ def build_full_view_system_prompt(
         "Tool 返回后只能依据已验证观察作答；已有成功结果时不得重复相同调用。"
         "完成业务数据回答时必须调用 full_view.finish_answer：每条事实必须绑定 result_id、"
         "result_fingerprint、行定位、字段、运算和值；只需展示数据面板时使用"
-        "reference_only。不得用普通文本绕过结构化事实校验。"
+        "reference_only；能力说明、参数澄清、权限拒绝、执行失败分别使用 capability、"
+        "clarification、denial、failure。任何生产完成都不得使用普通文本绕过结构化校验。"
         "可用能力概述：" + capabilities + " " + semantic_section
         + "Tool 返回 upstream_timeout、upstream_unavailable 或 upstream_contract_error"
         " 时，表示运行时已完成内部重试，不得重试相同 Tool；应说明失败并结束本次任务。"

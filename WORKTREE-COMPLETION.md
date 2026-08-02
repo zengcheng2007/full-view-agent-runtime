@@ -51,6 +51,12 @@
   明确禁止复述、排序、筛选、计算或解释。
 - HTTP 住房类型及 InMemory 住房类型/下级区划统一执行 `limit + truncated`；
   上游显式截断标志同样保留，截断结果的全局聚合 Claim 被拒绝。
+- 生产 `ModelPlanner` 的无结果普通文本不再借关键词白名单完成；`legacy=False`
+  一律进入一次修订，第二次仍违规时固定安全停止。
+- Finish Tool 完整支持 capability/clarification/denial/failure：前两者仅允许无结果
+  状态，后两者必须绑定匹配的 denied/failed ToolResult，全部使用服务端固定模板。
+- Native/LangGraph 已覆盖“有授权 Tool、零 Tool 调用、伪造能力正文”的反例，
+  并覆盖正常 capability/clarification 无模型数字泄漏。
 
 ## TDD 证据
 
@@ -74,11 +80,12 @@
 
 ## Fresh 验证
 
-- 全量测试：`581 passed, 18 skipped`（`599 collected`）。
+- 全量测试：`594 passed, 18 skipped`（`612 collected`）。
 - Ruff：`All checks passed!`。
 - Pyright：`0 errors, 0 warnings, 0 informations`。
 - Compileall：通过。
 - Eval：`46/46 pass@1=100%`。
+- Native/LangGraph 差分：`46 cases, 0 differences`。
 
 ## 明确未完成（第二阶段）
 

@@ -803,6 +803,20 @@ async def test_deterministic_validator_accepts_allowed_no_result_prefixes() -> N
 
 
 @pytest.mark.asyncio
+async def test_production_plain_text_cannot_borrow_no_result_allowlist() -> None:
+    assessment = await DeterministicCompletionValidator().assess(
+        HarnessState(),
+        FinishAction(
+            summary="我可以确认住宅出租有999999套。",
+            legacy=False,
+        ),
+    )
+
+    assert assessment.status == "revise"
+    assert assessment.reason_code == "structured_finish_required"
+
+
+@pytest.mark.asyncio
 async def test_deterministic_validator_rejects_hallucinated_data_without_tools() -> None:
     validator = DeterministicCompletionValidator()
     state = HarnessState()

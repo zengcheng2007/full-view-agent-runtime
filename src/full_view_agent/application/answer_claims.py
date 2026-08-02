@@ -11,6 +11,10 @@ from full_view_agent.domain.models import ContractModel, ToolResult
 FINISH_TOOL_ID = "full_view.finish_answer"
 FINISH_TOOL_NAME = "full_view__finish_answer"
 REFERENCE_ONLY_SUMMARY = "查询已完成，详细结果请查看数据面板。"
+CAPABILITY_SUMMARY = "我可以协助使用当前已授权的治理查询能力。"
+CLARIFICATION_SUMMARY = "请补充查询所需的区域、对象或统计口径。"
+DENIAL_SUMMARY = "当前查询因权限限制无法完成。"
+FAILURE_SUMMARY = "本次查询执行失败，未生成业务结论。"
 
 ClaimScalar = str | int | float | bool | None
 ClaimOperation = Literal[
@@ -37,7 +41,14 @@ class AnswerClaim(ContractModel):
 
 
 class StructuredFinish(ContractModel):
-    kind: Literal["claims", "reference_only"]
+    kind: Literal[
+        "claims",
+        "reference_only",
+        "capability",
+        "clarification",
+        "denial",
+        "failure",
+    ]
     summary: str = Field(min_length=1, max_length=10_000)
     claims: list[AnswerClaim] = Field(default_factory=list, max_length=100)
 
@@ -55,7 +66,8 @@ class StructuredFinish(ContractModel):
 
 FINISH_TOOL_DESCRIPTION = (
     "完成本轮回答。引用查询事实时必须使用 claims，并明确绑定 Result、行、字段、"
-    "运算和值；只展示数据面板时使用 reference_only。"
+    "运算和值；只展示数据面板时使用 reference_only；能力说明、参数澄清、权限拒绝"
+    "和执行失败必须分别使用 capability、clarification、denial、failure。"
 )
 FINISH_TOOL_INPUT_SCHEMA: dict[str, object] = StructuredFinish.model_json_schema()
 
