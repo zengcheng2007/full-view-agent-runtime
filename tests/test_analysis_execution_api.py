@@ -397,7 +397,11 @@ async def test_analysis_plan_replay_requires_matching_authority() -> None:
 
 
 async def _create_run(
-    client: httpx.AsyncClient, token: str, *, mode: str = "analysis"
+    client: httpx.AsyncClient,
+    token: str,
+    *,
+    mode: str = "analysis",
+    supported_commands: tuple[str, ...] = ("panel.show_table",),
 ) -> dict[str, object]:
     session = await client.post(
         "/agent-api/v1/sessions",
@@ -416,7 +420,7 @@ async def _create_run(
             "client": {
                 "client_instance_id": f"client-{token}",
                 "frontend_command_schema_versions": ["1.0"],
-                "supported_commands": ["panel.show_table"],
+                "supported_commands": list(supported_commands),
             },
             "mode": mode,
         },
@@ -426,14 +430,18 @@ async def _create_run(
 
 
 async def _create_plan(
-    client: httpx.AsyncClient, token: str, run_id: str
+    client: httpx.AsyncClient,
+    token: str,
+    run_id: str,
+    *,
+    goals: tuple[str, ...] = ("housing",),
 ) -> dict[str, object]:
     response = await client.post(
         f"/agent-api/v1/runs/{run_id}/analysis-plans",
         headers={"geoToken": token, "Idempotency-Key": f"plan-{token}"},
         json={
             "request_id": "analysis-request-exec-01",
-            "goals": ["housing"],
+            "goals": list(goals),
             "scope_ref": {
                 "kind": "area",
                 "scope": {"area_code": "330106"},
@@ -864,6 +872,135 @@ async def test_second_analysis_reauthentication_exposes_fresh_pending_refs() -> 
     assert second_resume.status_code == 202
     assert second_resume.json()["data"]["status"] == "completed"
     assert orchestrator.resume_calls == 2
+
+
+@pytest.mark.asyncio
+async def test_public_analysis_execution_publishes_commands_and_accepts_receipts(
+    monkeypatch,
+) -> None:
+    """公开 execution API → 结构化 Result → FrontendCommand → 前端回执往返。"""
+    monkeypatch.setenv("FULL_VIEW_ANALYSIS_EXECUTION_ENABLED", "true")
+    runtime = _runtime(orchestrator=None)
+    app = create_app(runtime)
+    token = "analysis-command-receipts"
+    client_instance = f"client-{token}"
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=app), base_url="http://test"
+    ) as client:
+        run = await _create_run(
+            client,
+            token,
+            supported_commands=("panel.show_table", "map.render_choropleth"),
+        )
+        plan = await _create_plan(client, token, str(run["run_id"]), goals=("overview",))
+        execution = await client.post(
+            f"/agent-api/v1/runs/{run['run_id']}/analysis-plans/{plan['plan_id']}/executions",
+            headers={"geoToken": token},
+            json={"request_id": plan["request_id"]},
+        )
+        assert execution.status_code == 200, execution.text
+
+        events = await runtime.events.list_events(run_id=str(run["run_id"]))  # type: ignore[union-attr]
+        commands = [
+            event.data["command"]
+            for event in events
+            if event.type == "frontend.command.requested"
+        ]
+        # 三个主题结果各发一条表格命令；只有区域分组结果额外上图。
+        assert len(commands) == 4
+        assert sum(c["type"] == "map.render_choropleth" for c in commands) == 1
+        for command in commands:
+            assert command["run_id"] == run["run_id"]
+            assert command["target_client_instance_id"] == client_instance
+            assert command["preconditions"]["session_id"] == run["session_id"]
+            assert command["preconditions"]["area_code"] == "330106"
+            # 命令事件必须晚于其 Result 的持久化事件，且 Result 可被前端读取。
+            result_available = next(
+                event
+                for event in events
+                if event.type == "result.available"
+                and event.data["result_id"] == command["payload"]["result_id"]
+            )
+            assert events.index(result_available) < events.index(
+                next(
+                    event
+                    for event in events
+                    if event.type == "frontend.command.requested"
+                    and event.data["command"]["command_id"] == command["command_id"]
+                )
+            )
+            result_response = await client.get(
+                f"/agent-api/v1/results/{command['payload']['result_id']}",
+                headers={"geoToken": token},
+            )
+            assert result_response.status_code == 200
+
+        choropleth = next(
+            c for c in commands if c["type"] == "map.render_choropleth"
+        )
+        receipt_url = (
+            f"/agent-api/v1/runs/{run['run_id']}/frontend-command-receipts/"
+            f"{choropleth['command_id']}"
+        )
+        receipt = {
+            "schema_version": "1.1",
+            "command_id": choropleth["command_id"],
+            "client_instance_id": client_instance,
+            "status": "completed",
+            "received_at": "2026-08-05T10:00:00Z",
+            "completed_at": "2026-08-05T10:00:01Z",
+            "client_state": {"route_id": "analysis_workspace"},
+            "error": None,
+        }
+        first = await client.put(receipt_url, headers={"geoToken": token}, json=receipt)
+        replay = await client.put(receipt_url, headers={"geoToken": token}, json=receipt)
+        wrong_client = await client.put(
+            receipt_url,
+            headers={"geoToken": token},
+            json={**receipt, "client_instance_id": "client-intruder"},
+        )
+        conflicting = await client.put(
+            receipt_url,
+            headers={"geoToken": token},
+            json={**receipt, "status": "failed"},
+        )
+
+    assert first.status_code == 200
+    assert first.json()["data"]["status"] == "completed"
+    assert replay.status_code == 200
+    assert replay.json()["data"] == first.json()["data"]
+    assert wrong_client.status_code == 403
+    assert wrong_client.json()["error"]["code"] == "command_client_mismatch"
+    assert conflicting.status_code == 409
+    assert conflicting.json()["error"]["code"] == "command_receipt_conflict"
+
+
+@pytest.mark.asyncio
+async def test_public_analysis_execution_issues_no_commands_for_undeclared_client(
+    monkeypatch,
+) -> None:
+    monkeypatch.setenv("FULL_VIEW_ANALYSIS_EXECUTION_ENABLED", "true")
+    runtime = _runtime(orchestrator=None)
+    app = create_app(runtime)
+    token = "analysis-no-command-client"
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=app), base_url="http://test"
+    ) as client:
+        run = await _create_run(client, token, supported_commands=())
+        plan = await _create_plan(client, token, str(run["run_id"]), goals=("overview",))
+        execution = await client.post(
+            f"/agent-api/v1/runs/{run['run_id']}/analysis-plans/{plan['plan_id']}/executions",
+            headers={"geoToken": token},
+            json={"request_id": plan["request_id"]},
+        )
+
+        assert execution.status_code == 200, execution.text
+        events = await runtime.events.list_events(run_id=str(run["run_id"]))  # type: ignore[union-attr]
+
+    assert [event.type for event in events].count("result.available") == 3
+    assert not [
+        event for event in events if event.type == "frontend.command.requested"
+    ]
 
 
 @pytest.mark.asyncio
