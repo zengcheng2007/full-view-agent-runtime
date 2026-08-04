@@ -17,7 +17,9 @@ expected:
   outcome: success
   completion_reason_code: goal_completed
   # 住房主题由统一语义入口承载；规范 Tool 仅供内部编译执行。
-  tool_ids: [governance.resolve_area, governance.semantic_query]
+  required_tool_ids: [governance.resolve_area, governance.semantic_query]
+  forbidden_tool_ids: [governance.query_housing_metrics]
+  max_tool_calls: 4
   min_evidence_count: 2
   required_event_types: [tool.completed, result.available, evidence.available, run.completed]
   # 只校验回答里应该包含的关键词

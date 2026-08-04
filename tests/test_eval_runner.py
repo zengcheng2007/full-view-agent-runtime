@@ -13,14 +13,76 @@ from full_view_agent.application.model_provider import (
 from full_view_agent.evaluation.contracts import (
     EvalCase,
     EvalErrorStep,
+    EvalExpected,
     EvalFinishStep,
     EvalTrace,
 )
 from full_view_agent.evaluation.loader import load_eval_case
-from full_view_agent.evaluation.runner import EvalRunner, StaticEvalEnvironment
+from full_view_agent.evaluation.runner import EvalRunner, StaticEvalEnvironment, _grade
 from full_view_agent.infrastructure.governance_adapter import InMemoryGovernanceAdapter
 
 EVAL_CASES = Path(__file__).parents[1] / "evals" / "cases"
+
+
+def test_open_eval_grades_required_tools_without_fixing_exact_call_sequence() -> None:
+    expected = EvalExpected(
+        terminal_status="completed",
+        outcome="success",
+        completion_reason_code="goal_completed",
+        required_tool_ids=[
+            "governance.resolve_area",
+            "governance.semantic_query",
+        ],
+        forbidden_tool_ids=["governance.query_event_metrics"],
+        max_tool_calls=4,
+    )
+
+    grades = _grade(
+        expected,
+        terminal_status="completed",
+        outcome="success",
+        completion_reason_code="goal_completed",
+        tool_ids=[
+            "governance.resolve_area",
+            "governance.resolve_area",
+            "governance.semantic_query",
+        ],
+        evidence_count=3,
+        event_types=["tool.completed"] * 3,
+        final_answer="办结率查询完成",
+    )
+
+    assert all(grade.passed for grade in grades)
+
+
+def test_open_eval_rejects_missing_forbidden_or_excessive_tool_calls() -> None:
+    expected = EvalExpected(
+        terminal_status="completed",
+        outcome="success",
+        completion_reason_code="goal_completed",
+        required_tool_ids=["governance.semantic_query"],
+        forbidden_tool_ids=["governance.query_event_metrics"],
+        max_tool_calls=1,
+    )
+
+    grades = _grade(
+        expected,
+        terminal_status="completed",
+        outcome="success",
+        completion_reason_code="goal_completed",
+        tool_ids=[
+            "governance.query_event_metrics",
+            "governance.resolve_area",
+        ],
+        evidence_count=0,
+        event_types=["tool.completed"] * 2,
+        final_answer="无法完成",
+    )
+    by_name = {grade.name: grade for grade in grades}
+
+    assert by_name["required_tool_ids"].passed is False
+    assert by_name["forbidden_tool_ids"].passed is False
+    assert by_name["max_tool_calls"].passed is False
 
 
 class TwoStepLiveModelProvider:

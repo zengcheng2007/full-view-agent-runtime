@@ -514,6 +514,12 @@ def _grade(
         for substring in expected.required_answer_substrings
         if substring in final_answer
     ]
+    missing_required_tools = [
+        tool_id for tool_id in expected.required_tool_ids if tool_id not in tool_ids
+    ]
+    forbidden_tool_matches = [
+        tool_id for tool_id in expected.forbidden_tool_ids if tool_id in tool_ids
+    ]
     checks: list[tuple[str, GradeValue, GradeValue, bool]] = [
         (
             "terminal_status",
@@ -564,6 +570,30 @@ def _grade(
         )
     checks.extend(
         [
+            (
+            "required_tool_ids",
+            expected.required_tool_ids,
+            missing_required_tools,
+            not missing_required_tools,
+            ),
+            (
+            "forbidden_tool_ids",
+            expected.forbidden_tool_ids,
+            forbidden_tool_matches,
+            not forbidden_tool_matches,
+            ),
+            *(
+                [
+                    (
+                        "max_tool_calls",
+                        expected.max_tool_calls,
+                        len(tool_ids),
+                        len(tool_ids) <= expected.max_tool_calls,
+                    )
+                ]
+                if expected.max_tool_calls is not None
+                else []
+            ),
             (
             "min_evidence_count",
             expected.min_evidence_count,

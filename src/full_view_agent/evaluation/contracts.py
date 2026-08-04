@@ -69,6 +69,9 @@ class EvalExpected(ContractModel):
     outcome: RunOutcome
     completion_reason_code: str = Field(min_length=1, max_length=200)
     tool_ids: list[str] = Field(default_factory=list)
+    required_tool_ids: list[str] = Field(default_factory=list)
+    forbidden_tool_ids: list[str] = Field(default_factory=list)
+    max_tool_calls: int | None = Field(default=None, ge=0)
     min_evidence_count: int = Field(default=0, ge=0)
     max_evidence_count: int | None = Field(default=None, ge=0)
     required_event_types: list[str] = Field(default_factory=list)

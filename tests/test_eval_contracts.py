@@ -39,6 +39,9 @@ expected:
   outcome: success
   completion_reason_code: goal_completed
   tool_ids: [governance.query_population_metrics]
+  required_tool_ids: [governance.query_population_metrics]
+  forbidden_tool_ids: [governance.semantic_query]
+  max_tool_calls: 2
   min_evidence_count: 1
 """.strip(),
         encoding="utf-8",
@@ -50,6 +53,11 @@ expected:
     assert isinstance(case.model_steps[0], EvalToolCallStep)
     assert isinstance(case.model_steps[1], EvalFinishStep)
     assert case.expected.min_evidence_count == 1
+    assert case.expected.required_tool_ids == [
+        "governance.query_population_metrics"
+    ]
+    assert case.expected.forbidden_tool_ids == ["governance.semantic_query"]
+    assert case.expected.max_tool_calls == 2
 
 
 def test_eval_finish_step_preserves_structured_claims() -> None:
