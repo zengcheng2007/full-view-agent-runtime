@@ -19,7 +19,10 @@ from full_view_agent.application.analysis_plan_repository import (
     AnalysisPlanStoreRejected,
 )
 from full_view_agent.application.analysis_planner import AnalysisPlanner
-from full_view_agent.application.errors import ReauthenticationRequired
+from full_view_agent.application.errors import (
+    ReauthenticationRequired,
+    RunStateConflict,
+)
 from full_view_agent.application.fingerprints import canonical_fingerprint
 from full_view_agent.application.semantic_executor import SemanticToolExecutor
 from full_view_agent.application.semantic_wiring import build_semantic_capability_stack
@@ -33,8 +36,19 @@ from full_view_agent.domain.analysis_plan import (
     AreaScopeRef,
     PlanBudget,
 )
-from full_view_agent.domain.models import AuthContext, MetricQueryScope, ToolResult
+from full_view_agent.domain.models import (
+    AgentMessage,
+    AgentRun,
+    AgentSession,
+    AuthContext,
+    DataResult,
+    MetricQueryScope,
+    TableDataResult,
+    TextContent,
+    ToolResult,
+)
 from full_view_agent.infrastructure.governance_adapter import InMemoryGovernanceAdapter
+from full_view_agent.infrastructure.memory_store import InMemoryAgentStore
 from full_view_agent.semantic.action_resolver import (
     SEMANTIC_QUERY_TOOL_ID,
     SemanticActionResolver,
@@ -131,6 +145,7 @@ class _ControlledSemanticPort(SemanticToolExecutor):
         self.exceptions = dict(exceptions or {})
         self.plan_repository = plan_repository
         self.planner = planner
+        self.result_store: InMemoryAgentStore | None = None
         self.calls: list[str] = []
         self.active = 0
         self.max_active = 0
@@ -190,9 +205,10 @@ def _executor(
     *,
     catalog: SemanticCatalog | None = None,
     delays: Mapping[str, float] | None = None,
-    statuses: Mapping[str, Literal["failed", "denied"]] | None = None,
+    statuses: Mapping[str, Literal["failed", "denied", "partial"]] | None = None,
     summaries: Mapping[str, str] | None = None,
     exceptions: Mapping[str, Exception] | None = None,
+    result_store: InMemoryAgentStore | None = None,
 ) -> tuple[AnalysisPlanExecutor, _ControlledSemanticPort, SemanticCatalog]:
     effective_catalog = catalog or SemanticCatalog.default()
     stack = build_semantic_capability_stack(
@@ -211,6 +227,9 @@ def _executor(
         plan_repository=plan_repository,
         planner=planner,
     )
+    effective_store = result_store or InMemoryAgentStore()
+    # 测试句柄：报告/落库断言通过它读取既有 Result 生命周期存储。
+    port.result_store = effective_store
     return (
         AnalysisPlanExecutor(
             catalog=stack.catalog,
@@ -218,9 +237,48 @@ def _executor(
             semantic_executor=port,
             planner=planner,
             plan_repository=plan_repository,
+            result_store=effective_store,
         ),
         port,
         stack.catalog,
+    )
+
+
+async def _seed_result_store(
+    store: InMemoryAgentStore, *, auth_context: AuthContext
+) -> None:
+    """按授权上下文的 session/run 命名空间激活既有 Result 生命周期。"""
+    if auth_context.run_id in store.runs:
+        return
+    await store.create_session(
+        AgentSession(
+            session_id=auth_context.session_id,
+            owner_user_id=auth_context.principal.user_id,
+            title="analysis gateway",
+        )
+    )
+    message = AgentMessage(
+        message_id=f"msg-{auth_context.run_id}",
+        session_id=auth_context.session_id,
+        run_id=auth_context.run_id,
+        role="user",
+        content=[TextContent(type="text", text="analysis")],
+    )
+    await store.create_run_if_session_idle(
+        user_id=auth_context.principal.user_id,
+        session_id=auth_context.session_id,
+        run=AgentRun(
+            run_id=auth_context.run_id,
+            session_id=auth_context.session_id,
+            origin_client_instance_id="cli-analysis",
+            status="queued",
+            input_message_id=message.message_id,
+            base_context_version=1,
+        ),
+        input_message=message,
+    )
+    await store.start_run(
+        user_id=auth_context.principal.user_id, run_id=auth_context.run_id
     )
 
 
@@ -244,6 +302,8 @@ async def _execute_loaded(
     port.plan_repository.plans[key] = plan
     if trusted_replanned:
         port.planner.expected_plan = plan
+    assert port.result_store is not None
+    await _seed_result_store(port.result_store, auth_context=auth_context)
     try:
         return await executor.execute(
             plan_id=effective_plan_id,
@@ -632,6 +692,7 @@ def test_executor_rejects_semantic_executor_with_a_different_resolver() -> None:
             semantic_executor=second.executor,
             planner=AnalysisPlanner(first.catalog),
             plan_repository=_InMemoryAnalysisPlanRepository(),
+            result_store=InMemoryAgentStore(),
         )
 
 
@@ -935,3 +996,112 @@ async def test_same_plan_id_is_not_visible_across_server_namespace(
 
     assert exc_info.value.code == "PLAN_NOT_FOUND"
     assert port.calls == []
+
+
+@pytest.mark.asyncio
+async def test_usable_child_results_are_persisted_through_the_result_lifecycle() -> None:
+    executor, port, catalog = _executor(statuses={"housing": "partial"})
+    plan = _overview_plan(catalog)
+    auth = _full_auth_context()
+
+    result = await _execute_loaded(executor, port, plan, auth_context=auth)
+
+    assert port.result_store is not None
+    persisted = 0
+    for step in result.steps:
+        if step.status not in {"success", "partial"}:
+            continue
+        assert step.tool_result is not None
+        assert step.tool_result.data_result is not None
+        stored = await port.result_store.get_result(
+            user_id=auth.principal.user_id,
+            result_id=step.tool_result.data_result.result_id,
+        )
+        assert stored == step.tool_result.data_result
+        persisted += 1
+    assert persisted == 3
+
+
+@pytest.mark.asyncio
+async def test_failed_denied_and_timeout_steps_persist_nothing() -> None:
+    executor, port, catalog = _executor(
+        statuses={"event": "failed", "housing": "denied"},
+        delays={"population": 0.3},
+    )
+    plan = _overview_plan(catalog)
+    steps = tuple(
+        step.model_copy(update={"timeout_ms": 100})
+        if step.subject == "population"
+        else step
+        for step in plan.steps
+    )
+    plan = _replace_steps(plan, steps)
+
+    result = await _execute_loaded(
+        executor, port, plan, auth_context=_full_auth_context(), trusted_replanned=True
+    )
+
+    assert result.status == "failed"
+    assert port.result_store is not None
+    assert port.result_store.results == {}
+
+
+@pytest.mark.asyncio
+async def test_child_result_persistence_failure_is_structured_and_isolated() -> None:
+    class _HousingRejectingStore(InMemoryAgentStore):
+        async def save_result(self, *, user_id: str, run_id: str, result: DataResult) -> DataResult:
+            if isinstance(result, TableDataResult) and result.data.rows and getattr(
+                result.data.rows[0], "lease_type", None
+            ):
+                raise RunStateConflict("results can only be saved for an active run")
+            return await super().save_result(
+                user_id=user_id, run_id=run_id, result=result
+            )
+
+    executor, port, catalog = _executor(result_store=_HousingRejectingStore())
+    plan = _overview_plan(catalog)
+    auth = _full_auth_context()
+
+    result = await _execute_loaded(executor, port, plan, auth_context=auth)
+
+    assert result.status == "partial"
+    by_subject = {step.subject: step for step in result.steps}
+    assert by_subject["housing"].status == "failed"
+    assert by_subject["housing"].reason_code == "CHILD_RESULT_NOT_PERSISTED"
+    assert by_subject["event"].status == "success"
+    assert by_subject["population"].status == "success"
+    assert port.result_store is not None
+    assert len(port.result_store.results) == 2
+
+
+@pytest.mark.asyncio
+async def test_child_result_save_is_idempotent_within_the_result_lifecycle() -> None:
+    executor, port, catalog = _executor()
+    plan = _overview_plan(catalog)
+    auth = _full_auth_context()
+
+    first = await _execute_loaded(executor, port, plan, auth_context=auth)
+    second = await _execute_loaded(executor, port, plan, auth_context=auth)
+
+    assert port.result_store is not None
+    first_ids = {
+        step.tool_result.data_result.result_id
+        for step in first.steps
+        if step.tool_result is not None and step.tool_result.data_result is not None
+    }
+    # 重复保存同一子结果不得产生冲突或重复条目。
+    for step in second.steps:
+        if step.tool_result is not None and step.tool_result.data_result is not None:
+            data_result = step.tool_result.data_result
+            await port.result_store.save_result(
+                user_id=auth.principal.user_id,
+                run_id=auth.run_id,
+                result=data_result,
+            )
+            stored = await port.result_store.get_result(
+                user_id=auth.principal.user_id, result_id=data_result.result_id
+            )
+            assert stored == data_result
+    stored_ids = set(port.result_store.results)
+    assert len(stored_ids) == len(port.result_store.results)
+    assert first_ids <= stored_ids

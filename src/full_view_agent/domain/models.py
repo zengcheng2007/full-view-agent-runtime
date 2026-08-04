@@ -1,11 +1,10 @@
 from datetime import UTC, datetime, timedelta
 from typing import Annotated, Literal
 
-from pydantic import BaseModel, ConfigDict, Field, model_validator
+from pydantic import ConfigDict, Field, model_validator
 
-
-class ContractModel(BaseModel):
-    model_config = ConfigDict(extra="forbid")
+from full_view_agent.domain.analysis_report import AnalysisReportDataResult
+from full_view_agent.domain.contract_model import ContractModel
 
 
 class TextContent(ContractModel):
@@ -699,14 +698,17 @@ class ObjectProfileResult(ContractModel):
 
 
 DataResult = Annotated[
-    AreaCandidatesResult | TableDataResult | ObjectProfileResult,
+    AreaCandidatesResult
+    | TableDataResult
+    | ObjectProfileResult
+    | AnalysisReportDataResult,
     Field(discriminator="kind"),
 ]
 
 
 class ResultMetadata(ContractModel):
     result_id: str
-    kind: Literal["area_candidates", "table", "object_profile"]
+    kind: Literal["area_candidates", "table", "object_profile", "analysis_report"]
     data_schema_ref: str
     result_fingerprint: str
     payload_status: Literal["expired"] = "expired"

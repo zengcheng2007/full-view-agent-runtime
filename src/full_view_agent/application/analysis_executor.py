@@ -20,6 +20,7 @@ from full_view_agent.application.analysis_plan_repository import (
 from full_view_agent.application.analysis_planner import AnalysisPlanner
 from full_view_agent.application.errors import ReauthenticationRequired
 from full_view_agent.application.fingerprints import canonical_fingerprint
+from full_view_agent.application.ports import AgentStore
 from full_view_agent.application.semantic_executor import SemanticToolExecutor
 from full_view_agent.domain.analysis_execution import (
     AnalysisExecutionResult,
@@ -73,8 +74,10 @@ class AnalysisPlanExecutor:
         semantic_executor: SemanticToolExecutor,
         planner: AnalysisPlanner,
         plan_repository: AnalysisPlanRepository,
+        result_store: AgentStore,
     ) -> None:
         self._catalog = catalog
+        self._result_store = result_store
         # 要求组合根显式传入与 SemanticToolExecutor 共用的 resolver。
         # 执行时仍由 semantic_executor 内部调用它；这里校验实例
         # 与 Catalog 一致，防止组合根误配。
@@ -389,6 +392,24 @@ class AnalysisPlanExecutor:
                 reason_code="STEP_EXECUTION_ERROR",
                 detail="controlled semantic execution failed unexpectedly",
             )
+
+        if result.status in {"success", "partial"} and result.data_result is not None:
+            # 可用子结果必须进入既有 Result 生命周期（既有 AgentStore，
+            # 不新建旁路仓储）；保存按 result_id 幂等覆盖。
+            try:
+                await self._result_store.save_result(
+                    user_id=auth_context.principal.user_id,
+                    run_id=auth_context.run_id,
+                    result=result.data_result,
+                )
+            except Exception:
+                # fail closed：未持久化的子结果不能当作可用结果。
+                return self._step_result(
+                    step,
+                    status="failed",
+                    reason_code="CHILD_RESULT_NOT_PERSISTED",
+                    detail="child result could not be saved into the result lifecycle",
+                )
 
         reason_code = (
             result.warnings[0]

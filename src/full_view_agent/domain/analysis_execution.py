@@ -1,16 +1,15 @@
 """区域研判计划的框架无关执行结果契约。"""
 
-from typing import Literal
-
 from pydantic import ConfigDict, Field
 
 from full_view_agent.domain.analysis_plan import AnalysisOmission
+from full_view_agent.domain.analysis_shared import (
+    AnalysisExecutionStatus as AnalysisExecutionStatus,
+)
+from full_view_agent.domain.analysis_shared import (
+    AnalysisStepExecutionStatus as AnalysisStepExecutionStatus,
+)
 from full_view_agent.domain.models import ContractModel, ToolResult
-
-AnalysisExecutionStatus = Literal["completed", "partial", "failed"]
-AnalysisStepExecutionStatus = Literal[
-    "success", "partial", "denied", "failed", "timeout", "skipped"
-]
 
 
 class AnalysisStepExecution(ContractModel):
