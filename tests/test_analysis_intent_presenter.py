@@ -6,6 +6,9 @@ AnalysisIntentToolPresenter 由当前 SemanticCatalog + AuthContext 派生模型
 - goals enum 只暴露 Catalog 声明、存在 verified binding、且授权
   entitlement/dataset/scope 可用的主题；overview 仅在至少一个主题可执行
   时暴露；
+- 意图范围（named_area/current_area）一律经服务端生产区划解析落地：
+  授权必须同时持有 governance.area.read entitlement、administrative_area
+  dataset 与至少一个可达区域 scope 才呈现，缺任一项返回 None；
 - 无任何可研判主题时返回 None（虚拟能力对模型不可见）；
 - schema 只含 named_area/current_area scope，additionalProperties=false，
   绝不暴露 steps/sql/url/adapter/budget/area_code。
@@ -25,6 +28,9 @@ from .test_policy import population_auth_context
 POPULATION_ENTITLEMENT = "governance.population.aggregate.read"
 HOUSING_ENTITLEMENT = "governance.housing.aggregate.read"
 EVENT_ENTITLEMENT = "governance.event.aggregate.read"
+# 生产区划解析（governance.resolve_area）前置授权：正向用例必须显式持有。
+AREA_ENTITLEMENT = "governance.area.read"
+AREA_DATASET = "administrative_area"
 
 SENSITIVE_FIELDS = ("steps", "sql", "url", "adapter", "budget", "area_code")
 
@@ -49,15 +55,20 @@ def _auth_context(
 
 def _population_auth() -> AuthContext:
     return _auth_context(
-        entitlements=(POPULATION_ENTITLEMENT,),
-        datasets=("population",),
+        entitlements=(POPULATION_ENTITLEMENT, AREA_ENTITLEMENT),
+        datasets=("population", AREA_DATASET),
     )
 
 
 def _full_auth() -> AuthContext:
     return _auth_context(
-        entitlements=(POPULATION_ENTITLEMENT, HOUSING_ENTITLEMENT, EVENT_ENTITLEMENT),
-        datasets=("population", "housing", "event"),
+        entitlements=(
+            POPULATION_ENTITLEMENT,
+            HOUSING_ENTITLEMENT,
+            EVENT_ENTITLEMENT,
+            AREA_ENTITLEMENT,
+        ),
+        datasets=("population", "housing", "event", AREA_DATASET),
     )
 
 
@@ -94,8 +105,8 @@ def test_presenter_follows_catalog_bindings_not_hardcoded_whitelist() -> None:
     )
     presenter = AnalysisIntentToolPresenter(catalog=partial)
     auth = _auth_context(
-        entitlements=(POPULATION_ENTITLEMENT, HOUSING_ENTITLEMENT),
-        datasets=("population", "housing"),
+        entitlements=(POPULATION_ENTITLEMENT, HOUSING_ENTITLEMENT, AREA_ENTITLEMENT),
+        datasets=("population", "housing", AREA_DATASET),
     )
 
     presentation = presenter.present(auth_context=auth)
@@ -107,14 +118,21 @@ def test_presenter_follows_catalog_bindings_not_hardcoded_whitelist() -> None:
 
 def test_presenter_returns_none_without_entitlement() -> None:
     presenter = AnalysisIntentToolPresenter(catalog=SemanticCatalog.default())
-    auth = _auth_context(entitlements=(), datasets=("population",))
+    # 区划解析前置齐备、仅缺主题 entitlement：同样不得呈现。
+    auth = _auth_context(
+        entitlements=(AREA_ENTITLEMENT,),
+        datasets=("population", AREA_DATASET),
+    )
 
     assert presenter.present(auth_context=auth) is None
 
 
 def test_presenter_returns_none_without_dataset() -> None:
     presenter = AnalysisIntentToolPresenter(catalog=SemanticCatalog.default())
-    auth = _auth_context(entitlements=(POPULATION_ENTITLEMENT,), datasets=())
+    auth = _auth_context(
+        entitlements=(POPULATION_ENTITLEMENT, AREA_ENTITLEMENT),
+        datasets=(AREA_DATASET,),
+    )
 
     assert presenter.present(auth_context=auth) is None
 
@@ -123,9 +141,44 @@ def test_presenter_returns_none_when_scope_cannot_reach_any_subject() -> None:
     presenter = AnalysisIntentToolPresenter(catalog=SemanticCatalog.default())
     # 市级编码且不含下级：population 仅支持 6/9/12 层级，主题不可达。
     auth = _auth_context(
-        entitlements=(POPULATION_ENTITLEMENT,),
-        datasets=("population",),
+        entitlements=(POPULATION_ENTITLEMENT, AREA_ENTITLEMENT),
+        datasets=("population", AREA_DATASET),
         areas=(AuthorizedAreaScope(area_code="3301", include_descendants=False),),
+    )
+
+    assert presenter.present(auth_context=auth) is None
+
+
+def test_presenter_returns_none_without_area_resolution_entitlement() -> None:
+    presenter = AnalysisIntentToolPresenter(catalog=SemanticCatalog.default())
+    # 主题授权与区划数据集齐备、仅缺 governance.area.read：
+    # named_area/current_area 无法经生产区划解析落地，不得呈现。
+    auth = _auth_context(
+        entitlements=(POPULATION_ENTITLEMENT,),
+        datasets=("population", AREA_DATASET),
+    )
+
+    assert presenter.present(auth_context=auth) is None
+
+
+def test_presenter_returns_none_without_area_resolution_dataset() -> None:
+    presenter = AnalysisIntentToolPresenter(catalog=SemanticCatalog.default())
+    auth = _auth_context(
+        entitlements=(POPULATION_ENTITLEMENT, AREA_ENTITLEMENT),
+        datasets=("population",),
+    )
+
+    assert presenter.present(auth_context=auth) is None
+
+
+def test_presenter_returns_none_without_any_reachable_area_scope() -> None:
+    presenter = AnalysisIntentToolPresenter(catalog=SemanticCatalog.default())
+    # entitlement/dataset 齐备但无任何可达授权区域：区划解析没有可落地
+    # 的范围，fail closed 不呈现。
+    auth = _auth_context(
+        entitlements=(POPULATION_ENTITLEMENT, AREA_ENTITLEMENT),
+        datasets=("population", AREA_DATASET),
+        areas=(),
     )
 
     assert presenter.present(auth_context=auth) is None

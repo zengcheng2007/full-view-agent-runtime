@@ -60,6 +60,21 @@ VALID_INTENT_ARGUMENTS = {
 }
 
 
+def _area_capable_auth() -> AuthContext:
+    """正向用例授权：显式持有区划解析前置（governance.area.read +
+    administrative_area），否则 presenter fail closed 不呈现虚拟能力。"""
+    base = population_auth_context()
+    data_scopes = base.data_scopes.model_copy(
+        update={"datasets": [*base.data_scopes.datasets, "administrative_area"]}
+    )
+    return base.model_copy(
+        update={
+            "entitlements": [*base.entitlements, "governance.area.read"],
+            "data_scopes": data_scopes,
+        }
+    )
+
+
 class IntentAdContextBuilder:
     """只广告研判虚拟能力（可选携带 server_arguments 的反例注入）。"""
 
@@ -461,7 +476,7 @@ async def test_context_builder_advertises_intent_tool_when_injected() -> None:
         session_id=session.session_id,
         request=run_request(),
     )
-    auth_context = population_auth_context().model_copy(
+    auth_context = _area_capable_auth().model_copy(
         update={"session_id": session.session_id, "run_id": run.run_id}
     )
     builder = AgentContextBuilder(
@@ -533,7 +548,7 @@ async def test_context_builder_keeps_semantic_and_finish_behavior_with_presenter
         session_id=session.session_id,
         request=run_request(),
     )
-    auth_context = population_auth_context().model_copy(
+    auth_context = _area_capable_auth().model_copy(
         update={"session_id": session.session_id, "run_id": run.run_id}
     )
     default_builder = AgentContextBuilder(store=store, registry=ToolRegistry.default())
@@ -574,7 +589,7 @@ async def test_context_builder_with_only_intent_tool_keeps_model_reachable() -> 
         session_id=session.session_id,
         request=run_request(),
     )
-    auth_context = population_auth_context().model_copy(
+    auth_context = _area_capable_auth().model_copy(
         update={"session_id": session.session_id, "run_id": run.run_id}
     )
     builder = AgentContextBuilder(
