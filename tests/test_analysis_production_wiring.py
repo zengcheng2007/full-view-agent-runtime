@@ -39,6 +39,7 @@ async def test_production_composition_survives_runtime_restart(monkeypatch) -> N
     first_runtime = RuntimeContainer()
     assert first_runtime.analysis_orchestrator is not None
     assert first_runtime.analysis_plan_repository is not None
+    assert first_runtime.auth_contexts is not None
     assert first_runtime.store is not None
     auth = _full_auth_context()
     plan = _overview_plan(first_runtime.semantic_stack.catalog)
@@ -64,6 +65,7 @@ async def test_production_composition_survives_runtime_restart(monkeypatch) -> N
             session_id=auth.session_id,
             origin_client_instance_id="analysis-e2e",
             status="queued",
+            mode="analysis",
             input_message_id=message.message_id,
             base_context_version=1,
         ),
@@ -78,6 +80,7 @@ async def test_production_composition_survives_runtime_restart(monkeypatch) -> N
         run_id=auth.run_id,
         plan=plan,
     )
+    await first_runtime.auth_contexts.put(auth)
 
     first = await first_runtime.analysis_orchestrator.run(
         user_id=auth.principal.user_id,
@@ -90,6 +93,12 @@ async def test_production_composition_survives_runtime_restart(monkeypatch) -> N
 
     restarted = RuntimeContainer()
     assert restarted.analysis_orchestrator is not None
+    assert restarted.store is not None
+    assert await restarted.recover_runs() == 1
+    recovered_run = await restarted.store.get_run(
+        user_id=auth.principal.user_id,
+        run_id=auth.run_id,
+    )
     replayed = await restarted.analysis_orchestrator.run(
         user_id=auth.principal.user_id,
         session_id=auth.session_id,
@@ -100,6 +109,7 @@ async def test_production_composition_survives_runtime_restart(monkeypatch) -> N
     )
 
     assert first.status == "completed"
+    assert recovered_run.status == "completed"
     assert replayed == first
     async with await psycopg.AsyncConnection.connect(dsn) as connection:
         step_count = await (

@@ -9,7 +9,7 @@ from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
 from secrets import token_bytes
-from typing import Annotated, Literal
+from typing import Annotated, Literal, cast
 
 from fastapi import Depends, FastAPI, Header, Query, Request
 from fastapi.exceptions import RequestValidationError
@@ -20,6 +20,7 @@ from pydantic import Field, SecretStr, model_validator
 from full_view_agent.application.analysis_graph import AnalysisRunOutcome
 from full_view_agent.application.analysis_plan_repository import AnalysisPlanRepository
 from full_view_agent.application.analysis_planner import AnalysisPlanner
+from full_view_agent.application.analysis_run_binding import AnalysisRunBindingStore
 from full_view_agent.application.analysis_service import AnalysisPlanningService
 from full_view_agent.application.auth_context_refresh import RunAuthContextRefresher
 from full_view_agent.application.capability_service import ToolAdapter
@@ -90,6 +91,7 @@ from full_view_agent.domain.models import (
     HousingAreaGroupRow,
     HousingLeaseTypeRow,
     LegacyIdentitySnapshot,
+    PendingInputRequest,
     PopulationMetricRow,
     ResultMetadata,
     ResultReferenceContent,
@@ -102,6 +104,10 @@ from full_view_agent.domain.models import (
 from full_view_agent.infrastructure.analysis_plan_repository import (
     InMemoryAnalysisPlanRepository,
     PostgresAnalysisPlanRepository,
+)
+from full_view_agent.infrastructure.analysis_run_binding_store import (
+    InMemoryAnalysisRunBindingStore,
+    PostgresAnalysisRunBindingStore,
 )
 from full_view_agent.infrastructure.auth_context_store import (
     InMemoryRunAuthContextStore,
@@ -204,6 +210,11 @@ class AnalysisExecutionBody(ContractModel):
 
 class AnalysisExecutionResponse(ContractModel):
     data: AnalysisRunOutcome
+    meta: ResponseMeta
+
+
+class PendingInputResponse(ContractModel):
+    data: PendingInputRequest
     meta: ResponseMeta
 
 
@@ -332,6 +343,7 @@ class RuntimeContainer:
     tool_registry: ToolRegistry | None = None
     model_provider: ModelProvider | None = None
     analysis_plan_repository: AnalysisPlanRepository | None = None
+    analysis_binding_store: AnalysisRunBindingStore | None = None
     # Injected analysis graph orchestrator. Production composition is wired
     # once the persistent execution service lands; until then the port stays
     # unset and the execution endpoint fails closed with 503 (never falls
@@ -527,6 +539,14 @@ class RuntimeContainer:
             planner=self.analysis_planner,
             repository=self.analysis_plan_repository,
         )
+        self.analysis_binding_store = self.analysis_binding_store or (
+            PostgresAnalysisRunBindingStore(
+                dsn=database_url,
+                schema=os.getenv("FULL_VIEW_POSTGRES_SCHEMA", "full_view_agent"),
+            )
+            if database_url
+            else InMemoryAnalysisRunBindingStore()
+        )
         planner_factory = (
             ModelPlannerFactory(
                 provider=self.model_provider,
@@ -586,6 +606,7 @@ class RuntimeContainer:
                 postgres_schema=os.getenv(
                     "FULL_VIEW_POSTGRES_SCHEMA", "full_view_agent"
                 ),
+                binding_store=self.analysis_binding_store,
             )
 
     def schedule_run(self, *, user_id: str, run_id: str) -> None:
@@ -594,11 +615,59 @@ class RuntimeContainer:
 
     async def recover_runs(self) -> int:
         assert self.store is not None
+        assert self.auth_contexts is not None
+        assert self.analysis_binding_store is not None
         recoverable = await self.store.list_recoverable_runs()
+        recovered_count = 0
         for user_id, run in recoverable:
-            if run.mode != "analysis":
+            if run.mode != "analysis" and run.status in {"queued", "running"}:
                 self.schedule_run(user_id=user_id, run_id=run.run_id)
-        return sum(run.mode != "analysis" for _, run in recoverable)
+                recovered_count += 1
+                continue
+            if run.mode != "analysis" or run.status == "queued":
+                continue
+            try:
+                auth_context = await self.auth_contexts.get(
+                    user_id=user_id,
+                    run_id=run.run_id,
+                )
+                binding = await self.analysis_binding_store.get_binding_for_run(
+                    tenant_id=auth_context.principal.tenant_id,
+                    user_id=user_id,
+                    run_id=run.run_id,
+                )
+                if binding.status in {"completed", "partial", "failed"}:
+                    await _complete_analysis_run(
+                        runtime=self,
+                        user_id=user_id,
+                        run=run,
+                        outcome=AnalysisRunOutcome(
+                            analysis_run_id=run.run_id,
+                            plan_id=binding.plan_id,
+                            request_id=binding.request_id,
+                            status=cast(
+                                Literal["completed", "partial", "failed"],
+                                binding.status,
+                            ),
+                            reason_code=f"ANALYSIS_{binding.status.upper()}",
+                            report_result_id=binding.report_result_id,
+                        ),
+                    )
+                else:
+                    await _publish_analysis_reauthentication(
+                        runtime=self,
+                        user_id=user_id,
+                        run_id=run.run_id,
+                        plan_id=binding.plan_id,
+                        request_id=binding.request_id,
+                    )
+                recovered_count += 1
+            except ResourceNotFound:
+                logger.warning(
+                    "analysis run could not expose a resumable descriptor",
+                    extra={"run_id": run.run_id},
+                )
+        return recovered_count
 
 
 async def require_geotoken(
@@ -770,6 +839,8 @@ async def _publish_analysis_reauthentication(
     waiting, pending = await runtime.service.wait_for_reauthentication(
         user_id=user_id,
         run_id=run_id,
+        analysis_plan_id=plan_id,
+        analysis_request_id=request_id,
     )
     event_data = {
         "status": waiting.status,
@@ -781,8 +852,8 @@ async def _publish_analysis_reauthentication(
         "allow_free_text": pending.allow_free_text,
         "run_state_version": pending.run_state_version,
         "expires_at": pending.expires_at.isoformat(),
-        "analysis_plan_id": plan_id,
-        "analysis_request_id": request_id,
+        "analysis_plan_id": pending.analysis_plan_id,
+        "analysis_request_id": pending.analysis_request_id,
     }
     for event_type in ("run.waiting", "input.required", "reauth_required"):
         await runtime.events.publish(
@@ -1237,6 +1308,39 @@ def create_app(runtime: RuntimeContainer | None = None) -> FastAPI:
             meta=ResponseMeta(request_id=new_id("req")),
         )
 
+    @app.get("/agent-api/v1/runs/{run_id}/pending-input")
+    async def get_pending_run_input(
+        run_id: str,
+        user: Annotated[CurrentUser, Depends(require_geotoken)],
+    ) -> PendingInputResponse:
+        run = await app.state.runtime.store.get_run(
+            user_id=user.user_id,
+            run_id=run_id,
+        )
+        pending = await app.state.runtime.service.get_pending_input(
+            user_id=user.user_id,
+            run_id=run_id,
+        )
+        if (
+            run.status != "waiting_input"
+            or run.waiting_for != "reauth"
+            or pending.closed_at is not None
+        ):
+            raise ResourceNotFound("pending input request not found")
+        if pending.expires_at <= datetime.now(UTC):
+            _waiting, pending = (
+                await app.state.runtime.service.wait_for_reauthentication(
+                    user_id=user.user_id,
+                    run_id=run_id,
+                    analysis_plan_id=pending.analysis_plan_id,
+                    analysis_request_id=pending.analysis_request_id,
+                )
+            )
+        return PendingInputResponse(
+            data=pending,
+            meta=ResponseMeta(request_id=new_id("req")),
+        )
+
     @app.post(
         "/agent-api/v1/runs/{run_id}/analysis-plans",
         status_code=201,
@@ -1559,24 +1663,37 @@ def create_app(runtime: RuntimeContainer | None = None) -> FastAPI:
                     raise AnalysisExecutionUnavailable(
                         "analysis execution orchestrator is not configured"
                     )
-                if (
-                    body.analysis_plan_id is None
-                    or body.analysis_request_id is None
-                ):
+                pending = await app.state.runtime.service.get_pending_input(
+                    user_id=user.user_id,
+                    run_id=run_id,
+                )
+                plan_id = pending.analysis_plan_id or body.analysis_plan_id
+                request_id = pending.analysis_request_id or body.analysis_request_id
+                if plan_id is None or request_id is None:
                     raise RunStateConflict(
                         "analysis resume requires trusted plan references"
+                    )
+                if (
+                    body.analysis_plan_id is not None
+                    and body.analysis_plan_id != plan_id
+                ) or (
+                    body.analysis_request_id is not None
+                    and body.analysis_request_id != request_id
+                ):
+                    raise RunStateConflict(
+                        "analysis resume references differ from the pending request"
                     )
                 plan = await app.state.runtime.analysis_plan_repository.get(
                     tenant_id=user.identity.principal.tenant_id,
                     user_id=user.user_id,
                     run_id=run_id,
-                    plan_id=body.analysis_plan_id,
+                    plan_id=plan_id,
                 )
                 if plan is None:
                     raise ResourceNotFound(
                         "analysis plan was not found for this run"
                     )
-                if plan.request_id != body.analysis_request_id:
+                if plan.request_id != request_id:
                     raise RunStateConflict(
                         "analysis resume request id does not match the stored plan"
                     )
@@ -1608,8 +1725,8 @@ def create_app(runtime: RuntimeContainer | None = None) -> FastAPI:
                         user_id=user.user_id,
                         session_id=current.session_id,
                         analysis_run_id=run_id,
-                        plan_id=body.analysis_plan_id,
-                        request_id=body.analysis_request_id,
+                        plan_id=plan_id,
+                        request_id=request_id,
                         input_request_id=body.input_request_id,
                         run_state_version=body.run_state_version,
                         auth_context=auth_context,
@@ -1619,8 +1736,8 @@ def create_app(runtime: RuntimeContainer | None = None) -> FastAPI:
                         runtime=app.state.runtime,
                         user_id=user.user_id,
                         run_id=run_id,
-                        plan_id=body.analysis_plan_id,
-                        request_id=body.analysis_request_id,
+                        plan_id=plan_id,
+                        request_id=request_id,
                     )
                     raise
                 await _complete_analysis_run(

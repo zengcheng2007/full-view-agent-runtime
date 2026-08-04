@@ -147,8 +147,17 @@ class AgentStore(Protocol):
     async def cancel_run(self, *, user_id: str, run_id: str) -> AgentRun: ...
 
     async def wait_for_reauthentication(
-        self, *, user_id: str, run_id: str
+        self,
+        *,
+        user_id: str,
+        run_id: str,
+        analysis_plan_id: str | None = None,
+        analysis_request_id: str | None = None,
     ) -> tuple[AgentRun, PendingInputRequest]: ...
+
+    async def get_pending_input(
+        self, *, user_id: str, run_id: str
+    ) -> PendingInputRequest: ...
 
     async def resume_from_input(
         self,

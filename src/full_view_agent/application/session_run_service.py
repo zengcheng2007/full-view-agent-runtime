@@ -99,11 +99,23 @@ class SessionRunService:
     async def cancel_run(self, *, user_id: str, run_id: str) -> AgentRun:
         return await self._store.cancel_run(user_id=user_id, run_id=run_id)
 
-    async def wait_for_reauthentication(self, *, user_id: str, run_id: str):
+    async def wait_for_reauthentication(
+        self,
+        *,
+        user_id: str,
+        run_id: str,
+        analysis_plan_id: str | None = None,
+        analysis_request_id: str | None = None,
+    ):
         return await self._store.wait_for_reauthentication(
             user_id=user_id,
             run_id=run_id,
+            analysis_plan_id=analysis_plan_id,
+            analysis_request_id=analysis_request_id,
         )
+
+    async def get_pending_input(self, *, user_id: str, run_id: str):
+        return await self._store.get_pending_input(user_id=user_id, run_id=run_id)
 
     async def resume_from_input(
         self,

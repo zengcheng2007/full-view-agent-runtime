@@ -200,6 +200,49 @@ async def test_public_analysis_run_is_exclusive_and_reaches_terminal(monkeypatch
     assert messages[-1].content[0].text == "区域研判已完成，详细结果请查看研判报告。"  # type: ignore[union-attr]
 
 
+@pytest.mark.asyncio
+async def test_recovery_exposes_running_analysis_as_resumable_reauthentication() -> None:
+    runtime = _runtime(orchestrator=_RecordingOrchestrator())
+    app = create_app(runtime)
+    token = "analysis-recovery"
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=app), base_url="http://test"
+    ) as client:
+        run = await _create_run(client, token)
+        plan = await _create_plan(client, token, str(run["run_id"]))
+        identity = await runtime.identity_port.resolve(SecretStr(token))
+        await runtime.service.start_run(
+            user_id=identity.principal.user_id,
+            run_id=str(run["run_id"]),
+        )
+        await runtime.analysis_binding_store.ensure_binding(  # type: ignore[union-attr]
+            tenant_id=identity.principal.tenant_id,
+            user_id=identity.principal.user_id,
+            session_id=str(run["session_id"]),
+            run_id=str(run["run_id"]),
+            plan_id=str(plan["plan_id"]),
+            request_id=str(plan["request_id"]),
+            invocation_fingerprint=f"sha256:{'a' * 64}",
+        )
+
+        recovered = await runtime.recover_runs()
+        discovered = await client.get(
+            f"/agent-api/v1/runs/{run['run_id']}/pending-input",
+            headers={"geoToken": token},
+        )
+
+    assert recovered == 1
+    assert discovered.status_code == 200
+    assert discovered.json()["data"]["analysis_plan_id"] == plan["plan_id"]
+    assert discovered.json()["data"]["analysis_request_id"] == plan["request_id"]
+    events = await runtime.events.list_events(run_id=str(run["run_id"]))  # type: ignore[union-attr]
+    assert [event.type for event in events] == [
+        "run.waiting",
+        "input.required",
+        "reauth_required",
+    ]
+
+
 async def _create_run(
     client: httpx.AsyncClient, token: str, *, mode: str = "analysis"
 ) -> dict[str, object]:
@@ -529,6 +572,15 @@ async def test_analysis_reauthentication_is_exposed_and_resumes_to_terminal() ->
         required = events[1].data
         assert required["analysis_plan_id"] == plan["plan_id"]
         assert required["analysis_request_id"] == plan["request_id"]
+        discovered = await client.get(
+            f"/agent-api/v1/runs/{run['run_id']}/pending-input",
+            headers={"geoToken": token},
+        )
+        assert discovered.status_code == 200
+        assert discovered.json()["data"]["input_request_id"] == required[
+            "input_request_id"
+        ]
+        assert discovered.json()["data"]["analysis_plan_id"] == plan["plan_id"]
 
         replay = await client.post(
             f"/agent-api/v1/runs/{run['run_id']}/analysis-plans/{plan['plan_id']}/executions",
@@ -550,8 +602,6 @@ async def test_analysis_reauthentication_is_exposed_and_resumes_to_terminal() ->
                 "client_instance_id": "client-execution-reauth",
                 "run_state_version": required["run_state_version"],
                 "response": {"type": "reauthenticated"},
-                "analysis_plan_id": required["analysis_plan_id"],
-                "analysis_request_id": required["analysis_request_id"],
             },
         )
 

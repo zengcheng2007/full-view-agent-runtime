@@ -463,6 +463,16 @@ class PendingInputRequest(ContractModel):
     run_state_version: int = Field(ge=1)
     expires_at: datetime
     closed_at: datetime | None = None
+    analysis_plan_id: str | None = Field(default=None, min_length=1, max_length=128)
+    analysis_request_id: str | None = Field(default=None, min_length=1, max_length=128)
+
+    @model_validator(mode="after")
+    def validate_analysis_references(self) -> "PendingInputRequest":
+        if (self.analysis_plan_id is None) != (self.analysis_request_id is None):
+            raise ValueError(
+                "analysis_plan_id and analysis_request_id must be supplied together"
+            )
+        return self
 
 
 class InputOption(ContractModel):

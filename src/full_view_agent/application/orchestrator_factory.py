@@ -10,6 +10,7 @@ from typing import Any
 
 from full_view_agent.application.analysis_plan_repository import AnalysisPlanRepository
 from full_view_agent.application.analysis_planner import AnalysisPlanner
+from full_view_agent.application.analysis_run_binding import AnalysisRunBindingStore
 from full_view_agent.application.capability_service import (
     AuthContextRefresher,
     CapabilityService,
@@ -154,6 +155,7 @@ def create_analysis_orchestrator(
     evidence_source_system: str,
     database_url: str | None,
     postgres_schema: str = "full_view_agent",
+    binding_store: AnalysisRunBindingStore | None = None,
 ) -> AnalysisOrchestratorPort:
     """Compose the dedicated trusted-plan graph with durable production stores."""
     from full_view_agent.application.analysis_graph_execution_service import (
@@ -194,7 +196,7 @@ def create_analysis_orchestrator(
     )
     observation_validator = AgentStoreAnalysisObservationValidator(store)
     if database_url:
-        binding_store = PostgresAnalysisRunBindingStore(
+        binding_store = binding_store or PostgresAnalysisRunBindingStore(
             dsn=database_url, schema=postgres_schema
         )
         step_ledger = PostgresAnalysisStepLedgerStore(
@@ -214,7 +216,7 @@ def create_analysis_orchestrator(
             dsn=database_url, schema=postgres_schema
         )
     else:
-        binding_store = InMemoryAnalysisRunBindingStore()
+        binding_store = binding_store or InMemoryAnalysisRunBindingStore()
         step_ledger = InMemoryAnalysisStepLedgerStore(
             observation_validator=observation_validator
         )

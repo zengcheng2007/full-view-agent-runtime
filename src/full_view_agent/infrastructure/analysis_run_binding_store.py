@@ -75,6 +75,16 @@ class InMemoryAnalysisRunBindingStore:
             _require_fingerprint(binding, invocation_fingerprint)
             return binding
 
+    async def get_binding_for_run(
+        self, *, tenant_id: str, user_id: str, run_id: str
+    ) -> AnalysisRunBinding:
+        async with self._lock:
+            binding = self._bindings.get(run_id)
+            if binding is None:
+                raise ResourceNotFound("analysis run binding not found")
+            _require_owner(binding, tenant_id=tenant_id, user_id=user_id)
+            return binding
+
     async def update_binding(
         self,
         *,
@@ -203,6 +213,18 @@ class PostgresAnalysisRunBindingStore:
         binding = _binding_from_row(row)
         _require_owner(binding, tenant_id=tenant_id, user_id=user_id)
         _require_fingerprint(binding, invocation_fingerprint)
+        return binding
+
+    async def get_binding_for_run(
+        self, *, tenant_id: str, user_id: str, run_id: str
+    ) -> AnalysisRunBinding:
+        await self.initialize()
+        async with await psycopg.AsyncConnection.connect(self._dsn) as connection:
+            row = await self._select_by_run(connection, run_id)
+        if row is None:
+            raise ResourceNotFound("analysis run binding not found")
+        binding = _binding_from_row(row)
+        _require_owner(binding, tenant_id=tenant_id, user_id=user_id)
         return binding
 
     async def update_binding(

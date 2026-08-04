@@ -114,6 +114,10 @@ class AnalysisRunBindingStore(Protocol):
         invocation_fingerprint: str,
     ) -> AnalysisRunBinding: ...
 
+    async def get_binding_for_run(
+        self, *, tenant_id: str, user_id: str, run_id: str
+    ) -> AnalysisRunBinding: ...
+
     async def update_binding(
         self,
         *,

@@ -385,7 +385,9 @@ class PostgresAgentPersistence:
         for run_json, session_json in rows:
             run = AgentRun.model_validate_json(run_json)
             session = AgentSession.model_validate_json(session_json)
-            if run.status in {"queued", "running"} and session.active_run_id == run.run_id:
+            if run.status in {"queued", "running", "waiting_input"} and (
+                session.active_run_id == run.run_id
+            ):
                 recoverable.append((session.owner_user_id, run))
         return recoverable
 
@@ -757,8 +759,15 @@ class PostgresAgentPersistence:
         return cancelled
 
     async def wait_for_reauthentication(
-        self, *, user_id: str, run_id: str
+        self,
+        *,
+        user_id: str,
+        run_id: str,
+        analysis_plan_id: str | None = None,
+        analysis_request_id: str | None = None,
     ) -> tuple[AgentRun, PendingInputRequest]:
+        if (analysis_plan_id is None) != (analysis_request_id is None):
+            raise RunStateConflict("analysis reauthentication references are incomplete")
         async with await self._owned_run_connection(user_id, run_id) as owned:
             connection, run, session = owned
             row = await (
@@ -780,6 +789,26 @@ class PostgresAgentPersistence:
                 and existing.expires_at > now
                 and existing.run_state_version == run.state_version
             ):
+                if analysis_plan_id is not None:
+                    if existing.analysis_plan_id is None:
+                        existing = existing.model_copy(
+                            update={
+                                "analysis_plan_id": analysis_plan_id,
+                                "analysis_request_id": analysis_request_id,
+                            }
+                        )
+                        await connection.execute(
+                            f'UPDATE "{self._schema}".input_requests '
+                            "SET data_json = %s WHERE run_id = %s",
+                            (existing.model_dump_json(), run_id),
+                        )
+                    elif (
+                        existing.analysis_plan_id != analysis_plan_id
+                        or existing.analysis_request_id != analysis_request_id
+                    ):
+                        raise RunStateConflict(
+                            "analysis reauthentication references changed"
+                        )
                 return run, existing
             renew_expired = (
                 run.status == "waiting_input"
@@ -810,6 +839,8 @@ class PostgresAgentPersistence:
                 prompt="登录凭据已失效，请重新认证后继续。",
                 run_state_version=waiting.state_version,
                 expires_at=now + timedelta(minutes=10),
+                analysis_plan_id=analysis_plan_id,
+                analysis_request_id=analysis_request_id,
             )
             await self._update_run(connection, waiting)
             await connection.execute(
@@ -819,6 +850,23 @@ class PostgresAgentPersistence:
                 (run_id, pending.model_dump_json()),
             )
         return waiting, pending
+
+    async def get_pending_input(
+        self, *, user_id: str, run_id: str
+    ) -> PendingInputRequest:
+        async with await self._owned_run_connection(user_id, run_id) as owned:
+            connection, run, _session = owned
+            row = await (
+                await connection.execute(
+                    f'SELECT data_json FROM "{self._schema}".input_requests '
+                    "WHERE run_id = %s",
+                    (run_id,),
+                )
+            ).fetchone()
+            pending = PendingInputRequest.model_validate_json(row[0]) if row else None
+            if pending is None:
+                raise ResourceNotFound("pending input request not found")
+        return pending
 
     async def resume_from_input(
         self,

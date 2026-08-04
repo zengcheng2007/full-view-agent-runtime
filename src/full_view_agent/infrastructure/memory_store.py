@@ -231,7 +231,7 @@ class InMemoryAgentStore:
         async with self._lock:
             recoverable: list[tuple[str, AgentRun]] = []
             for run in self.runs.values():
-                if run.status not in {"queued", "running"}:
+                if run.status not in {"queued", "running", "waiting_input"}:
                     continue
                 session = self.sessions.get(run.session_id)
                 if session is not None and session.active_run_id == run.run_id:
@@ -491,8 +491,15 @@ class InMemoryAgentStore:
             return cancelled
 
     async def wait_for_reauthentication(
-        self, *, user_id: str, run_id: str
+        self,
+        *,
+        user_id: str,
+        run_id: str,
+        analysis_plan_id: str | None = None,
+        analysis_request_id: str | None = None,
     ) -> tuple[AgentRun, PendingInputRequest]:
+        if (analysis_plan_id is None) != (analysis_request_id is None):
+            raise RunStateConflict("analysis reauthentication references are incomplete")
         async with self._lock:
             run = self.runs.get(run_id)
             if run is None:
@@ -512,6 +519,22 @@ class InMemoryAgentStore:
                 and existing.expires_at > now
                 and existing.run_state_version == run.state_version
             ):
+                if analysis_plan_id is not None:
+                    if existing.analysis_plan_id is None:
+                        existing = existing.model_copy(
+                            update={
+                                "analysis_plan_id": analysis_plan_id,
+                                "analysis_request_id": analysis_request_id,
+                            }
+                        )
+                        self.input_requests[run_id] = existing
+                    elif (
+                        existing.analysis_plan_id != analysis_plan_id
+                        or existing.analysis_request_id != analysis_request_id
+                    ):
+                        raise RunStateConflict(
+                            "analysis reauthentication references changed"
+                        )
                 return run, existing
             renew_expired = (
                 run.status == "waiting_input"
@@ -542,10 +565,25 @@ class InMemoryAgentStore:
                 prompt="登录凭据已失效，请重新认证后继续。",
                 run_state_version=waiting.state_version,
                 expires_at=now + timedelta(minutes=10),
+                analysis_plan_id=analysis_plan_id,
+                analysis_request_id=analysis_request_id,
             )
             self.runs[run_id] = waiting
             self.input_requests[run_id] = pending
             return waiting, pending
+
+    async def get_pending_input(
+        self, *, user_id: str, run_id: str
+    ) -> PendingInputRequest:
+        async with self._lock:
+            run = self.runs.get(run_id)
+            session = self.sessions.get(run.session_id) if run is not None else None
+            if run is None or session is None or session.owner_user_id != user_id:
+                raise ResourceNotFound("run not found")
+            pending = self.input_requests.get(run_id)
+            if pending is None:
+                raise ResourceNotFound("pending input request not found")
+            return pending
 
     async def resume_from_input(
         self,
