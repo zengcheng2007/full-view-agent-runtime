@@ -9,6 +9,7 @@ from uuid import uuid4
 
 import psycopg
 import pytest
+from psycopg import sql
 
 from full_view_agent.application.analysis_observation_validator import (
     AgentStoreAnalysisObservationValidator,
@@ -401,7 +402,9 @@ async def test_postgres_concurrency_isolation_recovery_and_restart() -> None:
         async with await psycopg.AsyncConnection.connect(dsn) as connection:
             version = await (
                 await connection.execute(
-                    f'SELECT version FROM "{schema}".schema_version WHERE version = 5'
+                    sql.SQL(
+                        "SELECT version FROM {}.schema_version WHERE version = 5"
+                    ).format(sql.Identifier(schema))
                 )
             ).fetchone()
         assert version == (5,)

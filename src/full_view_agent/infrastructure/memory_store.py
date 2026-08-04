@@ -364,6 +364,13 @@ class InMemoryAgentStore:
                 or self.result_run_ids.get(evidence.result_id) != run_id
             ):
                 raise ResourceNotFound("result not found")
+            existing = self.evidence.get(evidence.evidence_id)
+            if existing is not None:
+                if existing != evidence:
+                    raise RunStateConflict(
+                        "evidence identity is already bound differently"
+                    )
+                return existing
             self.evidence[evidence.evidence_id] = evidence
             return evidence
 

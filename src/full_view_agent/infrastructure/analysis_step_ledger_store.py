@@ -109,6 +109,7 @@ class InMemoryAnalysisStepLedgerStore:
             user_id=user_id,
             run_id=run_id,
             step_id=step_id,
+            invocation_fingerprint=invocation_fingerprint,
             status=status,
             result_id=result_id,
             evidence_ids=evidence_ids,
@@ -138,6 +139,7 @@ class InMemoryAnalysisStepLedgerStore:
         user_id: str,
         run_id: str,
         step_id: str,
+        invocation_fingerprint: str,
         status: AnalysisStepLedgerStatus,
         result_id: str | None,
         evidence_ids: tuple[str, ...],
@@ -147,6 +149,8 @@ class InMemoryAnalysisStepLedgerStore:
         entry = self._entries.get((run_id, step_id))
         if entry is None:
             raise ResourceNotFound("analysis step ledger entry not found")
+        _require_owner(entry, tenant_id=tenant_id, user_id=user_id)
+        _require_invocation(entry, invocation_fingerprint)
         if self._observation_validator is None:
             raise AnalysisStepLedgerConflict(
                 "STEP_OBSERVATION_UNVERIFIED",
@@ -305,6 +309,8 @@ class PostgresAnalysisStepLedgerStore:
             if row is None:
                 raise ResourceNotFound("analysis step ledger entry not found")
             existing = _entry_from_row(row)
+            _require_owner(existing, tenant_id=tenant_id, user_id=user_id)
+            _require_invocation(existing, invocation_fingerprint)
             if status == "persisted" and result_id is not None and evidence_ids:
                 if self._observation_validator is None:
                     raise AnalysisStepLedgerConflict(

@@ -571,9 +571,26 @@ class PostgresAgentPersistence:
             if row is None:
                 raise ResourceNotFound("result not found")
             await connection.execute(
+                "SELECT pg_advisory_xact_lock(hashtextextended(%s, 0))",
+                (f"evidence:{evidence.evidence_id}",),
+            )
+            existing_row = await (
+                await connection.execute(
+                    f'SELECT data_json FROM "{self._schema}".evidence '
+                    "WHERE evidence_id = %s FOR UPDATE",
+                    (evidence.evidence_id,),
+                )
+            ).fetchone()
+            if existing_row is not None:
+                existing = Evidence.model_validate_json(existing_row[0])
+                if existing != evidence:
+                    raise RunStateConflict(
+                        "evidence identity is already bound differently"
+                    )
+                return existing
+            await connection.execute(
                 f'INSERT INTO "{self._schema}".evidence '
-                "(evidence_id, result_id, data_json) VALUES (%s, %s, %s) "
-                "ON CONFLICT (evidence_id) DO UPDATE SET data_json = EXCLUDED.data_json",
+                "(evidence_id, result_id, data_json) VALUES (%s, %s, %s)",
                 (
                     evidence.evidence_id,
                     evidence.result_id,

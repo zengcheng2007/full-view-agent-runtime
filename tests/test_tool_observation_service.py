@@ -239,6 +239,16 @@ async def test_observation_replay_is_idempotent_for_data_events_and_commands() -
     assert len(store.evidence) == 1
     assert len(store.frontend_commands) == 1
     assert len(await events.list_events(run_id=run.run_id)) == 3
+    forged_evidence = first.evidence.model_copy(
+        update={"result_fingerprint": "sha256:forged"}
+    )
+    with pytest.raises(RunStateConflict):
+        await store.save_evidence(
+            user_id="user-01", run_id=run.run_id, evidence=forged_evidence
+        )
+    assert await store.get_evidence(
+        user_id="user-01", evidence_id=first.evidence.evidence_id
+    ) == first.evidence
 
 
 @pytest.mark.asyncio
@@ -312,6 +322,16 @@ async def test_postgres_observation_replay_is_atomic_and_idempotent() -> None:
             user_id="user-01", evidence_id=first.evidence.evidence_id
         ) == first.evidence
         assert len(await store.list_events(run_id=run.run_id)) == 3
+        forged_evidence = first.evidence.model_copy(
+            update={"result_fingerprint": "sha256:forged"}
+        )
+        with pytest.raises(RunStateConflict):
+            await store.save_evidence(
+                user_id="user-01", run_id=run.run_id, evidence=forged_evidence
+            )
+        assert await store.get_evidence(
+            user_id="user-01", evidence_id=first.evidence.evidence_id
+        ) == first.evidence
     finally:
         await store.drop_schema()
 
