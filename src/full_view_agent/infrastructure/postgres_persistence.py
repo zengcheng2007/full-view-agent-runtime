@@ -24,6 +24,7 @@ from full_view_agent.application.errors import (
     RunStateConflict,
     SessionActiveRunConflict,
 )
+from full_view_agent.application.fingerprints import canonical_fingerprint
 from full_view_agent.application.frontend_commands import merge_receipt
 from full_view_agent.application.session_run_service import new_id
 from full_view_agent.domain.models import (
@@ -45,6 +46,25 @@ T = TypeVar("T")
 _DATA_RESULT_ADAPTER = TypeAdapter(DataResult)
 _SAFE_IDENTIFIER = re.compile(r"^[a-z][a-z0-9_]{0,62}$")
 logger = logging.getLogger(__name__)
+
+
+def _same_observation_result(left: DataResult, right: DataResult) -> bool:
+    return left.model_dump(exclude={"created_at", "payload_expires_at"}) == right.model_dump(
+        exclude={"created_at", "payload_expires_at"}
+    )
+
+
+def _same_observation_evidence(left: Evidence, right: Evidence) -> bool:
+    return left.model_dump(exclude={"retrieved_at"}) == right.model_dump(
+        exclude={"retrieved_at"}
+    )
+
+
+def _same_observation_command(
+    left: FrontendCommand, right: FrontendCommand
+) -> bool:
+    excluded = {"issued_at", "expires_at"}
+    return left.model_dump(exclude=excluded) == right.model_dump(exclude=excluded)
 
 
 class EventNotifier(Protocol):
@@ -360,6 +380,117 @@ class PostgresAgentPersistence:
                 (result.result_id, run_id, result.model_dump_json()),
             )
         return result
+
+    async def save_tool_observation(
+        self,
+        *,
+        user_id: str,
+        run_id: str,
+        result: DataResult,
+        evidence: Evidence,
+        commands: tuple[FrontendCommand, ...],
+    ) -> tuple[DataResult, Evidence, tuple[FrontendCommand, ...]]:
+        """Persist Result, Evidence and UI commands in one DB transaction."""
+
+        async with await self._owned_run_connection(user_id, run_id) as owned:
+            connection, run, session = owned
+            if run.status != "running" or session.active_run_id != run_id:
+                raise RunStateConflict("tool observations require an active run")
+            if evidence.result_id != result.result_id:
+                raise RunStateConflict("evidence result does not match observation result")
+            if result.evidence_ids != [evidence.evidence_id]:
+                raise RunStateConflict("result evidence reference is inconsistent")
+            for command in commands:
+                if command.run_id != run_id:
+                    raise RunStateConflict("frontend command run does not match observation")
+                if command.target_client_instance_id != run.origin_client_instance_id:
+                    raise CommandClientMismatch(
+                        "frontend command target does not match run client"
+                    )
+
+            await connection.execute(
+                "SELECT pg_advisory_xact_lock(hashtextextended(%s, 0))",
+                (f"tool-observation:{result.result_id}",),
+            )
+            result_row = await (
+                await connection.execute(
+                    f'SELECT run_id, data_json FROM "{self._schema}".results '
+                    "WHERE result_id = %s",
+                    (result.result_id,),
+                )
+            ).fetchone()
+            evidence_row = await (
+                await connection.execute(
+                    f'SELECT data_json FROM "{self._schema}".evidence '
+                    "WHERE evidence_id = %s",
+                    (evidence.evidence_id,),
+                )
+            ).fetchone()
+            command_rows = []
+            for command in commands:
+                command_rows.append(
+                    await (
+                        await connection.execute(
+                            f'SELECT data_json FROM "{self._schema}".frontend_commands '
+                            "WHERE command_id = %s",
+                            (command.command_id,),
+                        )
+                    ).fetchone()
+                )
+
+            if result_row is not None:
+                stored_result = _DATA_RESULT_ADAPTER.validate_json(result_row[1])
+                stored_evidence = (
+                    Evidence.model_validate_json(evidence_row[0])
+                    if evidence_row is not None
+                    else None
+                )
+                stored_commands = tuple(
+                    FrontendCommand.model_validate_json(row[0])
+                    if row is not None
+                    else None
+                    for row in command_rows
+                )
+                if (
+                    result_row[0] != run_id
+                    or not _same_observation_result(stored_result, result)
+                    or stored_evidence is None
+                    or not _same_observation_evidence(stored_evidence, evidence)
+                    or any(command is None for command in stored_commands)
+                    or not all(
+                        _same_observation_command(stored, requested)
+                        for stored, requested in zip(
+                            stored_commands, commands, strict=True
+                        )
+                        if stored is not None
+                    )
+                ):
+                    raise RunStateConflict(
+                        "observation identity is already bound differently"
+                    )
+                return stored_result, stored_evidence, tuple(
+                    command for command in stored_commands if command is not None
+                )
+            if evidence_row is not None or any(row is not None for row in command_rows):
+                raise RunStateConflict("observation identity is partially occupied")
+
+            await connection.execute(
+                f'INSERT INTO "{self._schema}".results '
+                "(result_id, run_id, data_json) VALUES (%s, %s, %s)",
+                (result.result_id, run_id, result.model_dump_json()),
+            )
+            await connection.execute(
+                f'INSERT INTO "{self._schema}".evidence '
+                "(evidence_id, result_id, data_json) VALUES (%s, %s, %s)",
+                (evidence.evidence_id, result.result_id, evidence.model_dump_json()),
+            )
+            for command in commands:
+                await connection.execute(
+                    f'INSERT INTO "{self._schema}".frontend_commands '
+                    "(command_id, run_id, data_json) VALUES (%s, %s, %s)",
+                    (command.command_id, run_id, command.model_dump_json()),
+                )
+        return result, evidence, commands
 
     async def get_result(self, *, user_id: str, result_id: str) -> DataResult:
         await self._ensure_initialized()
@@ -788,6 +919,7 @@ class PostgresAgentPersistence:
         session_id: str,
         run_id: str,
         data: dict[str, object],
+        idempotency_key: str | None = None,
     ) -> AgentEvent:
         await self._ensure_initialized()
         async with await psycopg.AsyncConnection.connect(self._dsn) as connection:
@@ -795,6 +927,46 @@ class PostgresAgentPersistence:
                 "SELECT pg_advisory_xact_lock(hashtextextended(%s, 0))",
                 (f"event:{run_id}",),
             )
+            event_id = (
+                canonical_fingerprint(
+                    domain="event-idempotency:1.0",
+                    value={"run_id": run_id, "key": idempotency_key},
+                )
+                if idempotency_key is not None
+                else new_id("evt")
+            )
+            if idempotency_key is not None:
+                existing_row = await (
+                    await connection.execute(
+                        f'SELECT data_json FROM "{self._schema}".events '
+                        "WHERE event_id = %s",
+                        (event_id,),
+                    )
+                ).fetchone()
+                if existing_row is not None:
+                    existing = AgentEvent.model_validate_json(existing_row[0])
+                    if (
+                        existing.type != event_type
+                        or existing.session_id != session_id
+                        or existing.run_id != run_id
+                        or existing.data != data
+                    ):
+                        raise RunStateConflict(
+                            "event idempotency key was reused differently"
+                        )
+                    if self._event_notifier is not None:
+                        try:
+                            await self._event_notifier.publish(
+                                run_id=run_id,
+                                event_id=existing.event_id,
+                            )
+                        except Exception:
+                            logger.warning(
+                                "event replay notification failed",
+                                exc_info=True,
+                                extra={"run_id": run_id, "event_id": existing.event_id},
+                            )
+                    return existing
             row = await (
                 await connection.execute(
                     f'SELECT COALESCE(MAX(sequence), 0) FROM "{self._schema}".events '
@@ -805,7 +977,7 @@ class PostgresAgentPersistence:
             if row is None:
                 raise RuntimeError("failed to allocate the next event sequence")
             event = AgentEvent(
-                event_id=new_id("evt"),
+                event_id=event_id,
                 sequence=int(row[0]) + 1,
                 type=event_type,
                 session_id=session_id,

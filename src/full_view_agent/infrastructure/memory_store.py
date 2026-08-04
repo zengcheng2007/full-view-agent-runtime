@@ -24,6 +24,25 @@ from full_view_agent.domain.models import (
 )
 
 
+def _same_observation_result(left: DataResult, right: DataResult) -> bool:
+    return left.model_dump(exclude={"created_at", "payload_expires_at"}) == right.model_dump(
+        exclude={"created_at", "payload_expires_at"}
+    )
+
+
+def _same_observation_evidence(left: Evidence, right: Evidence) -> bool:
+    return left.model_dump(exclude={"retrieved_at"}) == right.model_dump(
+        exclude={"retrieved_at"}
+    )
+
+
+def _same_observation_command(
+    left: FrontendCommand, right: FrontendCommand
+) -> bool:
+    excluded = {"issued_at", "expires_at"}
+    return left.model_dump(exclude=excluded) == right.model_dump(exclude=excluded)
+
+
 class InMemoryAgentStore:
     def __init__(self) -> None:
         self._lock = asyncio.Lock()
@@ -222,6 +241,75 @@ class InMemoryAgentStore:
             self.results[result.result_id] = result
             self.result_run_ids[result.result_id] = run_id
             return result
+
+    async def save_tool_observation(
+        self,
+        *,
+        user_id: str,
+        run_id: str,
+        result: DataResult,
+        evidence: Evidence,
+        commands: tuple[FrontendCommand, ...],
+    ) -> tuple[DataResult, Evidence, tuple[FrontendCommand, ...]]:
+        """Atomically persist one complete Tool observation in memory."""
+
+        async with self._lock:
+            run = self.runs.get(run_id)
+            session = self.sessions.get(run.session_id) if run is not None else None
+            if session is None or session.owner_user_id != user_id:
+                raise ResourceNotFound("run not found")
+            if run is None or run.status != "running" or session.active_run_id != run_id:
+                raise RunStateConflict("tool observations require an active run")
+            if evidence.result_id != result.result_id:
+                raise RunStateConflict("evidence result does not match observation result")
+            if result.evidence_ids != [evidence.evidence_id]:
+                raise RunStateConflict("result evidence reference is inconsistent")
+            for command in commands:
+                if command.run_id != run_id:
+                    raise RunStateConflict("frontend command run does not match observation")
+                if command.target_client_instance_id != run.origin_client_instance_id:
+                    raise CommandClientMismatch(
+                        "frontend command target does not match run client"
+                    )
+
+            existing_result = self.results.get(result.result_id)
+            existing_run_id = self.result_run_ids.get(result.result_id)
+            existing_evidence = self.evidence.get(evidence.evidence_id)
+            existing_commands = tuple(
+                self.frontend_commands.get(command.command_id) for command in commands
+            )
+            if existing_result is not None:
+                if existing_run_id != run_id or not _same_observation_result(
+                    existing_result, result
+                ):
+                    raise RunStateConflict("result identity is already bound differently")
+                if (
+                    existing_evidence is None
+                    or not _same_observation_evidence(existing_evidence, evidence)
+                    or any(command is None for command in existing_commands)
+                    or not all(
+                        _same_observation_command(stored, requested)
+                        for stored, requested in zip(
+                            existing_commands, commands, strict=True
+                        )
+                        if stored is not None
+                    )
+                ):
+                    raise RunStateConflict("observation identity is already bound differently")
+                return existing_result, existing_evidence, tuple(
+                    command for command in existing_commands if command is not None
+                )
+            if existing_evidence is not None or any(
+                command is not None for command in existing_commands
+            ):
+                raise RunStateConflict("observation identity is partially occupied")
+
+            self.results[result.result_id] = result
+            self.result_run_ids[result.result_id] = run_id
+            self.evidence[evidence.evidence_id] = evidence
+            for command in commands:
+                self.frontend_commands[command.command_id] = command
+            return result, evidence, commands
 
     async def get_result(
         self,

@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+import os
+from uuid import uuid4
+
 import pytest
 
 from full_view_agent.application.errors import RunStateConflict
@@ -11,6 +14,7 @@ from full_view_agent.application.tool_registry import ToolRegistry
 from full_view_agent.domain.models import ToolResult
 from full_view_agent.infrastructure.event_broker import InMemoryEventBroker
 from full_view_agent.infrastructure.memory_store import InMemoryAgentStore
+from full_view_agent.infrastructure.postgres_persistence import PostgresAgentPersistence
 
 from .test_mock_executor import RecordingCapability, StaticAuthContextProvider
 from .test_session_run_service import run_request
@@ -21,17 +25,9 @@ class _OrderedStore(InMemoryAgentStore):
         super().__init__()
         self._order = order
 
-    async def save_result(self, **kwargs):
-        self._order.append("save_result")
-        return await super().save_result(**kwargs)
-
-    async def save_evidence(self, **kwargs):
-        self._order.append("save_evidence")
-        return await super().save_evidence(**kwargs)
-
-    async def save_frontend_command(self, **kwargs):
-        self._order.append("save_frontend_command")
-        return await super().save_frontend_command(**kwargs)
+    async def save_tool_observation(self, **kwargs):
+        self._order.append("save_tool_observation")
+        return await super().save_tool_observation(**kwargs)
 
 
 class _OrderedEvents(InMemoryEventBroker):
@@ -44,20 +40,19 @@ class _OrderedEvents(InMemoryEventBroker):
         return await super().publish(**kwargs)
 
 
-class _RejectingEvidenceStore(_OrderedStore):
-    async def save_evidence(self, **_kwargs):
-        self._order.append("save_evidence")
-        raise RuntimeError("evidence persistence failed")
+class _RejectingObservationStore(_OrderedStore):
+    async def save_tool_observation(self, **_kwargs):
+        self._order.append("save_tool_observation")
+        raise RuntimeError("observation transaction failed")
 
 
-class _CancelAfterResultStore(_OrderedStore):
-    async def save_result(self, **kwargs):
-        result = await super().save_result(**kwargs)
+class _CancelBeforeObservationStore(_OrderedStore):
+    async def save_tool_observation(self, **kwargs):
         await self.cancel_run(
             user_id=kwargs["user_id"],
             run_id=kwargs["run_id"],
         )
-        return result
+        return await super().save_tool_observation(**kwargs)
 
 
 class _RecordingObservations:
@@ -130,11 +125,9 @@ async def test_observation_is_saved_before_events_and_frontend_commands() -> Non
 
     assert persisted.data_result.evidence_ids == [persisted.evidence.evidence_id]
     assert order == [
-        "save_result",
-        "save_evidence",
+        "save_tool_observation",
         "event:result.available",
         "event:evidence.available",
-        "save_frontend_command",
         "event:frontend.command.requested",
     ]
 
@@ -142,7 +135,7 @@ async def test_observation_is_saved_before_events_and_frontend_commands() -> Non
 @pytest.mark.asyncio
 async def test_observation_failure_does_not_publish_or_request_commands() -> None:
     order: list[str] = []
-    store = _RejectingEvidenceStore(order)
+    store = _RejectingObservationStore(order)
     events = _OrderedEvents(order)
     _service, run = await _running_run(store)
     observations = ToolObservationService(
@@ -152,7 +145,7 @@ async def test_observation_failure_does_not_publish_or_request_commands() -> Non
         evidence_source_system="test-source",
     )
 
-    with pytest.raises(RuntimeError, match="evidence persistence failed"):
+    with pytest.raises(RuntimeError, match="observation transaction failed"):
         await observations.persist(
             user_id="user-01",
             run=run,
@@ -160,7 +153,9 @@ async def test_observation_failure_does_not_publish_or_request_commands() -> Non
             tool_result=_tool_result(),
         )
 
-    assert order == ["save_result", "save_evidence"]
+    assert order == ["save_tool_observation"]
+    assert store.results == {}
+    assert store.evidence == {}
     assert store.frontend_commands == {}
     assert await events.list_events(run_id=run.run_id) == []
 
@@ -188,14 +183,14 @@ async def test_cancelled_run_rejects_a_late_tool_observation() -> None:
         )
 
     assert "res-observation-01" not in store.results
-    assert order == ["save_result"]
+    assert order == ["save_tool_observation"]
     assert await events.list_events(run_id=run.run_id) == []
 
 
 @pytest.mark.asyncio
-async def test_cancellation_between_result_and_evidence_fails_closed() -> None:
+async def test_cancellation_before_atomic_observation_leaves_no_partial_rows() -> None:
     order: list[str] = []
-    store = _CancelAfterResultStore(order)
+    store = _CancelBeforeObservationStore(order)
     events = _OrderedEvents(order)
     _service, run = await _running_run(store)
     observations = ToolObservationService(
@@ -213,10 +208,74 @@ async def test_cancellation_between_result_and_evidence_fails_closed() -> None:
             tool_result=_tool_result(),
         )
 
-    assert "res-observation-01" in store.results
+    assert "res-observation-01" not in store.results
     assert store.evidence == {}
-    assert order == ["save_result"]
+    assert order == ["save_tool_observation"]
     assert await events.list_events(run_id=run.run_id) == []
+
+
+@pytest.mark.asyncio
+async def test_observation_replay_is_idempotent_for_data_events_and_commands() -> None:
+    order: list[str] = []
+    store = _OrderedStore(order)
+    events = _OrderedEvents(order)
+    _service, run = await _running_run(store)
+    observations = ToolObservationService(
+        store=store,
+        events=events,
+        registry=ToolRegistry.default(),
+        evidence_source_system="test-source",
+    )
+
+    first = await observations.persist(
+        user_id="user-01", run=run, action=_action(), tool_result=_tool_result()
+    )
+    replayed = await observations.persist(
+        user_id="user-01", run=run, action=_action(), tool_result=_tool_result()
+    )
+
+    assert replayed == first
+    assert len(store.results) == 1
+    assert len(store.evidence) == 1
+    assert len(store.frontend_commands) == 1
+    assert len(await events.list_events(run_id=run.run_id)) == 3
+
+
+@pytest.mark.asyncio
+async def test_postgres_observation_replay_is_atomic_and_idempotent() -> None:
+    dsn = os.getenv("FULL_VIEW_TEST_DATABASE_URL")
+    if not dsn:
+        pytest.skip("FULL_VIEW_TEST_DATABASE_URL is not configured")
+    store = PostgresAgentPersistence(
+        dsn=dsn, schema=f"fva_test_{uuid4().hex[:12]}"
+    )
+    await store.initialize()
+    try:
+        _service, run = await _running_run(store)
+        observations = ToolObservationService(
+            store=store,
+            events=store,
+            registry=ToolRegistry.default(),
+            evidence_source_system="test-source",
+        )
+
+        first = await observations.persist(
+            user_id="user-01", run=run, action=_action(), tool_result=_tool_result()
+        )
+        replayed = await observations.persist(
+            user_id="user-01", run=run, action=_action(), tool_result=_tool_result()
+        )
+
+        assert replayed == first
+        assert await store.get_result(
+            user_id="user-01", result_id=first.data_result.result_id
+        ) == first.data_result
+        assert await store.get_evidence(
+            user_id="user-01", evidence_id=first.evidence.evidence_id
+        ) == first.evidence
+        assert len(await store.list_events(run_id=run.run_id)) == 3
+    finally:
+        await store.drop_schema()
 
 
 @pytest.mark.asyncio

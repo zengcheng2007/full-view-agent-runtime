@@ -102,6 +102,16 @@ class AgentStore(Protocol):
         self, *, user_id: str, run_id: str, result: DataResult
     ) -> DataResult: ...
 
+    async def save_tool_observation(
+        self,
+        *,
+        user_id: str,
+        run_id: str,
+        result: DataResult,
+        evidence: Evidence,
+        commands: tuple[FrontendCommand, ...],
+    ) -> tuple[DataResult, Evidence, tuple[FrontendCommand, ...]]: ...
+
     async def get_result(
         self, *, user_id: str, result_id: str
     ) -> DataResult: ...
@@ -166,6 +176,7 @@ class EventPublisher(Protocol):
         session_id: str,
         run_id: str,
         data: dict[str, object],
+        idempotency_key: str | None = None,
     ) -> AgentEvent: ...
 
 

@@ -2,7 +2,8 @@ import asyncio
 from collections.abc import Callable
 from datetime import UTC, datetime, timedelta
 
-from full_view_agent.application.errors import EventHistoryExpired
+from full_view_agent.application.errors import EventHistoryExpired, RunStateConflict
+from full_view_agent.application.fingerprints import canonical_fingerprint
 from full_view_agent.application.session_run_service import new_id
 from full_view_agent.domain.models import AgentEvent
 
@@ -27,11 +28,31 @@ class InMemoryEventBroker:
         session_id: str,
         run_id: str,
         data: dict[str, object],
+        idempotency_key: str | None = None,
     ) -> AgentEvent:
         async with self._condition:
             run_events = self._events.setdefault(run_id, [])
+            event_id = (
+                canonical_fingerprint(
+                    domain="event-idempotency:1.0",
+                    value={"run_id": run_id, "key": idempotency_key},
+                )
+                if idempotency_key is not None
+                else new_id("evt")
+            )
+            existing = next(
+                (event for event in run_events if event.event_id == event_id), None
+            )
+            if existing is not None:
+                if (
+                    existing.type != event_type
+                    or existing.session_id != session_id
+                    or existing.data != data
+                ):
+                    raise RunStateConflict("event idempotency key was reused differently")
+                return existing
             event = AgentEvent(
-                event_id=new_id("evt"),
+                event_id=event_id,
                 sequence=len(run_events) + 1,
                 type=event_type,
                 session_id=session_id,

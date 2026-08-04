@@ -1,14 +1,12 @@
 """Shared persistence boundary for successful Tool observations."""
 
 from dataclasses import dataclass
-from datetime import UTC, datetime, timedelta
+from datetime import timedelta
 from typing import Protocol
 
-from full_view_agent.application.errors import RunStateConflict
 from full_view_agent.application.fingerprints import canonical_fingerprint
 from full_view_agent.application.harness import ToolAction
 from full_view_agent.application.ports import AgentStore, EventPublisher
-from full_view_agent.application.session_run_service import new_id
 from full_view_agent.application.tool_registry import ToolRegistry
 from full_view_agent.domain.models import (
     AgentRun,
@@ -76,15 +74,16 @@ class ToolObservationService:
         data_result = tool_result.data_result
         if data_result is None:
             raise RuntimeError("successful tool produced no data result")
-        evidence_id = new_id("evd")
-        data_result = data_result.model_copy(update={"evidence_ids": [evidence_id]})
-        await self._store.save_result(
-            user_id=user_id,
-            run_id=run.run_id,
-            result=data_result,
+        evidence_id = canonical_fingerprint(
+            domain="tool-observation-evidence:1.0",
+            value={
+                "run_id": run.run_id,
+                "tool_call_id": tool_result.tool_call_id,
+                "result_id": data_result.result_id,
+                "result_fingerprint": data_result.result_fingerprint,
+            },
         )
-        await self._require_running(user_id=user_id, run_id=run.run_id)
-
+        data_result = data_result.model_copy(update={"evidence_ids": [evidence_id]})
         evidence = self._build_evidence(
             run=run,
             action=action,
@@ -92,37 +91,41 @@ class ToolObservationService:
             data_result=data_result,
             evidence_id=evidence_id,
         )
-        await self._store.save_evidence(
-            user_id=user_id,
-            run_id=run.run_id,
-            evidence=evidence,
-        )
-        await self._require_running(user_id=user_id, run_id=run.run_id)
-        await self._publish(
-            run,
-            "result.available",
-            {"result_id": data_result.result_id},
-        )
-        await self._publish(
-            run,
-            "evidence.available",
-            {"evidence_id": evidence_id, "result_id": data_result.result_id},
-        )
-        await self._request_frontend_commands(
-            user_id=user_id,
+        commands = self._build_frontend_commands(
             run=run,
             action=action,
             tool_result=tool_result,
             data_result=data_result,
         )
-        return PersistedToolObservation(data_result=data_result, evidence=evidence)
-
-    async def _require_running(self, *, user_id: str, run_id: str) -> None:
-        current = await self._store.get_run(user_id=user_id, run_id=run_id)
-        if current.status != "running":
-            raise RunStateConflict(
-                "tool observations can only be persisted for an active run"
+        data_result, evidence, commands = await self._store.save_tool_observation(
+            user_id=user_id,
+            run_id=run.run_id,
+            result=data_result,
+            evidence=evidence,
+            commands=commands,
+        )
+        await self._publish(
+            run,
+            "result.available",
+            {"result_id": data_result.result_id},
+            idempotency_key=f"{tool_result.tool_call_id}:result.available",
+        )
+        await self._publish(
+            run,
+            "evidence.available",
+            {"evidence_id": evidence_id, "result_id": data_result.result_id},
+            idempotency_key=f"{tool_result.tool_call_id}:evidence.available",
+        )
+        for command in commands:
+            await self._publish(
+                run,
+                "frontend.command.requested",
+                {"command": command.model_dump(mode="json")},
+                idempotency_key=(
+                    f"{tool_result.tool_call_id}:frontend.command:{command.type}"
+                ),
             )
+        return PersistedToolObservation(data_result=data_result, evidence=evidence)
 
     def _build_evidence(
         self,
@@ -176,7 +179,7 @@ class ToolObservationService:
                 ),
                 "time_range": None,
                 "as_of": None,
-                "retrieved_at": datetime.now(UTC),
+                "retrieved_at": data_result.created_at,
                 "query_fingerprint": query_fingerprint,
                 "policy_fingerprint": policy_fingerprint,
                 "tool": {
@@ -190,21 +193,20 @@ class ToolObservationService:
             }
         )
 
-    async def _request_frontend_commands(
+    def _build_frontend_commands(
         self,
         *,
-        user_id: str,
         run: AgentRun,
         action: ToolAction,
         tool_result: ToolResult,
         data_result: DataResult,
-    ) -> None:
+    ) -> tuple[FrontendCommand, ...]:
         client = run.client_capabilities
         if not isinstance(data_result, TableDataResult) or client is None:
-            return
+            return ()
         if "1.0" not in client.frontend_command_schema_versions:
-            return
-        now = datetime.now(UTC)
+            return ()
+        now = data_result.created_at
         area_codes = action_area_codes(action)
         canonical_tool_id = (
             tool_result.semantic_lineage.canonical_tool_id
@@ -215,7 +217,14 @@ class ToolObservationService:
         if "panel.show_table" in client.supported_commands:
             commands.append(
                 FrontendCommand(
-                    command_id=new_id("cmd"),
+                    command_id=canonical_fingerprint(
+                        domain="tool-observation-command:1.0",
+                        value={
+                            "run_id": run.run_id,
+                            "tool_call_id": tool_result.tool_call_id,
+                            "type": "panel.show_table",
+                        },
+                    ),
                     run_id=run.run_id,
                     target_client_instance_id=client.client_instance_id,
                     type="panel.show_table",
@@ -235,7 +244,14 @@ class ToolObservationService:
         ):
             commands.append(
                 FrontendCommand(
-                    command_id=new_id("cmd"),
+                    command_id=canonical_fingerprint(
+                        domain="tool-observation-command:1.0",
+                        value={
+                            "run_id": run.run_id,
+                            "tool_call_id": tool_result.tool_call_id,
+                            "type": "map.render_choropleth",
+                        },
+                    ),
                     run_id=run.run_id,
                     target_client_instance_id=client.client_instance_id,
                     type="map.render_choropleth",
@@ -250,29 +266,21 @@ class ToolObservationService:
                     payload=MapRenderChoroplethPayload(result_id=data_result.result_id),
                 )
             )
-        for command in commands:
-            await self._store.save_frontend_command(
-                user_id=user_id,
-                run_id=run.run_id,
-                command=command,
-            )
-            await self._publish(
-                run,
-                "frontend.command.requested",
-                {"command": command.model_dump(mode="json")},
-            )
+        return tuple(commands)
 
     async def _publish(
         self,
         run: AgentRun,
         event_type: str,
         data: dict[str, object],
+        idempotency_key: str | None = None,
     ) -> None:
         await self._events.publish(
             event_type=event_type,
             session_id=run.session_id,
             run_id=run.run_id,
             data=data,
+            idempotency_key=idempotency_key,
         )
 
 
