@@ -299,6 +299,46 @@ async def test_execution_passes_trusted_boundaries_to_orchestrator() -> None:
 
 
 @pytest.mark.asyncio
+async def test_concurrent_analysis_execution_has_one_terminal_message() -> None:
+    orchestrator = _RecordingOrchestrator()
+    runtime = _runtime(orchestrator=orchestrator)
+    app = create_app(runtime)
+    token = "execution-concurrent"
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=app), base_url="http://test"
+    ) as client:
+        run = await _create_run(client, token)
+        plan = await _create_plan(client, token, str(run["run_id"]))
+        path = (
+            f"/agent-api/v1/runs/{run['run_id']}/analysis-plans/"
+            f"{plan['plan_id']}/executions"
+        )
+        first, second = await asyncio.gather(
+            client.post(
+                path,
+                headers={"geoToken": token},
+                json={"request_id": plan["request_id"]},
+            ),
+            client.post(
+                path,
+                headers={"geoToken": token},
+                json={"request_id": plan["request_id"]},
+            ),
+        )
+
+    assert [first.status_code, second.status_code] == [200, 200]
+    identity = await runtime.identity_port.resolve(SecretStr(token))
+    messages = await runtime.store.list_messages(
+        user_id=identity.principal.user_id,
+        session_id=str(run["session_id"]),
+    )
+    assert [message.role for message in messages].count("assistant") == 1
+    events = await runtime.events.list_events(run_id=str(run["run_id"]))  # type: ignore[union-attr]
+    assert [event.type for event in events].count("assistant.message.completed") == 1
+    assert [event.type for event in events].count("run.completed") == 1
+
+
+@pytest.mark.asyncio
 async def test_execution_rejects_another_user_run() -> None:
     orchestrator = _RecordingOrchestrator()
     app = create_app(_runtime(orchestrator=orchestrator))

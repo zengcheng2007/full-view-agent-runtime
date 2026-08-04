@@ -314,6 +314,20 @@ class PostgresAgentPersistence:
     ) -> AgentMessage:
         async with await self._owned_run_connection(user_id, run_id) as owned:
             connection, run, session = owned
+            existing_row = await (
+                await connection.execute(
+                    f'SELECT data_json FROM "{self._schema}".messages '
+                    "WHERE message_id = %s",
+                    (message.message_id,),
+                )
+            ).fetchone()
+            if existing_row is not None:
+                existing = AgentMessage.model_validate_json(existing_row[0])
+                if existing != message:
+                    raise RunStateConflict(
+                        "message identity is already bound differently"
+                    )
+                return existing
             if (
                 run.status != "running"
                 or session.active_run_id != run_id

@@ -180,6 +180,13 @@ class InMemoryAgentStore:
             session = self.sessions.get(run.session_id) if run is not None else None
             if run is None or session is None or session.owner_user_id != user_id:
                 raise ResourceNotFound("run not found")
+            existing = self.messages.get(message.message_id)
+            if existing is not None:
+                if existing != message:
+                    raise RunStateConflict(
+                        "message identity is already bound differently"
+                    )
+                return existing
             if (
                 run.status != "running"
                 or session.active_run_id != run_id

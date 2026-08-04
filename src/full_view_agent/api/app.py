@@ -674,14 +674,15 @@ async def _complete_analysis_run(
                 )
             )
         result_message = AgentMessage(
-            message_id=new_id("msg"),
+            message_id=f"msg_analysis_{run.run_id}",
             session_id=run.session_id,
             run_id=run.run_id,
             role="assistant",
             content=content,
             evidence_ids=evidence_ids,
+            created_at=run.started_at or run.created_at,
         )
-        await runtime.store.save_message(
+        result_message = await runtime.store.save_message(
             user_id=user_id, run_id=run.run_id, message=result_message
         )
     if result_message is not None:
@@ -692,20 +693,30 @@ async def _complete_analysis_run(
             data={"message": result_message.model_dump(mode="json")},
             idempotency_key=f"analysis:{run.run_id}:assistant",
         )
+    # Another worker may have reached terminal while this worker was saving
+    # the deterministic message. Always decide from fresh durable state.
+    current = await runtime.store.get_run(user_id=user_id, run_id=run.run_id)
     if current.status not in {"completed", "failed", "cancelled", "expired"}:
-        if outcome.status == "failed":
-            current = await runtime.service.fail_run(
-                user_id=user_id,
-                run_id=run.run_id,
-                completion_reason_code=outcome.reason_code,
+        try:
+            if outcome.status == "failed":
+                current = await runtime.service.fail_run(
+                    user_id=user_id,
+                    run_id=run.run_id,
+                    completion_reason_code=outcome.reason_code,
+                )
+            else:
+                current = await runtime.service.complete_run(
+                    user_id=user_id,
+                    run_id=run.run_id,
+                    outcome="success" if outcome.status == "completed" else "partial",
+                    completion_reason_code=outcome.reason_code,
+                )
+        except RunStateConflict:
+            current = await runtime.store.get_run(
+                user_id=user_id, run_id=run.run_id
             )
-        else:
-            current = await runtime.service.complete_run(
-                user_id=user_id,
-                run_id=run.run_id,
-                outcome="success" if outcome.status == "completed" else "partial",
-                completion_reason_code=outcome.reason_code,
-            )
+    if not _analysis_terminal_matches(current, outcome):
+        raise RunStateConflict("analysis terminal state conflicts with its outcome")
     await runtime.events.publish(
         event_type="run.completed" if current.status == "completed" else "run.failed",
         session_id=current.session_id,
@@ -728,6 +739,22 @@ def _analysis_outcome_text(outcome: AnalysisRunOutcome) -> str:
     if outcome.status == "partial":
         return "区域研判已完成，但部分主题未取得结果；详情请查看研判报告。"
     return "区域研判执行失败，未生成可用报告。"
+
+
+def _analysis_terminal_matches(
+    run: AgentRun, outcome: AnalysisRunOutcome
+) -> bool:
+    expected_status = "failed" if outcome.status == "failed" else "completed"
+    expected_outcome = (
+        "failed"
+        if outcome.status == "failed"
+        else "success" if outcome.status == "completed" else "partial"
+    )
+    return (
+        run.status == expected_status
+        and run.outcome == expected_outcome
+        and run.completion_reason_code == outcome.reason_code
+    )
 
 
 async def _publish_analysis_reauthentication(
