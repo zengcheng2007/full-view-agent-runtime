@@ -124,6 +124,52 @@ async def test_postgres_persists_the_run_input_message_atomically() -> None:
 
 
 @pytest.mark.asyncio
+async def test_postgres_reauthentication_retry_is_idempotent_after_restart() -> None:
+    schema = f"fva_test_{uuid4().hex[:12]}"
+    store = PostgresAgentPersistence(dsn=postgres_test_dsn(), schema=schema)
+    await store.initialize()
+    try:
+        service = SessionRunService(store)
+        session = await service.create_session(user_id="user-01", title="认证断点")
+        queued = await service.create_run(
+            user_id="user-01",
+            session_id=session.session_id,
+            request=run_request(),
+        )
+        await service.start_run(user_id="user-01", run_id=queued.run_id)
+
+        waiting, pending = await service.wait_for_reauthentication(
+            user_id="user-01", run_id=queued.run_id
+        )
+        restarted = PostgresAgentPersistence(dsn=postgres_test_dsn(), schema=schema)
+        repeated_waiting, repeated_pending = await restarted.wait_for_reauthentication(
+            user_id="user-01", run_id=queued.run_id
+        )
+
+        assert repeated_waiting == waiting
+        assert repeated_pending == pending
+
+        resumed = await restarted.resume_from_input(
+            user_id="user-01",
+            run_id=queued.run_id,
+            input_request_id=pending.input_request_id,
+            run_state_version=pending.run_state_version,
+        )
+        replayed = await store.resume_from_input(
+            user_id="user-01",
+            run_id=queued.run_id,
+            input_request_id=pending.input_request_id,
+            run_state_version=pending.run_state_version,
+        )
+
+        assert replayed == resumed
+        assert resumed.status == "running"
+        assert resumed.state_version == pending.run_state_version + 1
+    finally:
+        await store.drop_schema()
+
+
+@pytest.mark.asyncio
 async def test_postgres_persists_an_assistant_message_for_an_active_run() -> None:
     schema = f"fva_test_{uuid4().hex[:12]}"
     store = PostgresAgentPersistence(dsn=postgres_test_dsn(), schema=schema)
