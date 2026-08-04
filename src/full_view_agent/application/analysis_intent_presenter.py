@@ -35,7 +35,7 @@ class AnalysisIntentToolPresenter:
     def present(
         self, *, auth_context: AuthContext
     ) -> AnalysisIntentToolPresentation | None:
-        # 意图范围（named_area/current_area）一律经服务端生产区划解析落地；
+        # 意图范围（named_area）一律经服务端生产区划解析落地；
         # ContextBuilder 尚无可信 current_area hint，当前阶段 fail closed：
         # 区划解析前置授权缺任一项即不呈现。
         if not self._area_resolution_admitted(auth_context):
@@ -71,12 +71,25 @@ class AnalysisIntentToolPresenter:
             return None
         items["enum"] = list(goals)
 
+        # 模型边界只公开 named_area：可信 TrustedRunScopeProvider 落地前，
+        # current_area 的定义、oneOf 分支与 discriminator 映射整体移除，
+        # 呈现 schema 中不保留任何 current_area 痕迹。
+        definitions = schema.get("$defs")
+        if (
+            not isinstance(definitions, dict)
+            or "NamedAreaScopeIntent" not in definitions
+            or not isinstance(properties.get("scope"), dict)
+        ):
+            return None
+        definitions.pop("CurrentAreaScopeIntent", None)
+        properties["scope"] = {"$ref": "#/$defs/NamedAreaScopeIntent"}
+
         return AnalysisIntentToolPresentation(
             tool_id=ANALYSIS_INTENT_TOOL_ID,
             tool_version="1.0",
             description=(
                 "请求服务端编译并执行区域综合研判。仅可选择当前授权且已绑定的"
-                f"研判目标：{', '.join(goals)}；范围只能使用区域名称或当前区域。"
+                f"研判目标：{', '.join(goals)}；范围只能使用区域名称。"
             ),
             input_schema=schema,
             goals=goals,

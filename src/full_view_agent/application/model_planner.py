@@ -23,7 +23,10 @@ from full_view_agent.application.model_provider import (
     ModelRequest,
     ModelToolDefinition,
 )
-from full_view_agent.domain.analysis_intent import AnalysisIntentV1
+from full_view_agent.domain.analysis_intent import (
+    AnalysisIntentV1,
+    CurrentAreaScopeIntent,
+)
 from full_view_agent.domain.models import AuthContext
 
 logger = logging.getLogger(__name__)
@@ -139,6 +142,15 @@ class ModelPlanner:
                     raise ModelContractError(
                         "model returned an invalid analysis intent"
                     ) from exc
+                if isinstance(intent.scope, CurrentAreaScopeIntent):
+                    # Defense in depth: the presentation schema only exposes
+                    # named_area, but a provider may ignore it. Reject
+                    # current_area at the model boundary until a trusted
+                    # TrustedRunScopeProvider exists — before any action is
+                    # returned, so no Tool/adapter side effect can follow.
+                    raise ModelContractError(
+                        "model returned an unsupported current-area analysis intent"
+                    )
                 return AnalysisIntentAction(intent=intent)
             server_arguments = advertised.server_arguments
             attempted_server_fields = sorted(

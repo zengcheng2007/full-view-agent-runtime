@@ -221,6 +221,24 @@ async def test_planner_rejects_area_code_smuggled_into_scope() -> None:
         await planner.decide(HarnessState())
 
 
+async def test_planner_rejects_current_area_scope_even_if_domain_valid() -> None:
+    """不合约 provider 无视呈现 schema、返回 current_area 意图时，
+    planner 必须显式 fail closed，不能仅依赖 provider 遵守 JSON schema。
+
+    载荷本身是领域合法的（服务端内部仍支持 current_area），拒绝发生在
+    planner 边界——任何 AnalysisIntentAction/ToolAction 都不得返回。
+    """
+    arguments = {**VALID_INTENT_ARGUMENTS, "scope": {"kind": "current_area"}}
+    # 前置确认：领域模型仍支持 current_area，拒绝纯粹来自模型边界策略。
+    assert AnalysisIntentV1.model_validate(arguments).scope.kind == "current_area"
+    provider = QueueModelProvider(intent_response(arguments))
+    planner = make_planner(provider, IntentAdContextBuilder())
+
+    # "current.area" 同时容忍 current_area / current-area 两种措辞。
+    with pytest.raises(ModelContractError, match="current.area"):
+        await planner.decide(HarnessState())
+
+
 @pytest.mark.parametrize(
     "arguments",
     [

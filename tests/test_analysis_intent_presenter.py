@@ -10,7 +10,8 @@ AnalysisIntentToolPresenter 由当前 SemanticCatalog + AuthContext 派生模型
   授权必须同时持有 governance.area.read entitlement、administrative_area
   dataset 与至少一个可达区域 scope 才呈现，缺任一项返回 None；
 - 无任何可研判主题时返回 None（虚拟能力对模型不可见）；
-- schema 只含 named_area/current_area scope，additionalProperties=false，
+- schema 只公开 named_area scope（可信 TrustedRunScopeProvider 落地前
+  current_area 在模型边界彻底关闭），additionalProperties=false，
   绝不暴露 steps/sql/url/adapter/budget/area_code。
 """
 
@@ -32,7 +33,16 @@ EVENT_ENTITLEMENT = "governance.event.aggregate.read"
 AREA_ENTITLEMENT = "governance.area.read"
 AREA_DATASET = "administrative_area"
 
-SENSITIVE_FIELDS = ("steps", "sql", "url", "adapter", "budget", "area_code")
+SENSITIVE_FIELDS = (
+    "steps",
+    "sql",
+    "url",
+    "adapter",
+    "budget",
+    "area_code",
+    # 可信 TrustedRunScopeProvider 落地前，current_area 不得出现在模型边界。
+    "current_area",
+)
 
 
 def _auth_context(
@@ -152,7 +162,7 @@ def test_presenter_returns_none_when_scope_cannot_reach_any_subject() -> None:
 def test_presenter_returns_none_without_area_resolution_entitlement() -> None:
     presenter = AnalysisIntentToolPresenter(catalog=SemanticCatalog.default())
     # 主题授权与区划数据集齐备、仅缺 governance.area.read：
-    # named_area/current_area 无法经生产区划解析落地，不得呈现。
+    # named_area 无法经生产区划解析落地，不得呈现。
     auth = _auth_context(
         entitlements=(POPULATION_ENTITLEMENT,),
         datasets=("population", AREA_DATASET),
@@ -208,23 +218,34 @@ def test_presenter_schema_is_closed_and_free_of_sensitive_fields() -> None:
     assert set(schema["properties"]) == {"schema_version", "kind", "goals", "scope"}
     assert schema["required"] == ["goals", "scope"]
     defs = schema["$defs"]
-    assert set(defs) == {"NamedAreaScopeIntent", "CurrentAreaScopeIntent"}
+    assert set(defs) == {"NamedAreaScopeIntent"}
     for definition in defs.values():
         assert definition["additionalProperties"] is False
+    # scope 只公开 named_area：不再有 oneOf/discriminator 多分支。
     scope_schema = schema["properties"]["scope"]
-    assert isinstance(scope_schema["oneOf"], list)
-    referenced = {
-        str(option["$ref"]).rsplit("/", 1)[-1]
-        for option in scope_schema["oneOf"]
-        if isinstance(option, dict)
-    }
-    assert referenced == {"NamedAreaScopeIntent", "CurrentAreaScopeIntent"}
+    assert scope_schema == {"$ref": "#/$defs/NamedAreaScopeIntent"}
     serialized = json.dumps(schema, ensure_ascii=False)
     for field in SENSITIVE_FIELDS:
         assert f'"{field}"' not in serialized
     # 工具描述同样不得暴露敏感执行字段。
     for field in SENSITIVE_FIELDS:
         assert f"{field}=" not in presentation.description
+
+
+def test_presenter_schema_hides_current_area_scope_entirely() -> None:
+    """可信 TrustedRunScopeProvider 落地前，current_area 必须在模型边界
+    彻底关闭：呈现 schema 的任何位置（定义、分支、discriminator、常量）
+    都不得出现 current_area 痕迹，描述文案也不得声称该能力。"""
+    presenter = AnalysisIntentToolPresenter(catalog=SemanticCatalog.default())
+
+    presentation = presenter.present(auth_context=_full_auth())
+
+    assert presentation is not None
+    serialized = json.dumps(presentation.input_schema, ensure_ascii=False)
+    assert "current_area" not in serialized
+    assert "CurrentAreaScopeIntent" not in serialized
+    assert set(presentation.input_schema["$defs"]) == {"NamedAreaScopeIntent"}
+    assert "当前区域" not in presentation.description
 
 
 def test_presenter_description_only_claims_authorized_goals() -> None:
