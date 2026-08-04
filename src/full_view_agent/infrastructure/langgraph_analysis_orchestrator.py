@@ -1,6 +1,5 @@
 """Checkpointed LangGraph adapter for dedicated analysis runs."""
 
-import asyncio
 import operator
 from collections.abc import Callable
 from datetime import UTC, datetime, timedelta
@@ -13,6 +12,7 @@ from langgraph.types import Command, Send, interrupt
 from full_view_agent.application.analysis_graph import (
     ANALYSIS_GRAPH_STATE_VERSION,
     AnalysisGraphExecutionPort,
+    AnalysisRunLeaseManager,
     AnalysisRunLifecycle,
     AnalysisRunOutcome,
     AnalysisStepCheckpoint,
@@ -21,6 +21,9 @@ from full_view_agent.application.checkpoint_mapping import CheckpointMappingStor
 from full_view_agent.application.errors import ReauthenticationRequired, RunStateConflict
 from full_view_agent.application.fingerprints import canonical_fingerprint
 from full_view_agent.domain.models import AuthContext
+from full_view_agent.infrastructure.analysis_run_lease import (
+    InMemoryAnalysisRunLeaseManager,
+)
 from full_view_agent.infrastructure.checkpoint_mapping_store import (
     InMemoryCheckpointMappingStore,
 )
@@ -71,19 +74,19 @@ class LangGraphAnalysisOrchestrator:
         *,
         execution: AnalysisGraphExecutionPort,
         lifecycle: AnalysisRunLifecycle,
+        lease_manager: AnalysisRunLeaseManager | None = None,
         checkpoint_manager: LangGraphCheckpointManager | None = None,
         checkpoint_mappings: CheckpointMappingStore | None = None,
         clock: Callable[[], datetime] = lambda: datetime.now(UTC),
     ) -> None:
         self._execution = execution
         self._lifecycle = lifecycle
+        self._lease_manager = lease_manager or InMemoryAnalysisRunLeaseManager()
         self._checkpoint_manager = checkpoint_manager or InMemoryCheckpointManager()
         self._checkpoint_mappings = (
             checkpoint_mappings or InMemoryCheckpointMappingStore()
         )
         self._clock = clock
-        self._locks_guard = asyncio.Lock()
-        self._run_locks: dict[str, asyncio.Lock] = {}
 
     async def run(
         self,
@@ -103,8 +106,7 @@ class LangGraphAnalysisOrchestrator:
             analysis_run_id=analysis_run_id,
             auth_context=auth_context,
         )
-        lock = await self._lock_for(analysis_run_id)
-        async with lock:
+        async with self._lease_manager.lease(analysis_run_id=analysis_run_id):
             return await self._invoke(
                 user_id=user_id,
                 session_id=session_id,
@@ -135,8 +137,7 @@ class LangGraphAnalysisOrchestrator:
             analysis_run_id=analysis_run_id,
             auth_context=auth_context,
         )
-        lock = await self._lock_for(analysis_run_id)
-        async with lock:
+        async with self._lease_manager.lease(analysis_run_id=analysis_run_id):
             await self._lifecycle.resume_from_input(
                 user_id=user_id,
                 run_id=analysis_run_id,
@@ -358,10 +359,6 @@ class LangGraphAnalysisOrchestrator:
         if outcome is None:
             raise RuntimeError("analysis graph finalized without an outcome")
         return outcome
-
-    async def _lock_for(self, analysis_run_id: str) -> asyncio.Lock:
-        async with self._locks_guard:
-            return self._run_locks.setdefault(analysis_run_id, asyncio.Lock())
 
     @staticmethod
     def _validate_live_identity(

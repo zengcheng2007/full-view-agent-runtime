@@ -1,5 +1,6 @@
 """Framework-neutral, checkpoint-safe contracts for analysis execution."""
 
+from contextlib import AbstractAsyncContextManager
 from datetime import datetime
 from typing import Literal, Protocol
 
@@ -137,3 +138,11 @@ class AnalysisRunLifecycle(Protocol):
         input_request_id: str,
         run_state_version: int,
     ): ...
+
+
+class AnalysisRunLeaseManager(Protocol):
+    """Serializes one analysis run before any graph transition executes."""
+
+    def lease(
+        self, *, analysis_run_id: str
+    ) -> AbstractAsyncContextManager[None]: ...
