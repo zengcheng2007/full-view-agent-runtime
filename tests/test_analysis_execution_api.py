@@ -59,9 +59,10 @@ class _RecordingOrchestrator:
 
 
 class _ReauthenticationOrchestrator:
-    def __init__(self) -> None:
+    def __init__(self, *, reauth_on_first_resume: bool = False) -> None:
         self.runtime: RuntimeContainer | None = None
         self.resume_calls = 0
+        self.reauth_on_first_resume = reauth_on_first_resume
 
     async def run(
         self,
@@ -96,6 +97,12 @@ class _ReauthenticationOrchestrator:
             input_request_id=input_request_id,
             run_state_version=run_state_version,
         )
+        if self.reauth_on_first_resume and self.resume_calls == 1:
+            await self.runtime.service.wait_for_reauthentication(
+                user_id=user_id,
+                run_id=analysis_run_id,
+            )
+            raise ReauthenticationRequired("analysis credential expired again")
         return AnalysisRunOutcome(
             analysis_run_id=analysis_run_id,
             plan_id=plan_id,
@@ -501,3 +508,100 @@ async def test_analysis_reauthentication_is_exposed_and_resumes_to_terminal() ->
         "assistant.message.completed"
     )
     assert event_types[-1] == "run.completed"
+
+
+@pytest.mark.asyncio
+async def test_forged_analysis_input_never_emits_received_event() -> None:
+    orchestrator = _ReauthenticationOrchestrator()
+    runtime = _runtime(orchestrator=orchestrator)  # type: ignore[arg-type]
+    orchestrator.runtime = runtime
+    app = create_app(runtime)
+    token = "execution-forged-input"
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=app), base_url="http://test"
+    ) as client:
+        run = await _create_run(client, token)
+        plan = await _create_plan(client, token, str(run["run_id"]))
+        execution = await client.post(
+            f"/agent-api/v1/runs/{run['run_id']}/analysis-plans/{plan['plan_id']}/executions",
+            headers={"geoToken": token},
+            json={"request_id": plan["request_id"]},
+        )
+        assert execution.status_code == 409
+        pending_events = await runtime.events.list_events(run_id=str(run["run_id"]))  # type: ignore[union-attr]
+        required = pending_events[1].data
+
+        forged = await client.post(
+            f"/agent-api/v1/runs/{run['run_id']}/inputs",
+            headers={"geoToken": token, "Idempotency-Key": "forged-input"},
+            json={
+                "input_request_id": "inreq-forged",
+                "client_instance_id": "client-forged-input",
+                "run_state_version": required["run_state_version"],
+                "response": {"type": "reauthenticated"},
+                "analysis_plan_id": required["analysis_plan_id"],
+                "analysis_request_id": required["analysis_request_id"],
+            },
+        )
+
+    assert forged.status_code == 409
+    events = await runtime.events.list_events(run_id=str(run["run_id"]))  # type: ignore[union-attr]
+    assert "input.received" not in [event.type for event in events]
+
+
+@pytest.mark.asyncio
+async def test_second_analysis_reauthentication_exposes_fresh_pending_refs() -> None:
+    orchestrator = _ReauthenticationOrchestrator(reauth_on_first_resume=True)
+    runtime = _runtime(orchestrator=orchestrator)  # type: ignore[arg-type]
+    orchestrator.runtime = runtime
+    app = create_app(runtime)
+    token = "execution-second-reauth"
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=app), base_url="http://test"
+    ) as client:
+        run = await _create_run(client, token)
+        plan = await _create_plan(client, token, str(run["run_id"]))
+        first_execution = await client.post(
+            f"/agent-api/v1/runs/{run['run_id']}/analysis-plans/{plan['plan_id']}/executions",
+            headers={"geoToken": token},
+            json={"request_id": plan["request_id"]},
+        )
+        assert first_execution.status_code == 409
+        first_events = await runtime.events.list_events(run_id=str(run["run_id"]))  # type: ignore[union-attr]
+        first_pending = first_events[1].data
+
+        first_resume = await client.post(
+            f"/agent-api/v1/runs/{run['run_id']}/inputs",
+            headers={"geoToken": token, "Idempotency-Key": "first-resume"},
+            json={
+                "input_request_id": first_pending["input_request_id"],
+                "client_instance_id": "client-second-reauth",
+                "run_state_version": first_pending["run_state_version"],
+                "response": {"type": "reauthenticated"},
+                "analysis_plan_id": first_pending["analysis_plan_id"],
+                "analysis_request_id": first_pending["analysis_request_id"],
+            },
+        )
+        assert first_resume.status_code == 409
+        second_events = await runtime.events.list_events(run_id=str(run["run_id"]))  # type: ignore[union-attr]
+        required_events = [event for event in second_events if event.type == "input.required"]
+        assert len(required_events) == 2
+        second_pending = required_events[-1].data
+        assert second_pending["input_request_id"] != first_pending["input_request_id"]
+
+        second_resume = await client.post(
+            f"/agent-api/v1/runs/{run['run_id']}/inputs",
+            headers={"geoToken": token, "Idempotency-Key": "second-resume"},
+            json={
+                "input_request_id": second_pending["input_request_id"],
+                "client_instance_id": "client-second-reauth",
+                "run_state_version": second_pending["run_state_version"],
+                "response": {"type": "reauthenticated"},
+                "analysis_plan_id": second_pending["analysis_plan_id"],
+                "analysis_request_id": second_pending["analysis_request_id"],
+            },
+        )
+
+    assert second_resume.status_code == 202
+    assert second_resume.json()["data"]["status"] == "completed"
+    assert orchestrator.resume_calls == 2
