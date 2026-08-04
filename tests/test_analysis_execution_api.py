@@ -243,6 +243,25 @@ async def test_recovery_exposes_running_analysis_as_resumable_reauthentication()
     ]
 
 
+@pytest.mark.asyncio
+async def test_queued_analysis_plan_can_be_rediscovered_after_response_loss() -> None:
+    runtime = _runtime(orchestrator=_RecordingOrchestrator())
+    app = create_app(runtime)
+    token = "analysis-queued-discovery"
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=app), base_url="http://test"
+    ) as client:
+        run = await _create_run(client, token)
+        plan = await _create_plan(client, token, str(run["run_id"]))
+        discovered = await client.get(
+            f"/agent-api/v1/runs/{run['run_id']}/analysis-plans/current",
+            headers={"geoToken": token},
+        )
+
+    assert discovered.status_code == 200
+    assert discovered.json()["data"] == plan
+
+
 async def _create_run(
     client: httpx.AsyncClient, token: str, *, mode: str = "analysis"
 ) -> dict[str, object]:
@@ -251,7 +270,7 @@ async def _create_run(
         headers={"geoToken": token, "Idempotency-Key": f"session-{token}"},
         json={"title": "区域研判"},
     )
-    assert session.status_code == 201
+    assert session.status_code == 201, session.text
     run = await client.post(
         f"/agent-api/v1/sessions/{session.json()['data']['session_id']}/runs",
         headers={"geoToken": token, "Idempotency-Key": f"run-{token}"},
@@ -268,7 +287,7 @@ async def _create_run(
             "mode": mode,
         },
     )
-    assert run.status_code == 202
+    assert run.status_code == 202, run.text
     return dict(run.json()["data"])
 
 

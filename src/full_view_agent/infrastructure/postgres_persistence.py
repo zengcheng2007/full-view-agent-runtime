@@ -27,6 +27,7 @@ from full_view_agent.application.errors import (
 from full_view_agent.application.fingerprints import canonical_fingerprint
 from full_view_agent.application.frontend_commands import merge_receipt
 from full_view_agent.application.session_run_service import new_id
+from full_view_agent.domain.analysis_plan import AnalysisPlan
 from full_view_agent.domain.models import (
     AgentEvent,
     AgentMessage,
@@ -1564,6 +1565,7 @@ def _encode_idempotent_result(result: object) -> tuple[str, str]:
         ("agent_session", AgentSession),
         ("agent_run", AgentRun),
         ("steer", Steer),
+        ("analysis_plan", AnalysisPlan),
     ):
         if isinstance(result, model):
             return result_type, (
@@ -1579,6 +1581,7 @@ def _decode_idempotent_result(result_type: str, result_json: str) -> object:
         "agent_session": AgentSession,
         "agent_run": AgentRun,
         "steer": Steer,
+        "analysis_plan": AnalysisPlan,
     }
     model = models.get(result_type)
     if model is None:

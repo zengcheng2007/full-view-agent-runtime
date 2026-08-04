@@ -110,6 +110,11 @@ class LangGraphAnalysisOrchestrator:
             tenant_id=auth_context.principal.tenant_id,
             analysis_run_id=analysis_run_id,
         )
+        # Schema setup may run CREATE INDEX CONCURRENTLY. It must finish before
+        # a worker enters the per-run advisory lease; otherwise a competing
+        # lease waiter can hold the virtual transaction that index setup waits
+        # for, creating a cross-worker lock cycle.
+        await self._checkpoint_manager.initialize()
         async with self._lease_manager.lease(analysis_run_id=lease_id):
             return await self._invoke(
                 user_id=user_id,
@@ -145,6 +150,7 @@ class LangGraphAnalysisOrchestrator:
             tenant_id=auth_context.principal.tenant_id,
             analysis_run_id=analysis_run_id,
         )
+        await self._checkpoint_manager.initialize()
         async with self._lease_manager.lease(analysis_run_id=lease_id):
             return await self._invoke(
                 user_id=user_id,

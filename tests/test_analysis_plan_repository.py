@@ -45,9 +45,11 @@ def _postgres_test_dsn() -> str:
 def test_repository_port_exposes_save_and_get_with_full_namespace() -> None:
     save = inspect.signature(AnalysisPlanRepository.save).parameters
     get = inspect.signature(AnalysisPlanRepository.get).parameters
+    latest = inspect.signature(AnalysisPlanRepository.get_latest_for_run).parameters
 
     assert {"tenant_id", "user_id", "run_id", "plan"} <= set(save)
     assert {"tenant_id", "user_id", "run_id", "plan_id"} <= set(get)
+    assert {"tenant_id", "user_id", "run_id"} <= set(latest)
 
 
 def test_namespace_is_deterministic_and_uses_every_identity_component() -> None:
@@ -102,6 +104,26 @@ async def test_in_memory_save_is_idempotent_and_returns_revalidated_copy() -> No
 
     assert first == second == loaded == plan
     assert loaded is not plan
+
+
+@pytest.mark.asyncio
+async def test_in_memory_discovers_latest_plan_only_inside_owner_run() -> None:
+    repository = InMemoryAnalysisPlanRepository()
+    first = _plan(request_id="request-plan-store-first")
+    second = _plan(request_id="request-plan-store-second")
+    await repository.save(
+        tenant_id="tenant-a", user_id="user-a", run_id="run-a", plan=first
+    )
+    await repository.save(
+        tenant_id="tenant-a", user_id="user-a", run_id="run-a", plan=second
+    )
+
+    assert await repository.get_latest_for_run(
+        tenant_id="tenant-a", user_id="user-a", run_id="run-a"
+    ) == second
+    assert await repository.get_latest_for_run(
+        tenant_id="tenant-a", user_id="user-other", run_id="run-a"
+    ) is None
 
 
 @pytest.mark.asyncio
@@ -237,6 +259,9 @@ async def test_postgres_repository_is_idempotent_isolated_and_survives_restart()
             run_id="run-a",
             plan_id=plan.plan_id,
         ) is None
+        assert await restarted.get_latest_for_run(
+            tenant_id="tenant-a", user_id="user-a", run_id="run-a"
+        ) == plan
     finally:
         await first.drop_schema()
 

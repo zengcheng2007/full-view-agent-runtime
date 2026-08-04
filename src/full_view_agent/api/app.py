@@ -1433,6 +1433,49 @@ def create_app(runtime: RuntimeContainer | None = None) -> FastAPI:
             ),
         )
 
+    @app.get(
+        "/agent-api/v1/runs/{run_id}/analysis-plans/current",
+        responses={
+            401: {"model": ErrorResponse},
+            404: {"model": ErrorResponse},
+            409: {"model": ErrorResponse},
+            503: {"model": ErrorResponse},
+        },
+    )
+    async def get_current_analysis_plan(
+        run_id: str,
+        user: Annotated[CurrentUser, Depends(require_geotoken)],
+    ) -> AnalysisPlanResponse:
+        run = await app.state.runtime.store.get_run(
+            user_id=user.user_id,
+            run_id=run_id,
+        )
+        if run.mode != "analysis" or run.status != "queued":
+            raise RunStateConflict(
+                "current analysis plan is discoverable only for a queued analysis run"
+            )
+        auth_context = await app.state.runtime.auth_contexts.get(
+            user_id=user.user_id,
+            run_id=run_id,
+        )
+        if (
+            auth_context.principal.user_id != user.identity.principal.user_id
+            or auth_context.principal.tenant_id
+            != user.identity.principal.tenant_id
+        ):
+            raise ResourceNotFound("run was not found for the current identity")
+        plan = await app.state.runtime.analysis_plan_repository.get_latest_for_run(
+            tenant_id=auth_context.principal.tenant_id,
+            user_id=user.user_id,
+            run_id=run_id,
+        )
+        if plan is None:
+            raise ResourceNotFound("analysis plan was not found for this run")
+        return AnalysisPlanResponse(
+            data=plan,
+            meta=ResponseMeta(request_id=new_id("req")),
+        )
+
     @app.post(
         "/agent-api/v1/runs/{run_id}/analysis-plans/{plan_id}/executions",
         responses={
@@ -1506,9 +1549,26 @@ def create_app(runtime: RuntimeContainer | None = None) -> FastAPI:
             )
             raise
         if run.status == "queued":
-            run = await app.state.runtime.service.start_run(
-                user_id=user.user_id, run_id=run_id
-            )
+            try:
+                run = await app.state.runtime.service.start_run(
+                    user_id=user.user_id, run_id=run_id
+                )
+            except RunStateConflict:
+                # Another worker may have won the queued -> running transition
+                # after our initial read. Re-read the authority store and only
+                # join a state that the idempotent analysis orchestrator can
+                # safely replay; every other conflict remains fail-closed.
+                run = await app.state.runtime.store.get_run(
+                    user_id=user.user_id,
+                    run_id=run_id,
+                )
+                if run.status not in {
+                    "running",
+                    "waiting_input",
+                    "completed",
+                    "failed",
+                }:
+                    raise
         elif run.status not in {
             "running",
             "waiting_input",

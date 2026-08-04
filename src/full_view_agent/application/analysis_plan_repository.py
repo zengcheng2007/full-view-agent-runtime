@@ -42,6 +42,14 @@ class AnalysisPlanRepository(Protocol):
         plan_id: str,
     ) -> AnalysisPlan | None: ...
 
+    async def get_latest_for_run(
+        self,
+        *,
+        tenant_id: str,
+        user_id: str,
+        run_id: str,
+    ) -> AnalysisPlan | None: ...
+
 
 def analysis_plan_namespace(
     *, tenant_id: str, user_id: str, run_id: str, plan_id: str

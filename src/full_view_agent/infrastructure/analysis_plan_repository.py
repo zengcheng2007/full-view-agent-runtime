@@ -97,6 +97,26 @@ class InMemoryAnalysisPlanRepository:
             )
         return _validated_record(record)
 
+    async def get_latest_for_run(
+        self,
+        *,
+        tenant_id: str,
+        user_id: str,
+        run_id: str,
+    ) -> AnalysisPlan | None:
+        async with self._lock:
+            matching = [
+                record
+                for record in self._records.values()
+                if record.tenant_id == tenant_id
+                and record.user_id == user_id
+                and record.run_id == run_id
+            ]
+        if not matching:
+            return None
+        record = max(matching, key=lambda item: (item.created_at, item.namespace))
+        return _validated_record(record)
+
 
 class PostgresAnalysisPlanRepository:
     """Portable TEXT/standard-column PostgreSQL implementation.
@@ -203,6 +223,48 @@ class PostgresAnalysisPlanRepository:
         if record.plan_id != plan_id:
             raise AnalysisPlanStoreRejected(
                 "PLAN_ID_MISMATCH", "stored plan id does not match namespace identity"
+            )
+        return _validated_record(record)
+
+    async def get_latest_for_run(
+        self,
+        *,
+        tenant_id: str,
+        user_id: str,
+        run_id: str,
+    ) -> AnalysisPlan | None:
+        await self._ensure_initialized()
+        async with await psycopg.AsyncConnection.connect(self._dsn) as connection:
+            row = await (
+                await connection.execute(
+                    f'SELECT namespace, tenant_id, user_id, run_id, plan_id, request_id, '
+                    f'plan_json, catalog_version, catalog_fingerprint, created_at '
+                    f'FROM "{self._schema}".analysis_plans '
+                    "WHERE tenant_id = %s AND user_id = %s AND run_id = %s "
+                    "ORDER BY created_at DESC, namespace DESC LIMIT 1",
+                    (tenant_id, user_id, run_id),
+                )
+            ).fetchone()
+        if row is None:
+            return None
+        record = _record_from_row(row)
+        if (
+            record.tenant_id != tenant_id
+            or record.user_id != user_id
+            or record.run_id != run_id
+        ):
+            raise AnalysisPlanStoreRejected(
+                "PLAN_NAMESPACE_MISMATCH", "stored namespace metadata is inconsistent"
+            )
+        expected_namespace = analysis_plan_namespace(
+            tenant_id=tenant_id,
+            user_id=user_id,
+            run_id=run_id,
+            plan_id=record.plan_id,
+        )
+        if record.namespace != expected_namespace:
+            raise AnalysisPlanStoreRejected(
+                "PLAN_NAMESPACE_MISMATCH", "stored namespace metadata is inconsistent"
             )
         return _validated_record(record)
 

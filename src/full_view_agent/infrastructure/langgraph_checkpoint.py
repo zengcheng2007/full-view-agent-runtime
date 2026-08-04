@@ -16,6 +16,8 @@ _SAFE_IDENTIFIER = re.compile(r"^[a-z][a-z0-9_]{0,62}$")
 
 
 class LangGraphCheckpointManager(Protocol):
+    async def initialize(self) -> None: ...
+
     def saver(self) -> Any: ...
 
 
@@ -29,6 +31,9 @@ class InMemoryCheckpointManager:
                 allowed_json_modules=(),
             )
         )
+
+    async def initialize(self) -> None:
+        return None
 
     @asynccontextmanager
     async def saver(self) -> AsyncIterator[InMemorySaver]:
@@ -65,13 +70,42 @@ class LangGraphPostgresCheckpointManager:
         async with self._init_lock:
             if self._initialized:
                 return
-            async with await psycopg.AsyncConnection.connect(self._dsn) as connection:
+            connection = await psycopg.AsyncConnection.connect(
+                self._dsn,
+                autocommit=True,
+            )
+            lock_key = f"full-view-langgraph-checkpoint-init:{self._schema}"
+            acquired = False
+            try:
+                deadline = asyncio.get_running_loop().time() + 30.0
+                while not acquired:
+                    row = await (
+                        await connection.execute(
+                            "SELECT pg_try_advisory_lock(hashtextextended(%s, 0))",
+                            (lock_key,),
+                        )
+                    ).fetchone()
+                    acquired = bool(row and row[0])
+                    if acquired:
+                        break
+                    if asyncio.get_running_loop().time() >= deadline:
+                        raise TimeoutError(
+                            "timed out waiting for LangGraph checkpoint initialization"
+                        )
+                    await asyncio.sleep(0.05)
                 await connection.execute(
                     f'CREATE SCHEMA IF NOT EXISTS "{self._schema}"'
                 )
-            async with self._open_saver() as saver:
-                await saver.setup()
-            self._initialized = True
+                async with self._open_saver() as saver:
+                    await saver.setup()
+                self._initialized = True
+            finally:
+                if acquired and not connection.closed:
+                    await connection.execute(
+                        "SELECT pg_advisory_unlock(hashtextextended(%s, 0))",
+                        (lock_key,),
+                    )
+                await connection.close()
 
     @asynccontextmanager
     async def saver(self) -> AsyncIterator[AsyncPostgresSaver]:
