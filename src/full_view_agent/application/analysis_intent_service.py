@@ -95,7 +95,12 @@ class AnalysisAreaResolver(Protocol):
     非法的记录由编译服务 fail closed。
     """
 
-    async def resolve_area_query(self, *, query: str) -> tuple[ResolvedArea, ...]: ...
+    async def resolve_area_query(
+        self,
+        *,
+        query: str,
+        auth_context: AuthContext,
+    ) -> tuple[ResolvedArea, ...]: ...
 
 
 class AnalysisIntentCompilationService:
@@ -124,7 +129,10 @@ class AnalysisIntentCompilationService:
         """
         authorization = SubjectAuthorization.from_auth_context(auth_context)
         scope_ref = await self._resolve_scope(
-            intent, authorization=authorization, current_area_code=current_area_code
+            intent,
+            auth_context=auth_context,
+            authorization=authorization,
+            current_area_code=current_area_code,
         )
         self._admit_goals(intent.goals, authorization=authorization)
         request = AnalysisRequest(
@@ -157,6 +165,7 @@ class AnalysisIntentCompilationService:
         self,
         intent: AnalysisIntentV1,
         *,
+        auth_context: AuthContext,
         authorization: SubjectAuthorization,
         current_area_code: str | None,
     ) -> AreaScopeRef:
@@ -190,7 +199,10 @@ class AnalysisIntentCompilationService:
                     "the current authorization",
                 )
             return scope_ref
-        candidates = await self._area_resolver.resolve_area_query(query=scope.area_query)
+        candidates = await self._area_resolver.resolve_area_query(
+            query=scope.area_query,
+            auth_context=auth_context,
+        )
         if not candidates:
             raise AnalysisIntentRejected(
                 "AREA_QUERY_UNKNOWN",

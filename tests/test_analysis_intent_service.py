@@ -65,8 +65,12 @@ class FakeAreaResolver:
     ) -> None:
         self._areas = KNOWN_AREAS if areas is None else areas
         self._error = error
+        self.auth_contexts: list[AuthContext] = []
 
-    async def resolve_area_query(self, *, query: str) -> tuple[ResolvedArea, ...]:
+    async def resolve_area_query(
+        self, *, query: str, auth_context: AuthContext
+    ) -> tuple[ResolvedArea, ...]:
+        self.auth_contexts.append(auth_context)
         if self._error is not None:
             raise self._error
         return self._areas.get(query, ())
@@ -140,7 +144,7 @@ def current_intent(*goals: str) -> AnalysisIntentV1:
 def build_service(
     *,
     catalog: SemanticCatalog | None = None,
-    resolver: FakeAreaResolver | None = None,
+    resolver: AnalysisAreaResolver | None = None,
     repository: InMemoryAnalysisPlanRepository | None = None,
     default_budget: PlanBudget | None = None,
 ) -> tuple[
@@ -164,7 +168,8 @@ def build_service(
 
 
 async def test_named_area_intent_compiles_to_trusted_plan() -> None:
-    service, repository = build_service()
+    resolver = FakeAreaResolver()
+    service, repository = build_service(resolver=resolver)
     auth_context = make_auth_context()
 
     plan = await service.compile_intent(
@@ -182,6 +187,7 @@ async def test_named_area_intent_compiles_to_trusted_plan() -> None:
         plan_id=plan.plan_id,
     )
     assert loaded == plan
+    assert resolver.auth_contexts == [auth_context]
 
 
 async def test_current_area_intent_uses_server_side_hint() -> None:
