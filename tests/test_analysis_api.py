@@ -76,7 +76,7 @@ async def _create_run(client: httpx.AsyncClient, token: str) -> str:
                 "frontend_command_schema_versions": ["1.0"],
                 "supported_commands": ["panel.show_table"],
             },
-            "mode": "agent",
+            "mode": "analysis",
         },
     )
     assert run.status_code == 202
