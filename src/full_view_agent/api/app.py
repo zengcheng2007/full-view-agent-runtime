@@ -755,7 +755,9 @@ async def _publish_analysis_reauthentication(
             session_id=waiting.session_id,
             run_id=waiting.run_id,
             data=event_data,
-            idempotency_key=f"analysis:{run_id}:reauth:{event_type}",
+            idempotency_key=(
+                f"analysis:{run_id}:reauth:{pending.input_request_id}:{event_type}"
+            ),
         )
 
 

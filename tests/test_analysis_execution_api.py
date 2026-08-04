@@ -467,6 +467,15 @@ async def test_analysis_reauthentication_is_exposed_and_resumes_to_terminal() ->
         assert required["analysis_plan_id"] == plan["plan_id"]
         assert required["analysis_request_id"] == plan["request_id"]
 
+        replay = await client.post(
+            f"/agent-api/v1/runs/{run['run_id']}/analysis-plans/{plan['plan_id']}/executions",
+            headers={"geoToken": token},
+            json={"request_id": plan["request_id"]},
+        )
+        assert replay.status_code == 409
+        replay_events = await runtime.events.list_events(run_id=str(run["run_id"]))  # type: ignore[union-attr]
+        assert len(replay_events) == 3
+
         resumed = await client.post(
             f"/agent-api/v1/runs/{run['run_id']}/inputs",
             headers={
