@@ -14,6 +14,7 @@ def test_export_contracts_writes_openapi_and_versioned_json_schemas(tmp_path) ->
     assert openapi["info"]["version"] == "0.1.0"
     assert "/agent-api/v1/runs/{run_id}/events" in openapi["paths"]
     assert "/agent-api/v1/runs/{run_id}/steers" in openapi["paths"]
+    assert "/agent-api/v1/runs/{run_id}/analysis-plans" in openapi["paths"]
     assert "/agent-api/v1/sessions/{session_id}/messages" in openapi["paths"]
     security_scheme = openapi["components"]["securitySchemes"]["GeoToken"]
     assert security_scheme == {"type": "apiKey", "in": "header", "name": "geoToken"}
@@ -28,6 +29,10 @@ def test_export_contracts_writes_openapi_and_versioned_json_schemas(tmp_path) ->
         "/agent-api/v1/sessions/{session_id}/runs"
     ]["post"]["responses"]["202"]["content"]["application/json"]["schema"]
     assert run_schema["$ref"].endswith("/RunResponse")
+    analysis_plan_schema = openapi["paths"][
+        "/agent-api/v1/runs/{run_id}/analysis-plans"
+    ]["post"]["responses"]["201"]["content"]["application/json"]["schema"]
+    assert analysis_plan_schema["$ref"].endswith("/AnalysisPlanResponse")
     event_content = openapi["paths"]["/agent-api/v1/runs/{run_id}/events"][
         "get"
     ]["responses"]["200"]["content"]
