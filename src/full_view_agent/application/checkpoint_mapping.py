@@ -6,10 +6,16 @@ from typing import Literal, Protocol
 # must use its empty namespace; product isolation is carried by the deterministic
 # thread_id prefix and the dedicated PostgreSQL schema.
 CHECKPOINT_NAMESPACE = ""
+CheckpointGraphKind = Literal["agent", "analysis"]
 
 
-def build_checkpoint_thread_id(run_id: str) -> str:
-    return f"fva:run:{run_id}"
+def build_checkpoint_thread_id(
+    run_id: str, *, graph_kind: CheckpointGraphKind = "agent"
+) -> str:
+    if graph_kind == "agent":
+        # Preserve every existing production checkpoint identity.
+        return f"fva:run:{run_id}"
+    return f"fva:analysis:run:{run_id}"
 
 
 @dataclass(frozen=True)
@@ -17,6 +23,7 @@ class CheckpointThreadMapping:
     """Framework-neutral link between the product ledger and graph state."""
 
     run_id: str
+    graph_kind: CheckpointGraphKind
     session_id: str
     owner_user_id: str
     thread_id: str
@@ -35,6 +42,7 @@ class CheckpointMappingStore(Protocol):
         user_id: str,
         run_id: str,
         session_id: str,
+        graph_kind: CheckpointGraphKind = "agent",
     ) -> CheckpointThreadMapping: ...
 
     async def get_mapping(
@@ -42,6 +50,7 @@ class CheckpointMappingStore(Protocol):
         *,
         user_id: str,
         run_id: str,
+        graph_kind: CheckpointGraphKind = "agent",
     ) -> CheckpointThreadMapping: ...
 
     async def record_checkpoint(
@@ -51,4 +60,5 @@ class CheckpointMappingStore(Protocol):
         run_id: str,
         checkpoint_id: str,
         expected_version: int,
+        graph_kind: CheckpointGraphKind = "agent",
     ) -> CheckpointThreadMapping: ...

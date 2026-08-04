@@ -381,12 +381,13 @@ async def test_checkpoint_and_pending_writes_exclude_sensitive_runtime_state() -
             async for item in saver.alist(
                 {
                     "configurable": {
-                        "thread_id": "fva:run:analysis-run-01",
+                        "thread_id": "fva:analysis:run:analysis-run-01",
                         "checkpoint_ns": "",
                     }
                 }
             )
         ]
+    assert snapshots
     serialized = repr(snapshots)
     for secret in (
         "cred-01",

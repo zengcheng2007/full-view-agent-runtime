@@ -296,6 +296,7 @@ class LangGraphAnalysisOrchestrator:
             user_id=checkpoint_owner,
             run_id=analysis_run_id,
             session_id=session_id,
+            graph_kind="analysis",
         )
         config: RunnableConfig = {
             "configurable": {
@@ -397,6 +398,7 @@ class LangGraphAnalysisOrchestrator:
                         run_id=analysis_run_id,
                         checkpoint_id=str(checkpoint_id),
                         expected_version=mapping.version,
+                        graph_kind="analysis",
                     )
             current = await compiled.aget_state(config)
             if any(task.interrupts for task in current.tasks):
