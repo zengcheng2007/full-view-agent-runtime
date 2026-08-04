@@ -29,6 +29,11 @@ class AnalysisPlanningService:
         self._planner = planner
         self._repository = repository
 
+    @property
+    def planner(self) -> AnalysisPlanner:
+        """只读暴露规划所用 Planner，供编译/加载服务防止错接。"""
+        return self._planner
+
     async def create_plan(
         self,
         *,
