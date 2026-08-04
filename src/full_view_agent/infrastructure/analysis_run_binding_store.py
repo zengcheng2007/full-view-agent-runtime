@@ -14,6 +14,7 @@ from full_view_agent.application.analysis_run_binding import (
     AnalysisRunBinding,
     AnalysisRunBindingConflict,
     AnalysisRunBindingStatus,
+    validate_analysis_binding_transition,
 )
 from full_view_agent.application.errors import ResourceNotFound, RunStateConflict
 
@@ -91,12 +92,14 @@ class InMemoryAnalysisRunBindingStore:
                 raise ResourceNotFound("analysis run binding not found")
             _require_owner(existing, tenant_id=tenant_id, user_id=user_id)
             _require_fingerprint(existing, invocation_fingerprint)
+            if existing.status == status and existing.report_result_id == report_result_id:
+                return existing
+            validate_analysis_binding_transition(
+                existing,
+                status=status,
+                report_result_id=report_result_id,
+            )
             if existing.version != expected_version:
-                if (
-                    existing.status == status
-                    and existing.report_result_id == report_result_id
-                ):
-                    return existing
                 raise RunStateConflict("analysis run binding version changed")
             updated = AnalysisRunBinding.model_validate(
                 {
@@ -215,6 +218,19 @@ class PostgresAnalysisRunBindingStore:
     ) -> AnalysisRunBinding:
         await self.initialize()
         async with await psycopg.AsyncConnection.connect(self._dsn) as connection:
+            existing_row = await self._select_by_run(connection, run_id)
+            if existing_row is None:
+                raise ResourceNotFound("analysis run binding not found")
+            existing = _binding_from_row(existing_row)
+            _require_owner(existing, tenant_id=tenant_id, user_id=user_id)
+            _require_fingerprint(existing, invocation_fingerprint)
+            if existing.status == status and existing.report_result_id == report_result_id:
+                return existing
+            validate_analysis_binding_transition(
+                existing,
+                status=status,
+                report_result_id=report_result_id,
+            )
             row = await (
                 await connection.execute(
                     f'UPDATE "{self._schema}".analysis_run_bindings '
@@ -262,8 +278,13 @@ class PostgresAnalysisRunBindingStore:
             f"CREATE TABLE IF NOT EXISTS {prefix}analysis_run_bindings ("
             "tenant_id TEXT NOT NULL, user_id TEXT NOT NULL, session_id TEXT NOT NULL, "
             "run_id TEXT PRIMARY KEY, plan_id TEXT NOT NULL, request_id TEXT NOT NULL, "
-            "invocation_fingerprint TEXT NOT NULL, status TEXT NOT NULL, "
-            "report_result_id TEXT, version BIGINT NOT NULL CHECK (version > 0))",
+            "invocation_fingerprint TEXT NOT NULL, status TEXT NOT NULL CHECK (status IN "
+            "('pending', 'running', 'waiting_input', 'completed', 'partial', 'failed', "
+            "'cancelled')), report_result_id TEXT, version BIGINT NOT NULL CHECK (version > 0), "
+            "CHECK ((status IN ('completed', 'partial') AND report_result_id IS NOT NULL) "
+            "OR (status = 'failed') OR "
+            "(status IN ('pending', 'running', 'waiting_input', 'cancelled') "
+            "AND report_result_id IS NULL)))",
             f"CREATE INDEX IF NOT EXISTS idx_fva_analysis_bindings_owner "
             f"ON {prefix}analysis_run_bindings(tenant_id, user_id, session_id)",
         )

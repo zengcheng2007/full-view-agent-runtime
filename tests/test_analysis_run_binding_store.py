@@ -8,8 +8,10 @@ from pathlib import Path
 from uuid import uuid4
 
 import pytest
+from pydantic import ValidationError
 
 from full_view_agent.application.analysis_run_binding import (
+    AnalysisRunBinding,
     AnalysisRunBindingConflict,
 )
 from full_view_agent.application.errors import ResourceNotFound, RunStateConflict
@@ -63,6 +65,11 @@ def test_forward_migration_is_portable_and_contains_authority_columns() -> None:
     ):
         assert column in migration
     assert "JSONB" not in migration.upper()
+    assert "BEGIN;" in migration
+    assert "COMMIT;" in migration
+    assert "schema_version (version)" in migration
+    assert "SELECT 4" in migration
+    assert "CHECK" in migration
 
 
 @pytest.mark.asyncio
@@ -114,12 +121,21 @@ async def test_memory_update_is_versioned_and_idempotent() -> None:
     store = InMemoryAnalysisRunBindingStore()
     created = await store.ensure_binding(**_binding_args())
 
-    completed = await store.update_binding(
+    running = await store.update_binding(
         tenant_id="tenant-a",
         user_id="user-a",
         run_id="run-a",
         invocation_fingerprint=FINGERPRINT_A,
         expected_version=created.version,
+        status="running",
+        report_result_id=None,
+    )
+    completed = await store.update_binding(
+        tenant_id="tenant-a",
+        user_id="user-a",
+        run_id="run-a",
+        invocation_fingerprint=FINGERPRINT_A,
+        expected_version=running.version,
         status="completed",
         report_result_id="result-report-a",
     )
@@ -128,13 +144,13 @@ async def test_memory_update_is_versioned_and_idempotent() -> None:
         user_id="user-a",
         run_id="run-a",
         invocation_fingerprint=FINGERPRINT_A,
-        expected_version=created.version,
+        expected_version=running.version,
         status="completed",
         report_result_id="result-report-a",
     )
 
     assert completed == replayed
-    assert completed.version == 2
+    assert completed.version == 3
     assert completed.report_result_id == "result-report-a"
     with pytest.raises(RunStateConflict):
         await store.update_binding(
@@ -179,6 +195,132 @@ async def test_memory_get_rejects_wrong_invocation_fingerprint() -> None:
         )
 
     assert exc_info.value.code == "BINDING_FINGERPRINT_MISMATCH"
+
+
+@pytest.mark.parametrize(
+    ("status", "report_result_id"),
+    [
+        ("completed", None),
+        ("partial", None),
+        ("pending", "result-report-a"),
+        ("running", "result-report-a"),
+        ("waiting_input", "result-report-a"),
+        ("cancelled", "result-report-a"),
+    ],
+)
+def test_binding_contract_rejects_inconsistent_report_reference(
+    status: str, report_result_id: str | None
+) -> None:
+    with pytest.raises(ValidationError):
+        AnalysisRunBinding.model_validate(
+            {
+                **_binding_args(),
+                "status": status,
+                "report_result_id": report_result_id,
+            }
+        )
+
+
+@pytest.mark.asyncio
+async def test_memory_rejects_terminal_revival_and_status_skips() -> None:
+    store = InMemoryAnalysisRunBindingStore()
+    pending = await store.ensure_binding(**_binding_args())
+    with pytest.raises(RunStateConflict):
+        await store.update_binding(
+            tenant_id="tenant-a",
+            user_id="user-a",
+            run_id="run-a",
+            invocation_fingerprint=FINGERPRINT_A,
+            expected_version=pending.version,
+            status="completed",
+            report_result_id="result-report-a",
+        )
+    running = await store.update_binding(
+        tenant_id="tenant-a",
+        user_id="user-a",
+        run_id="run-a",
+        invocation_fingerprint=FINGERPRINT_A,
+        expected_version=pending.version,
+        status="running",
+        report_result_id=None,
+    )
+    completed = await store.update_binding(
+        tenant_id="tenant-a",
+        user_id="user-a",
+        run_id="run-a",
+        invocation_fingerprint=FINGERPRINT_A,
+        expected_version=running.version,
+        status="completed",
+        report_result_id="result-report-a",
+    )
+    assert await store.update_binding(
+        tenant_id="tenant-a",
+        user_id="user-a",
+        run_id="run-a",
+        invocation_fingerprint=FINGERPRINT_A,
+        expected_version=running.version,
+        status="completed",
+        report_result_id="result-report-a",
+    ) == completed
+    with pytest.raises(RunStateConflict):
+        await store.update_binding(
+            tenant_id="tenant-a",
+            user_id="user-a",
+            run_id="run-a",
+            invocation_fingerprint=FINGERPRINT_A,
+            expected_version=completed.version,
+            status="running",
+            report_result_id=None,
+        )
+
+
+@pytest.mark.asyncio
+async def test_postgres_rejects_terminal_revival_and_invalid_report_pair() -> None:
+    schema = f"fva_binding_{uuid4().hex[:12]}"
+    store = PostgresAnalysisRunBindingStore(dsn=_postgres_test_dsn(), schema=schema)
+    await store.initialize()
+    try:
+        pending = await store.ensure_binding(**_binding_args())
+        with pytest.raises(RunStateConflict):
+            await store.update_binding(
+                tenant_id="tenant-a",
+                user_id="user-a",
+                run_id="run-a",
+                invocation_fingerprint=FINGERPRINT_A,
+                expected_version=pending.version,
+                status="completed",
+                report_result_id=None,
+            )
+        running = await store.update_binding(
+            tenant_id="tenant-a",
+            user_id="user-a",
+            run_id="run-a",
+            invocation_fingerprint=FINGERPRINT_A,
+            expected_version=pending.version,
+            status="running",
+            report_result_id=None,
+        )
+        completed = await store.update_binding(
+            tenant_id="tenant-a",
+            user_id="user-a",
+            run_id="run-a",
+            invocation_fingerprint=FINGERPRINT_A,
+            expected_version=running.version,
+            status="partial",
+            report_result_id="result-report-a",
+        )
+        with pytest.raises(RunStateConflict):
+            await store.update_binding(
+                tenant_id="tenant-a",
+                user_id="user-a",
+                run_id="run-a",
+                invocation_fingerprint=FINGERPRINT_A,
+                expected_version=completed.version,
+                status="cancelled",
+                report_result_id=None,
+            )
+    finally:
+        await store.drop_schema()
 
 
 @pytest.mark.asyncio
@@ -226,12 +368,21 @@ async def test_postgres_versioned_update_survives_restart() -> None:
     await store.initialize()
     try:
         created = await store.ensure_binding(**_binding_args())
-        updated = await store.update_binding(
+        running = await store.update_binding(
             tenant_id="tenant-a",
             user_id="user-a",
             run_id="run-a",
             invocation_fingerprint=FINGERPRINT_A,
             expected_version=created.version,
+            status="running",
+            report_result_id=None,
+        )
+        updated = await store.update_binding(
+            tenant_id="tenant-a",
+            user_id="user-a",
+            run_id="run-a",
+            invocation_fingerprint=FINGERPRINT_A,
+            expected_version=running.version,
             status="partial",
             report_result_id="result-report-a",
         )

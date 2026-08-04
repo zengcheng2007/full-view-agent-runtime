@@ -1,3 +1,9 @@
+-- Migration V004: durable authority binding for resumable Analysis Graph runs.
+
+BEGIN;
+
+CREATE SCHEMA IF NOT EXISTS full_view_agent;
+
 CREATE TABLE IF NOT EXISTS full_view_agent.analysis_run_bindings (
     tenant_id TEXT NOT NULL,
     user_id TEXT NOT NULL,
@@ -6,10 +12,31 @@ CREATE TABLE IF NOT EXISTS full_view_agent.analysis_run_bindings (
     plan_id TEXT NOT NULL,
     request_id TEXT NOT NULL,
     invocation_fingerprint TEXT NOT NULL,
-    status TEXT NOT NULL,
+    status TEXT NOT NULL CHECK (
+        status IN (
+            'pending', 'running', 'waiting_input', 'completed',
+            'partial', 'failed', 'cancelled'
+        )
+    ),
     report_result_id TEXT,
-    version BIGINT NOT NULL CHECK (version > 0)
+    version BIGINT NOT NULL CHECK (version > 0),
+    CHECK (
+        (status IN ('completed', 'partial') AND report_result_id IS NOT NULL)
+        OR status = 'failed'
+        OR (
+            status IN ('pending', 'running', 'waiting_input', 'cancelled')
+            AND report_result_id IS NULL
+        )
+    )
 );
 
 CREATE INDEX IF NOT EXISTS idx_fva_analysis_bindings_owner
     ON full_view_agent.analysis_run_bindings(tenant_id, user_id, session_id);
+
+INSERT INTO full_view_agent.schema_version (version)
+SELECT 4
+WHERE NOT EXISTS (
+    SELECT 1 FROM full_view_agent.schema_version WHERE version = 4
+);
+
+COMMIT;
