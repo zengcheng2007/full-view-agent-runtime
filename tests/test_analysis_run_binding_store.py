@@ -205,6 +205,7 @@ async def test_memory_get_rejects_wrong_invocation_fingerprint() -> None:
         ("pending", "result-report-a"),
         ("running", "result-report-a"),
         ("waiting_input", "result-report-a"),
+        ("failed", "result-report-a"),
         ("cancelled", "result-report-a"),
     ],
 )

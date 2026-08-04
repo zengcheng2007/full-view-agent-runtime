@@ -38,7 +38,7 @@ class AnalysisRunBinding(ContractModel):
     def _validate_outcome_reference(self) -> "AnalysisRunBinding":
         if self.status in {"completed", "partial"} and self.report_result_id is None:
             raise ValueError("completed or partial analysis bindings require a report")
-        if self.status in {"pending", "running", "waiting_input", "cancelled"} and (
+        if self.status in {"pending", "running", "waiting_input", "failed", "cancelled"} and (
             self.report_result_id is not None
         ):
             raise ValueError("non-reporting analysis binding status cannot carry a report")

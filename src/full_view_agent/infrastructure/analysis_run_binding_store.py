@@ -282,8 +282,7 @@ class PostgresAnalysisRunBindingStore:
             "('pending', 'running', 'waiting_input', 'completed', 'partial', 'failed', "
             "'cancelled')), report_result_id TEXT, version BIGINT NOT NULL CHECK (version > 0), "
             "CHECK ((status IN ('completed', 'partial') AND report_result_id IS NOT NULL) "
-            "OR (status = 'failed') OR "
-            "(status IN ('pending', 'running', 'waiting_input', 'cancelled') "
+            "OR (status IN ('pending', 'running', 'waiting_input', 'failed', 'cancelled') "
             "AND report_result_id IS NULL)))",
             f"CREATE INDEX IF NOT EXISTS idx_fva_analysis_bindings_owner "
             f"ON {prefix}analysis_run_bindings(tenant_id, user_id, session_id)",

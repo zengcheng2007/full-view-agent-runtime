@@ -22,9 +22,8 @@ CREATE TABLE IF NOT EXISTS full_view_agent.analysis_run_bindings (
     version BIGINT NOT NULL CHECK (version > 0),
     CHECK (
         (status IN ('completed', 'partial') AND report_result_id IS NOT NULL)
-        OR status = 'failed'
         OR (
-            status IN ('pending', 'running', 'waiting_input', 'cancelled')
+            status IN ('pending', 'running', 'waiting_input', 'failed', 'cancelled')
             AND report_result_id IS NULL
         )
     )
