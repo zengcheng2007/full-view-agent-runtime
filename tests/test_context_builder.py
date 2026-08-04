@@ -273,6 +273,7 @@ async def test_context_builder_stops_advertising_a_successful_tool() -> None:
     )
 
     assert request.tools == ()
+    assert "query_population_metrics：" not in request.messages[0].content
     assert "Tool 执行成功" in request.messages[-1].content
     assert '"person_count": 128' in request.messages[-1].content
 
@@ -441,6 +442,68 @@ async def test_context_builder_exposes_resolved_area_code_in_tool_observation() 
             "parent_area_code": "330106",
         }
     ]
+
+
+@pytest.mark.asyncio
+async def test_context_builder_keeps_unresolved_area_tool_for_refinement() -> None:
+    store = InMemoryAgentStore()
+    service = SessionRunService(store)
+    session = await service.create_session(user_id="user-area-retry", title="area")
+    run = await service.create_run(
+        user_id="user-area-retry",
+        session_id=session.session_id,
+        request=run_request(),
+    )
+    base_context = population_auth_context()
+    auth_context = base_context.model_copy(
+        update={
+            "session_id": session.session_id,
+            "run_id": run.run_id,
+            "entitlements": [*base_context.entitlements, "governance.area.read"],
+            "data_scopes": base_context.data_scopes.model_copy(
+                update={
+                    "datasets": [
+                        *base_context.data_scopes.datasets,
+                        "administrative_area",
+                    ]
+                }
+            ),
+        }
+    )
+    state = HarnessState(
+        tool_results=(
+            ToolResult(
+                tool_call_id="call-area-empty",
+                tool_id="governance.resolve_area",
+                tool_version="1.0.0",
+                status="success",
+                summary="resolved",
+                data_result=AreaCandidatesResult(
+                    result_id="res-area-empty",
+                    data_schema_ref="schema://data/area-candidates/1.0.0",
+                    result_fingerprint="sha256:area-empty",
+                    data=AreaCandidatesData(
+                        resolved_area_code=None,
+                        ambiguous=False,
+                        candidates=[],
+                    ),
+                    candidate_count=0,
+                ),
+            ),
+        )
+    )
+
+    request = await AgentContextBuilder(
+        store=store,
+        registry=ToolRegistry.default(),
+    ).build(
+        user_id="user-area-retry",
+        auth_context=auth_context,
+        state=state,
+    )
+
+    assert "governance.resolve_area" in {tool.tool_id for tool in request.tools}
+    assert "resolve_area：" in request.messages[0].content
 
 
 @pytest.mark.asyncio

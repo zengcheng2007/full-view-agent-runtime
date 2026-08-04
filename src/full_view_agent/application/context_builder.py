@@ -90,12 +90,18 @@ class AgentContextBuilder:
             if self._semantic_presenter is not None
             else frozenset()
         )
+        terminal_tool_ids = {
+            result.tool_id
+            for result in state.tool_results
+            if _is_terminal_tool_result(result)
+        }
         # 提示词能力清单与模型可选 Tool 共用同一授权过滤条件，
         # 保证提示词不宣称未注册或未授权的 Tool。
         authorized_tool_ids = tuple(
             tool_id
             for tool_id in self._registry.list_tool_ids()
             if tool_id not in shadowed_tool_ids
+            if tool_id not in terminal_tool_ids
             if self._is_tool_authorized(tool_id, entitlements, datasets)
         )
         messages = [
@@ -230,15 +236,6 @@ class AgentContextBuilder:
 
         entitlements = set(auth_context.entitlements)
         datasets = set(auth_context.data_scopes.datasets)
-        terminal_tool_ids = {
-            result.tool_id
-            for result in state.tool_results
-            if result.status in {"success", "partial", "denied"}
-            or (
-                result.status == "failed"
-                and bool(NON_RETRYABLE_TOOL_WARNINGS.intersection(result.warnings))
-            )
-        }
         tools: list[ModelToolDefinition] = []
         for tool_id in self._registry.list_tool_ids():
             if tool_id in shadowed_tool_ids:
@@ -333,6 +330,24 @@ def _build_observation(result: object) -> dict[str, object]:
             ]
         obs["data_result"] = data_ref
     return obs
+
+
+def _is_terminal_tool_result(result: object) -> bool:
+    status = getattr(result, "status", None)
+    tool_id = getattr(result, "tool_id", None)
+    if tool_id == "governance.resolve_area" and status in {"success", "partial"}:
+        data_result = getattr(result, "data_result", None)
+        candidate_count = getattr(data_result, "candidate_count", None)
+        area_data = getattr(data_result, "data", None)
+        resolved_area_code = getattr(area_data, "resolved_area_code", None)
+        if candidate_count == 0 and resolved_area_code is None:
+            return False
+    if status in {"success", "partial", "denied"}:
+        return True
+    warnings = getattr(result, "warnings", ())
+    return status == "failed" and bool(
+        NON_RETRYABLE_TOOL_WARNINGS.intersection(warnings)
+    )
 
 
 def _build_inherited_result_observation(result: object) -> dict[str, object]:
