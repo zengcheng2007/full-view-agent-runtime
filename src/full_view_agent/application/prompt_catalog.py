@@ -1,7 +1,7 @@
 import json
 from collections.abc import Iterable
 
-FULL_VIEW_SYSTEM_PROMPT_VERSION = "full-view-governance-readonly-v13"
+FULL_VIEW_SYSTEM_PROMPT_VERSION = "full-view-governance-readonly-v14"
 
 # 能力说明由注册表实际接线驱动：只有当前注册且授权可见的 Tool
 # 才会出现在系统提示中，未接线/未验证的能力不得宣称可用。
@@ -83,6 +83,9 @@ def build_full_view_system_prompt(
         " 时，表示运行时已完成内部重试，不得重试相同 Tool；应说明失败并结束本次任务。"
         "区划解析 candidate_count=0 表示没有找到可查询的授权区划，不代表任何业务指标"
         "为零；不得把未查询、查询失败或无区划候选表述成数量为 0。"
+        "调用 resolve_area 时优先只传用户原始区划名称；除非已有明确父级信息且存在歧义，"
+        "不要添加 parent_area_code。对同一区划最多进行一次去除行政后缀的规范化重试，"
+        "不得连续试探父级编码或多个近义写法来消耗 Tool 预算。"
         "无法完成时应明确说明缺少的权限、参数或能力。"
         "授权上下文："
         + json.dumps(authorization, ensure_ascii=False, sort_keys=True)

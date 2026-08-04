@@ -554,7 +554,7 @@ class PopulationMetricRow(ContractModel):
     area_name: str = Field(title="区域")
     person_count: int = Field(
         ge=0,
-        title="人口数量",
+        title="独居老人人数",
         json_schema_extra={"unit": "人"},
     )
 

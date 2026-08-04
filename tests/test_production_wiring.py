@@ -241,7 +241,7 @@ def test_runtime_rejects_http_adapter_flag_mismatch() -> None:
 
 
 def test_prompt_only_lists_registered_and_authorized_capabilities() -> None:
-    assert FULL_VIEW_SYSTEM_PROMPT_VERSION == "full-view-governance-readonly-v13"
+    assert FULL_VIEW_SYSTEM_PROMPT_VERSION == "full-view-governance-readonly-v14"
 
     population_only = build_full_view_system_prompt(
         {}, tool_ids=("governance.query_population_metrics",)

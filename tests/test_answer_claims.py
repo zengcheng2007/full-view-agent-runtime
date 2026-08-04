@@ -195,7 +195,7 @@ async def test_population_claim_renders_contract_label_and_unit() -> None:
     )
 
     assert assessment.status == "accept"
-    assert assessment.safe_summary == "西湖区的人口数量为1200人。"
+    assert assessment.safe_summary == "西湖区的独居老人人数为1200人。"
 
 
 @pytest.mark.asyncio

@@ -92,7 +92,7 @@ async def test_context_builder_uses_messages_and_only_authorized_tools() -> None
     assert [tool.tool_id for tool in request.tools] == [
         "governance.query_population_metrics"
     ]
-    assert request.prompt_version == "full-view-governance-readonly-v13"
+    assert request.prompt_version == "full-view-governance-readonly-v14"
     assert "full_view.finish_answer" in (request.messages[0].content or "")
     assert "每条事实必须绑定 result_id" in (request.messages[0].content or "")
     assert "需要业务数据时必须调用" in request.messages[0].content

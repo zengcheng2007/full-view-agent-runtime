@@ -743,7 +743,7 @@ async def test_structured_finish_is_identical_across_orchestrators(
     messages = await store.list_messages(user_id="u", session_id=run.session_id)
     answer = next(message for message in messages if message.role == "assistant")
     assert answer.content[0].type == "text"
-    assert answer.content[0].text == "330106001的人口数量为128人。"  # type: ignore[union-attr]
+    assert answer.content[0].text == "330106001的独居老人人数为128人。"  # type: ignore[union-attr]
 
 
 # ---------------------------------------------------------------------------
