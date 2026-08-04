@@ -74,6 +74,15 @@ class ToolObservationService:
         data_result = tool_result.data_result
         if data_result is None:
             raise RuntimeError("successful tool produced no data result")
+        # Adapter-generated result ids are intentionally not trusted as the
+        # observation identity: a crash may re-execute the same tool call and
+        # produce a fresh random id.  Bind the durable result to the run-scoped
+        # tool call so replay converges before any row or event is written.
+        result_id = canonical_fingerprint(
+            domain="tool-observation-result:1.0",
+            value={"run_id": run.run_id, "tool_call_id": tool_result.tool_call_id},
+        )
+        data_result = data_result.model_copy(update={"result_id": result_id})
         evidence_id = canonical_fingerprint(
             domain="tool-observation-evidence:1.0",
             value={

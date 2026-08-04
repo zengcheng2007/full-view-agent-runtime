@@ -72,7 +72,7 @@ def _action() -> ToolAction:
     )
 
 
-def _tool_result() -> ToolResult:
+def _tool_result(*, result_id: str = "res-observation-01") -> ToolResult:
     return ToolResult.model_validate(
         {
             "tool_call_id": "call-observation-01",
@@ -81,7 +81,7 @@ def _tool_result() -> ToolResult:
             "status": "success",
             "summary": "查询完成",
             "data_result": {
-                "result_id": "res-observation-01",
+                "result_id": result_id,
                 "kind": "table",
                 "data_schema_ref": "schema://data/population-metric-table/1.0.0",
                 "result_fingerprint": "sha256:observation",
@@ -182,7 +182,7 @@ async def test_cancelled_run_rejects_a_late_tool_observation() -> None:
             tool_result=_tool_result(),
         )
 
-    assert "res-observation-01" not in store.results
+    assert not store.results
     assert order == ["save_tool_observation"]
     assert await events.list_events(run_id=run.run_id) == []
 
@@ -208,7 +208,7 @@ async def test_cancellation_before_atomic_observation_leaves_no_partial_rows() -
             tool_result=_tool_result(),
         )
 
-    assert "res-observation-01" not in store.results
+    assert not store.results
     assert store.evidence == {}
     assert order == ["save_tool_observation"]
     assert await events.list_events(run_id=run.run_id) == []
@@ -242,6 +242,41 @@ async def test_observation_replay_is_idempotent_for_data_events_and_commands() -
 
 
 @pytest.mark.asyncio
+async def test_observation_replay_with_fresh_adapter_result_id_converges() -> None:
+    store = InMemoryAgentStore()
+    events = InMemoryEventBroker()
+    _service, run = await _running_run(store)
+    observations = ToolObservationService(
+        store=store,
+        events=events,
+        registry=ToolRegistry.default(),
+        evidence_source_system="test-source",
+    )
+
+    first = await observations.persist(
+        user_id="user-01",
+        run=run,
+        action=_action(),
+        tool_result=_tool_result(result_id="adapter-result-first"),
+    )
+    replayed = await observations.persist(
+        user_id="user-01",
+        run=run,
+        action=_action(),
+        tool_result=_tool_result(result_id="adapter-result-retry"),
+    )
+
+    assert replayed == first
+    assert first.data_result.result_id not in {
+        "adapter-result-first",
+        "adapter-result-retry",
+    }
+    assert len(store.results) == 1
+    assert len(store.evidence) == 1
+    assert len(await events.list_events(run_id=run.run_id)) == 3
+
+
+@pytest.mark.asyncio
 async def test_postgres_observation_replay_is_atomic_and_idempotent() -> None:
     dsn = os.getenv("FULL_VIEW_TEST_DATABASE_URL")
     if not dsn:
@@ -263,7 +298,10 @@ async def test_postgres_observation_replay_is_atomic_and_idempotent() -> None:
             user_id="user-01", run=run, action=_action(), tool_result=_tool_result()
         )
         replayed = await observations.persist(
-            user_id="user-01", run=run, action=_action(), tool_result=_tool_result()
+            user_id="user-01",
+            run=run,
+            action=_action(),
+            tool_result=_tool_result(result_id="adapter-result-after-restart"),
         )
 
         assert replayed == first
