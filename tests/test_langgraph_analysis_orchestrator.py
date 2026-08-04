@@ -11,7 +11,11 @@ from full_view_agent.application.analysis_graph import (
     AnalysisRunOutcome,
     AnalysisStepCheckpoint,
 )
-from full_view_agent.application.errors import ReauthenticationRequired, RunStateConflict
+from full_view_agent.application.errors import (
+    ReauthenticationRequired,
+    ResourceNotFound,
+    RunStateConflict,
+)
 from full_view_agent.domain.models import AuthContext
 from full_view_agent.infrastructure.checkpoint_mapping_store import (
     InMemoryCheckpointMappingStore,
@@ -28,26 +32,32 @@ class _Lifecycle:
     def __init__(self) -> None:
         self.wait_calls = 0
         self.waiting = False
+        self.consumed = False
         self.input_request_id = "inreq-analysis"
         self.run_state_version = 2
 
     async def wait_for_reauthentication(self, **_kwargs):
-        if self.waiting:
-            raise RunStateConflict("already waiting")
-        self.wait_calls += 1
-        self.waiting = True
+        if not self.waiting:
+            self.wait_calls += 1
+            self.waiting = True
         return object(), object()
 
     async def resume_from_input(
         self, *, input_request_id: str, run_state_version: int, **_kwargs
     ):
+        if input_request_id != self.input_request_id or (
+            run_state_version != self.run_state_version
+        ):
+            raise RunStateConflict("stale analysis resume input")
+        if self.consumed:
+            return object()
         if (
             not self.waiting
-            or input_request_id != self.input_request_id
             or run_state_version != self.run_state_version
         ):
             raise RunStateConflict("stale analysis resume input")
         self.waiting = False
+        self.consumed = True
         return object()
 
 
@@ -189,16 +199,21 @@ async def _run(
     )
 
 
-async def _resume(orchestrator: LangGraphAnalysisOrchestrator):
+async def _resume(
+    orchestrator: LangGraphAnalysisOrchestrator,
+    *,
+    plan_id: str = "plan-01",
+    auth: AuthContext | None = None,
+):
     return await orchestrator.resume(
         user_id="user-01",
         session_id="session-01",
         analysis_run_id="analysis-run-01",
-        plan_id="plan-01",
+        plan_id=plan_id,
         request_id="request-01",
         input_request_id="inreq-analysis",
         run_state_version=2,
-        auth_context=_current_auth(),
+        auth_context=auth or _current_auth(),
     )
 
 
@@ -240,6 +255,42 @@ async def test_reauthentication_requires_explicit_ledger_gated_resume() -> None:
     assert execution.upstream_calls == Counter(
         {"population": 1, "housing": 1, "event": 1}
     )
+
+
+@pytest.mark.asyncio
+async def test_resume_preflight_does_not_consume_input_for_changed_plan() -> None:
+    lifecycle = _Lifecycle()
+    orchestrator = _orchestrator(
+        _StepwiseExecution(interrupt_once=True), lifecycle=lifecycle
+    )
+    with pytest.raises(ReauthenticationRequired):
+        await _run(orchestrator)
+
+    with pytest.raises(RunStateConflict, match="invocation identity changed"):
+        await _resume(orchestrator, plan_id="plan-other")
+
+    assert lifecycle.waiting is True
+    assert lifecycle.consumed is False
+
+
+@pytest.mark.asyncio
+async def test_checkpoint_replay_rejects_same_user_from_another_tenant() -> None:
+    orchestrator = _orchestrator(_StepwiseExecution())
+    await _run(orchestrator)
+    other_principal = _current_auth().principal.model_copy(
+        update={"tenant_id": "tenant-other"}
+    )
+    other_auth = _current_auth().model_copy(update={"principal": other_principal})
+
+    with pytest.raises(ResourceNotFound):
+        await orchestrator.run(
+            user_id="user-01",
+            session_id="session-01",
+            analysis_run_id="analysis-run-01",
+            plan_id="plan-01",
+            request_id="request-01",
+            auth_context=other_auth,
+        )
 
 
 @pytest.mark.asyncio

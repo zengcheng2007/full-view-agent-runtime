@@ -532,9 +532,27 @@ class PostgresAgentPersistence:
     ) -> tuple[AgentRun, PendingInputRequest]:
         async with await self._owned_run_connection(user_id, run_id) as owned:
             connection, run, session = owned
+            row = await (
+                await connection.execute(
+                    f'SELECT data_json FROM "{self._schema}".input_requests '
+                    "WHERE run_id = %s FOR UPDATE",
+                    (run_id,),
+                )
+            ).fetchone()
+            existing = PendingInputRequest.model_validate_json(row[0]) if row else None
+            now = datetime.now(UTC)
+            if (
+                run.status == "waiting_input"
+                and run.waiting_for == "reauth"
+                and session.active_run_id == run_id
+                and existing is not None
+                and existing.closed_at is None
+                and existing.expires_at > now
+                and existing.run_state_version == run.state_version
+            ):
+                return run, existing
             if run.status != "running" or session.active_run_id != run_id:
                 raise RunStateConflict("only an active running run can wait for reauthentication")
-            now = datetime.now(UTC)
             waiting = run.model_copy(
                 update={
                     "status": "waiting_input",
@@ -579,6 +597,16 @@ class PostgresAgentPersistence:
             ).fetchone()
             pending = PendingInputRequest.model_validate_json(row[0]) if row else None
             now = datetime.now(UTC)
+            if (
+                run.status == "running"
+                and run.waiting_for is None
+                and pending is not None
+                and pending.closed_at is not None
+                and pending.input_request_id == input_request_id
+                and pending.run_state_version == run_state_version
+                and run.state_version == run_state_version + 1
+            ):
+                return run
             if (
                 run.status != "waiting_input"
                 or run.waiting_for != "reauth"

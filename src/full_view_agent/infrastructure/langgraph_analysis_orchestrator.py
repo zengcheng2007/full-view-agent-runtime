@@ -106,7 +106,11 @@ class LangGraphAnalysisOrchestrator:
             analysis_run_id=analysis_run_id,
             auth_context=auth_context,
         )
-        async with self._lease_manager.lease(analysis_run_id=analysis_run_id):
+        lease_id = _tenant_run_key(
+            tenant_id=auth_context.principal.tenant_id,
+            analysis_run_id=analysis_run_id,
+        )
+        async with self._lease_manager.lease(analysis_run_id=lease_id):
             return await self._invoke(
                 user_id=user_id,
                 session_id=session_id,
@@ -114,7 +118,7 @@ class LangGraphAnalysisOrchestrator:
                 plan_id=plan_id,
                 request_id=request_id,
                 auth_context=auth_context,
-                resume=False,
+                resume_input=None,
             )
 
     async def resume(
@@ -137,13 +141,11 @@ class LangGraphAnalysisOrchestrator:
             analysis_run_id=analysis_run_id,
             auth_context=auth_context,
         )
-        async with self._lease_manager.lease(analysis_run_id=analysis_run_id):
-            await self._lifecycle.resume_from_input(
-                user_id=user_id,
-                run_id=analysis_run_id,
-                input_request_id=input_request_id,
-                run_state_version=run_state_version,
-            )
+        lease_id = _tenant_run_key(
+            tenant_id=auth_context.principal.tenant_id,
+            analysis_run_id=analysis_run_id,
+        )
+        async with self._lease_manager.lease(analysis_run_id=lease_id):
             return await self._invoke(
                 user_id=user_id,
                 session_id=session_id,
@@ -151,7 +153,7 @@ class LangGraphAnalysisOrchestrator:
                 plan_id=plan_id,
                 request_id=request_id,
                 auth_context=auth_context,
-                resume=True,
+                resume_input=(input_request_id, run_state_version),
             )
 
     async def _invoke(
@@ -163,9 +165,10 @@ class LangGraphAnalysisOrchestrator:
         plan_id: str,
         request_id: str,
         auth_context: AuthContext,
-        resume: bool,
+        resume_input: tuple[str, int] | None,
     ) -> AnalysisRunOutcome:
         invocation_fingerprint = _invocation_fingerprint(
+            tenant_id=auth_context.principal.tenant_id,
             user_id=user_id,
             session_id=session_id,
             analysis_run_id=analysis_run_id,
@@ -279,8 +282,12 @@ class LangGraphAnalysisOrchestrator:
         graph.add_edge("execute_step", "reduce_wave")
         graph.add_edge("finalize", END)
 
-        mapping = await self._checkpoint_mappings.ensure_mapping(
+        checkpoint_owner = _checkpoint_owner(
+            tenant_id=auth_context.principal.tenant_id,
             user_id=user_id,
+        )
+        mapping = await self._checkpoint_mappings.ensure_mapping(
+            user_id=checkpoint_owner,
             run_id=analysis_run_id,
             session_id=session_id,
         )
@@ -300,15 +307,32 @@ class LangGraphAnalysisOrchestrator:
             pending_interrupt = bool(
                 snapshot is not None and any(task.interrupts for task in snapshot.tasks)
             )
-            if pending_interrupt and not resume:
+            if pending_interrupt and resume_input is None:
+                # Idempotent ledger transition repairs a crash after the graph
+                # interrupt was checkpointed but before the input request was
+                # durably exposed.
+                await self._lifecycle.wait_for_reauthentication(
+                    user_id=user_id,
+                    run_id=analysis_run_id,
+                )
                 raise ReauthenticationRequired(
                     "analysis graph is waiting for controlled reauthentication input"
                 )
-            if resume and not pending_interrupt:
+            if resume_input is not None and not pending_interrupt:
                 raise RunStateConflict("analysis run is not waiting for reauthentication")
 
             graph_input: _AnalysisState | Command[Any] | None
-            if resume:
+            if resume_input is not None:
+                # Identity/pending preflight happens before consuming the
+                # ledger input. The ledger operation is itself idempotent, so
+                # a crash before Command(resume) can safely retry.
+                input_request_id, run_state_version = resume_input
+                await self._lifecycle.resume_from_input(
+                    user_id=user_id,
+                    run_id=analysis_run_id,
+                    input_request_id=input_request_id,
+                    run_state_version=run_state_version,
+                )
                 graph_input = Command(resume={"type": "reauthenticated"})
             elif checkpoint is not None:
                 graph_input = None
@@ -341,7 +365,7 @@ class LangGraphAnalysisOrchestrator:
                     if checkpoint_id is None:
                         raise RuntimeError("analysis checkpoint is missing checkpoint_id")
                     await self._checkpoint_mappings.record_checkpoint(
-                        user_id=user_id,
+                        user_id=checkpoint_owner,
                         run_id=analysis_run_id,
                         checkpoint_id=str(checkpoint_id),
                         expected_version=mapping.version,
@@ -383,16 +407,32 @@ def _invocation_fingerprint(
     analysis_run_id: str,
     plan_id: str,
     request_id: str,
+    tenant_id: str,
 ) -> str:
     return canonical_fingerprint(
         domain="analysis-graph-invocation:1.0",
         value={
+            "tenant_id": tenant_id,
             "user_id": user_id,
             "session_id": session_id,
             "analysis_run_id": analysis_run_id,
             "plan_id": plan_id,
             "request_id": request_id,
         },
+    )
+
+
+def _checkpoint_owner(*, tenant_id: str, user_id: str) -> str:
+    return canonical_fingerprint(
+        domain="analysis-checkpoint-owner:1.0",
+        value={"tenant_id": tenant_id, "user_id": user_id},
+    )
+
+
+def _tenant_run_key(*, tenant_id: str, analysis_run_id: str) -> str:
+    return canonical_fingerprint(
+        domain="analysis-run-lease:1.0",
+        value={"tenant_id": tenant_id, "analysis_run_id": analysis_run_id},
     )
 
 

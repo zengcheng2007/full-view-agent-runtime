@@ -365,9 +365,20 @@ class InMemoryAgentStore:
             session = self.sessions.get(run.session_id)
             if session is None or session.owner_user_id != user_id:
                 raise ResourceNotFound("run not found")
+            existing = self.input_requests.get(run_id)
+            now = datetime.now(UTC)
+            if (
+                run.status == "waiting_input"
+                and run.waiting_for == "reauth"
+                and session.active_run_id == run_id
+                and existing is not None
+                and existing.closed_at is None
+                and existing.expires_at > now
+                and existing.run_state_version == run.state_version
+            ):
+                return run, existing
             if run.status != "running" or session.active_run_id != run_id:
                 raise RunStateConflict("only an active running run can wait for reauthentication")
-            now = datetime.now(UTC)
             waiting = run.model_copy(
                 update={
                     "status": "waiting_input",
@@ -405,6 +416,16 @@ class InMemoryAgentStore:
                 raise ResourceNotFound("run not found")
             pending = self.input_requests.get(run_id)
             now = datetime.now(UTC)
+            if (
+                run.status == "running"
+                and run.waiting_for is None
+                and pending is not None
+                and pending.closed_at is not None
+                and pending.input_request_id == input_request_id
+                and pending.run_state_version == run_state_version
+                and run.state_version == run_state_version + 1
+            ):
+                return run
             if (
                 run.status != "waiting_input"
                 or run.waiting_for != "reauth"
