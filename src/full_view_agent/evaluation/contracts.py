@@ -76,6 +76,7 @@ class EvalExpected(ContractModel):
     max_evidence_count: int | None = Field(default=None, ge=0)
     required_event_types: list[str] = Field(default_factory=list)
     required_answer_substrings: list[str] = Field(default_factory=list)
+    required_answer_any_substrings: list[str] = Field(default_factory=list)
     forbidden_answer_substrings: list[str] = Field(default_factory=list)
     grounding_reason_code: Literal[
         "grounded",

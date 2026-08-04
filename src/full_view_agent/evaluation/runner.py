@@ -514,6 +514,11 @@ def _grade(
         for substring in expected.required_answer_substrings
         if substring in final_answer
     ]
+    required_any_matches = [
+        substring
+        for substring in expected.required_answer_any_substrings
+        if substring in final_answer
+    ]
     missing_required_tools = [
         tool_id for tool_id in expected.required_tool_ids if tool_id not in tool_ids
     ]
@@ -636,6 +641,13 @@ def _grade(
             expected.required_answer_substrings,
             required_matches,
             len(required_matches) == len(expected.required_answer_substrings),
+            ),
+            (
+            "required_answer_any_substrings",
+            expected.required_answer_any_substrings,
+            required_any_matches,
+            (not expected.required_answer_any_substrings)
+            or bool(required_any_matches),
             ),
             (
             "forbidden_answer_substrings",

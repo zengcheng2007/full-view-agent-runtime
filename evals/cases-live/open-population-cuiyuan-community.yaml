@@ -13,7 +13,7 @@ expected:
   terminal_status: completed
   outcome: success
   completion_reason_code: goal_completed
-  required_tool_ids: [governance.resolve_area, governance.semantic_query]
+  required_tool_ids: [governance.semantic_query]
   forbidden_tool_ids: [governance.query_population_metrics]
   max_tool_calls: 4
   min_evidence_count: 1

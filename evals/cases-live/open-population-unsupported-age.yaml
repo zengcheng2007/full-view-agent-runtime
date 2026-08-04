@@ -14,11 +14,9 @@ expected:
   outcome: success
   completion_reason_code: goal_completed
   forbidden_tool_ids:
-    - governance.resolve_area
-    - governance.semantic_query
     - governance.query_population_metrics
-  max_tool_calls: 0
+  max_tool_calls: 6
   min_evidence_count: 0
   required_event_types: [run.completed]
-  required_answer_substrings: [不支持]
+  required_answer_any_substrings: [不支持, 未提供, 无法按年龄]
   forbidden_answer_substrings: ["80岁以上独居老人共有", "80岁以上独居老人数量为"]

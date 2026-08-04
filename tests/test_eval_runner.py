@@ -85,6 +85,28 @@ def test_open_eval_rejects_missing_forbidden_or_excessive_tool_calls() -> None:
     assert by_name["max_tool_calls"].passed is False
 
 
+def test_open_eval_accepts_any_supported_boundary_wording() -> None:
+    expected = EvalExpected(
+        terminal_status="completed",
+        outcome="success",
+        completion_reason_code="goal_completed",
+        required_answer_any_substrings=["不支持", "未提供", "无法按年龄"],
+    )
+
+    grades = _grade(
+        expected,
+        terminal_status="completed",
+        outcome="success",
+        completion_reason_code="goal_completed",
+        tool_ids=[],
+        evidence_count=0,
+        event_types=[],
+        final_answer="当前目录未提供年龄段筛选能力。",
+    )
+
+    assert all(grade.passed for grade in grades)
+
+
 class TwoStepLiveModelProvider:
     def __init__(self) -> None:
         self.call_count = 0

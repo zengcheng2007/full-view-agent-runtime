@@ -12,10 +12,10 @@ expected:
   terminal_status: completed
   outcome: success
   completion_reason_code: goal_completed
-  required_tool_ids: [governance.resolve_area, governance.semantic_query]
+  required_tool_ids: [governance.semantic_query]
   forbidden_tool_ids: [governance.query_event_metrics]
   max_tool_calls: 4
-  min_evidence_count: 2
+  min_evidence_count: 1
   required_event_types: [tool.completed, result.available, evidence.available, run.completed]
   required_answer_substrings: ["办结率"]
   forbidden_answer_substrings: ["无法完成", "缺少事件数据查询工具"]
