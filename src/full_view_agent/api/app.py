@@ -1277,6 +1277,10 @@ def create_app(runtime: RuntimeContainer | None = None) -> FastAPI:
             user_id=user.user_id,
             run_id=run_id,
         )
+        if run.mode != "analysis":
+            raise RunStateConflict(
+                "analysis execution requires a run created with mode=analysis"
+            )
         previous_context = await app.state.runtime.auth_contexts.get(
             user_id=user.user_id,
             run_id=run_id,
