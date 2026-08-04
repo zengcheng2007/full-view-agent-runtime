@@ -42,6 +42,7 @@ class ExpectedResultShape(ContractModel):
     kind: Literal["table"] = "table"
     data_schema_ref: str
     row_fields: tuple[str, ...]
+    fingerprint_domain: str | None = None
 
 
 class MetricDefinitionRef(ContractModel):
@@ -103,6 +104,7 @@ class SemanticCompiler:
             expected_result=ExpectedResultShape(
                 data_schema_ref=shape.data_schema_ref,
                 row_fields=shape.row_fields,
+                fingerprint_domain=shape.fingerprint_domain,
             ),
             evidence=EvidenceExpectation(
                 dataset_id=subject.logical_dataset_id,

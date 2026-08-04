@@ -119,6 +119,9 @@ class ResultShape(ContractModel):
     shape_id: str = Field(min_length=1, max_length=64)
     kind: Literal["table"] = "table"
     data_schema_ref: str = Field(min_length=1, max_length=200)
+    # 服务端结果内容指纹域；不进入模型可见能力描述。旧自定义 Catalog
+    # 可暂不提供，但研判报告组装会 fail closed。
+    fingerprint_domain: str | None = Field(default=None, min_length=1, max_length=200)
     grain_label: str | None = Field(default=None, max_length=100)
     row_fields: tuple[str, ...] = Field(min_length=1)
     # None = 适用于该主题的所有合法 group_by；元组 = 精确匹配 group_by。
@@ -251,6 +254,7 @@ def _population() -> SubjectDefinition:
             ResultShape(
                 shape_id="population_metric_table",
                 data_schema_ref="schema://data/population-metric-table/1.0.0",
+                fingerprint_domain="data-result:population-metric-table:1.0.0",
                 grain_label="按直接下级区划汇总",
                 row_fields=("area_code", "area_name", "person_count"),
             ),
@@ -287,6 +291,7 @@ def _housing(*, next_area_enabled: bool = False) -> SubjectDefinition:
             ResultShape(
                 shape_id="housing_lease_type_table",
                 data_schema_ref="schema://data/housing-lease-type-table/1.0.0",
+                fingerprint_domain="data-result:housing-metric-table:1.0.0",
                 grain_label="按租赁类型汇总",
                 row_fields=("lease_type", "dwelling_count"),
                 group_by_selection=(),
@@ -297,6 +302,7 @@ def _housing(*, next_area_enabled: bool = False) -> SubjectDefinition:
                 ResultShape(
                     shape_id="housing_area_group_table",
                     data_schema_ref="schema://data/housing-area-group-table/1.0.0",
+                    fingerprint_domain="data-result:housing-area-group-table:1.0.0",
                     grain_label="按直接下级区划汇总",
                     row_fields=("area_code", "area_name", "dwelling_count"),
                     group_by_selection=("next_area",),
@@ -327,6 +333,7 @@ def _event() -> SubjectDefinition:
             ResultShape(
                 shape_id="event_finish_rate_table",
                 data_schema_ref="schema://data/event-finish-rate-table/1.0.0",
+                fingerprint_domain="data-result:event-metric-table:1.0.0",
                 grain_label="按网格、村社、镇街层级返回办结率快照",
                 row_fields=("level", "finish_rate"),
             ),
