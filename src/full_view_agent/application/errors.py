@@ -50,6 +50,10 @@ class AnalysisPlanningUnavailable(ApplicationError):
     code = "analysis_planning_unavailable"
 
 
+class AnalysisExecutionUnavailable(ApplicationError):
+    code = "analysis_execution_unavailable"
+
+
 class CredentialUnavailable(ResourceNotFound):
     code = "credential_unavailable"
 

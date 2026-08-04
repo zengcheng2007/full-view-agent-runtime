@@ -4,6 +4,7 @@ from typing import Literal, Protocol, TypeVar, runtime_checkable
 
 from pydantic import SecretStr
 
+from full_view_agent.application.analysis_graph import AnalysisRunOutcome
 from full_view_agent.domain.models import (
     AgentEvent,
     AgentMessage,
@@ -214,6 +215,27 @@ class RunAuthContextStore(Protocol):
     async def put(self, auth_context: AuthContext) -> AuthContext: ...
 
     async def get(self, *, user_id: str, run_id: str) -> AuthContext: ...
+
+
+class AnalysisOrchestratorPort(Protocol):
+    """Executes a trusted server-side analysis plan for an admitted Run.
+
+    The API layer verifies identity, tenant ownership and the Run/Plan
+    trusted boundary before calling ``run``; the implementation owns the
+    crash-safe graph execution and must never fall back to ad-hoc
+    executors. A missing composition is fail-closed at the API layer.
+    """
+
+    async def run(
+        self,
+        *,
+        user_id: str,
+        session_id: str,
+        analysis_run_id: str,
+        plan_id: str,
+        request_id: str,
+        auth_context: AuthContext,
+    ) -> AnalysisRunOutcome: ...
 
 
 @runtime_checkable

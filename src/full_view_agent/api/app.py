@@ -17,6 +17,7 @@ from fastapi.responses import JSONResponse, StreamingResponse
 from fastapi.security import APIKeyHeader
 from pydantic import Field, SecretStr, model_validator
 
+from full_view_agent.application.analysis_graph import AnalysisRunOutcome
 from full_view_agent.application.analysis_plan_repository import AnalysisPlanRepository
 from full_view_agent.application.analysis_planner import AnalysisPlanner
 from full_view_agent.application.analysis_service import AnalysisPlanningService
@@ -29,6 +30,7 @@ from full_view_agent.application.deployment_capabilities import (
     parse_housing_next_area_enabled,
 )
 from full_view_agent.application.errors import (
+    AnalysisExecutionUnavailable,
     AnalysisPlanningUnavailable,
     AnalysisRequestRejected,
     ApplicationError,
@@ -54,6 +56,7 @@ from full_view_agent.application.model_provider import ModelProvider
 from full_view_agent.application.orchestrator_factory import create_orchestrator
 from full_view_agent.application.ports import (
     AgentStore,
+    AnalysisOrchestratorPort,
     CredentialBroker,
     EventStore,
     IdempotencyStore,
@@ -190,6 +193,15 @@ class AnalysisPlanResponse(ContractModel):
     meta: ResponseMeta
 
 
+class AnalysisExecutionBody(ContractModel):
+    request_id: str = Field(min_length=1, max_length=128)
+
+
+class AnalysisExecutionResponse(ContractModel):
+    data: AnalysisRunOutcome
+    meta: ResponseMeta
+
+
 class SteerResponse(ContractModel):
     data: Steer
     meta: ResponseMeta
@@ -315,6 +327,11 @@ class RuntimeContainer:
     tool_registry: ToolRegistry | None = None
     model_provider: ModelProvider | None = None
     analysis_plan_repository: AnalysisPlanRepository | None = None
+    # Injected analysis graph orchestrator. Production composition is wired
+    # once the persistent execution service lands; until then the port stays
+    # unset and the execution endpoint fails closed with 503 (never falls
+    # back to the legacy AnalysisPlanExecutor).
+    analysis_orchestrator: AnalysisOrchestratorPort | None = None
 
     def __post_init__(self) -> None:
         runtime_profile = os.getenv("FULL_VIEW_RUNTIME_PROFILE", "development").lower()
@@ -701,7 +718,11 @@ def create_app(runtime: RuntimeContainer | None = None) -> FastAPI:
             status_code = 401
         elif isinstance(
             exc,
-            (IdentityProviderUnavailable, AnalysisPlanningUnavailable),
+            (
+                IdentityProviderUnavailable,
+                AnalysisPlanningUnavailable,
+                AnalysisExecutionUnavailable,
+            ),
         ):
             status_code = 503
             retryable = True
@@ -1100,6 +1121,81 @@ def create_app(runtime: RuntimeContainer | None = None) -> FastAPI:
                 request_id=new_id("req"),
                 idempotency_replayed=replayed,
             ),
+        )
+
+    @app.post(
+        "/agent-api/v1/runs/{run_id}/analysis-plans/{plan_id}/executions",
+        responses={
+            400: {"model": ErrorResponse},
+            401: {"model": ErrorResponse},
+            404: {"model": ErrorResponse},
+            409: {"model": ErrorResponse},
+            422: {"model": ErrorResponse},
+            503: {"model": ErrorResponse},
+        },
+    )
+    async def execute_analysis_plan(
+        run_id: str,
+        plan_id: str,
+        body: AnalysisExecutionBody,
+        user: Annotated[CurrentUser, Depends(require_geotoken)],
+    ) -> AnalysisExecutionResponse:
+        # Fail closed before touching any state: a missing orchestrator is a
+        # deployment condition, never a reason to fall back to ad-hoc
+        # execution (the legacy AnalysisPlanExecutor stays unwired here).
+        if app.state.runtime.analysis_orchestrator is None:
+            raise AnalysisExecutionUnavailable(
+                "analysis execution orchestrator is not configured"
+            )
+        run = await app.state.runtime.store.get_run(
+            user_id=user.user_id,
+            run_id=run_id,
+        )
+        previous_context = await app.state.runtime.auth_contexts.get(
+            user_id=user.user_id,
+            run_id=run_id,
+        )
+        if (
+            previous_context.principal.user_id != user.identity.principal.user_id
+            or previous_context.principal.tenant_id
+            != user.identity.principal.tenant_id
+        ):
+            raise ResourceNotFound("run was not found for the current identity")
+        # The plan is always loaded from the server-side authority keyed by
+        # tenant/user/run; clients can only reference it, never upload or
+        # override plan, execution, or result payloads.
+        plan = await app.state.runtime.analysis_plan_repository.get(
+            tenant_id=user.identity.principal.tenant_id,
+            user_id=user.user_id,
+            run_id=run_id,
+            plan_id=plan_id,
+        )
+        if plan is None:
+            raise ResourceNotFound("analysis plan was not found for this run")
+        if plan.request_id != body.request_id:
+            raise RunStateConflict(
+                "execution request id does not match the stored analysis plan"
+            )
+        auth_context = await app.state.runtime.admission.admit(
+            identity=user.identity,
+            raw_token=user.raw_token,
+            session_id=run.session_id,
+            run_id=run_id,
+        )
+        await app.state.runtime.credentials.revoke(
+            credential_ref=previous_context.credential_ref,
+        )
+        outcome = await app.state.runtime.analysis_orchestrator.run(
+            user_id=user.user_id,
+            session_id=run.session_id,
+            analysis_run_id=run_id,
+            plan_id=plan_id,
+            request_id=body.request_id,
+            auth_context=auth_context,
+        )
+        return AnalysisExecutionResponse(
+            data=outcome,
+            meta=ResponseMeta(request_id=new_id("req")),
         )
 
     @app.post("/agent-api/v1/runs/{run_id}/cancel", status_code=202)

@@ -53,6 +53,23 @@ def test_export_contracts_writes_openapi_and_versioned_json_schemas(tmp_path) ->
             "application/json"
         ]["schema"]
         assert error_schema["$ref"].endswith("/ErrorResponse")
+    execution_operation = openapi["paths"][
+        "/agent-api/v1/runs/{run_id}/analysis-plans/{plan_id}/executions"
+    ]["post"]
+    assert execution_operation["security"] == [{"GeoToken": []}]
+    execution_response_schema = execution_operation["responses"]["200"][
+        "content"
+    ]["application/json"]["schema"]
+    assert execution_response_schema["$ref"].endswith("/AnalysisExecutionResponse")
+    execution_request_schema = execution_operation["requestBody"]["content"][
+        "application/json"
+    ]["schema"]
+    assert execution_request_schema["$ref"].endswith("/AnalysisExecutionBody")
+    for status_code in ("400", "401", "404", "409", "422", "503"):
+        error_schema = execution_operation["responses"][status_code]["content"][
+            "application/json"
+        ]["schema"]
+        assert error_schema["$ref"].endswith("/ErrorResponse")
     event_content = openapi["paths"]["/agent-api/v1/runs/{run_id}/events"][
         "get"
     ]["responses"]["200"]["content"]
