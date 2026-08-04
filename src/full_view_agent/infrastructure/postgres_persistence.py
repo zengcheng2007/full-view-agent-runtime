@@ -546,12 +546,25 @@ class PostgresAgentPersistence:
                 and run.waiting_for == "reauth"
                 and session.active_run_id == run_id
                 and existing is not None
+                and existing.kind == "reauth"
                 and existing.closed_at is None
                 and existing.expires_at > now
                 and existing.run_state_version == run.state_version
             ):
                 return run, existing
-            if run.status != "running" or session.active_run_id != run_id:
+            renew_expired = (
+                run.status == "waiting_input"
+                and run.waiting_for == "reauth"
+                and existing is not None
+                and existing.kind == "reauth"
+                and existing.closed_at is None
+                and existing.expires_at <= now
+                and existing.run_state_version == run.state_version
+            )
+            if (
+                session.active_run_id != run_id
+                or (run.status != "running" and not renew_expired)
+            ):
                 raise RunStateConflict("only an active running run can wait for reauthentication")
             waiting = run.model_copy(
                 update={
@@ -598,19 +611,21 @@ class PostgresAgentPersistence:
             pending = PendingInputRequest.model_validate_json(row[0]) if row else None
             now = datetime.now(UTC)
             if (
-                run.status == "running"
+                run.status in {"running", "completed"}
                 and run.waiting_for is None
                 and pending is not None
+                and pending.kind == "reauth"
                 and pending.closed_at is not None
                 and pending.input_request_id == input_request_id
                 and pending.run_state_version == run_state_version
-                and run.state_version == run_state_version + 1
+                and run.state_version in {run_state_version + 1, run_state_version + 2}
             ):
                 return run
             if (
                 run.status != "waiting_input"
                 or run.waiting_for != "reauth"
                 or pending is None
+                or pending.kind != "reauth"
                 or pending.closed_at is not None
                 or pending.input_request_id != input_request_id
                 or pending.run_state_version != run_state_version

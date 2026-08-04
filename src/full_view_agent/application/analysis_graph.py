@@ -128,7 +128,9 @@ class AnalysisGraphExecutionPort(Protocol):
 class AnalysisRunLifecycle(Protocol):
     """Controlled product-ledger transitions for reauthentication."""
 
-    async def wait_for_reauthentication(self, *, user_id: str, run_id: str): ...
+    async def wait_for_reauthentication(
+        self, *, user_id: str, run_id: str
+    ) -> object: ...
 
     async def resume_from_input(
         self,
@@ -137,7 +139,7 @@ class AnalysisRunLifecycle(Protocol):
         run_id: str,
         input_request_id: str,
         run_state_version: int,
-    ): ...
+    ) -> object: ...
 
 
 class AnalysisRunLeaseManager(Protocol):

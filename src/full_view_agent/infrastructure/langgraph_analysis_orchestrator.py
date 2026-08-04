@@ -319,7 +319,29 @@ class LangGraphAnalysisOrchestrator:
                     "analysis graph is waiting for controlled reauthentication input"
                 )
             if resume_input is not None and not pending_interrupt:
-                raise RunStateConflict("analysis run is not waiting for reauthentication")
+                terminal_outcome = (
+                    AnalysisRunOutcome.model_validate(snapshot.values.get("outcome"))
+                    if snapshot is not None
+                    and snapshot.values.get("phase") == "done"
+                    and snapshot.values.get("outcome") is not None
+                    else None
+                )
+                if terminal_outcome is None:
+                    raise RunStateConflict(
+                        "analysis run is not waiting for reauthentication"
+                    )
+                # A successful response may be lost after the graph reached a
+                # durable terminal checkpoint. Validate the exact closed input
+                # token through the product ledger before replaying the stored
+                # outcome; a different or stale token remains fail-closed.
+                input_request_id, run_state_version = resume_input
+                await self._lifecycle.resume_from_input(
+                    user_id=user_id,
+                    run_id=analysis_run_id,
+                    input_request_id=input_request_id,
+                    run_state_version=run_state_version,
+                )
+                return terminal_outcome
 
             graph_input: _AnalysisState | Command[Any] | None
             if resume_input is not None:

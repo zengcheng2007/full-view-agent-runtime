@@ -258,6 +258,46 @@ async def test_reauthentication_requires_explicit_ledger_gated_resume() -> None:
 
 
 @pytest.mark.asyncio
+async def test_completed_resume_replays_terminal_outcome_for_the_same_input() -> None:
+    execution = _StepwiseExecution(interrupt_once=True)
+    lifecycle = _Lifecycle()
+    orchestrator = _orchestrator(execution, lifecycle=lifecycle)
+
+    with pytest.raises(ReauthenticationRequired):
+        await _run(orchestrator)
+    first = await _resume(orchestrator)
+    replayed = await _resume(orchestrator)
+
+    assert replayed == first
+    assert execution.upstream_calls == Counter(
+        {"population": 1, "housing": 1, "event": 1}
+    )
+
+
+@pytest.mark.asyncio
+async def test_completed_resume_rejects_a_different_input_token() -> None:
+    execution = _StepwiseExecution(interrupt_once=True)
+    lifecycle = _Lifecycle()
+    orchestrator = _orchestrator(execution, lifecycle=lifecycle)
+
+    with pytest.raises(ReauthenticationRequired):
+        await _run(orchestrator)
+    await _resume(orchestrator)
+
+    with pytest.raises(RunStateConflict, match="stale analysis resume input"):
+        await orchestrator.resume(
+            user_id="user-01",
+            session_id="session-01",
+            analysis_run_id="analysis-run-01",
+            plan_id="plan-01",
+            request_id="request-01",
+            input_request_id="inreq-other",
+            run_state_version=2,
+            auth_context=_current_auth(),
+        )
+
+
+@pytest.mark.asyncio
 async def test_resume_preflight_does_not_consume_input_for_changed_plan() -> None:
     lifecycle = _Lifecycle()
     orchestrator = _orchestrator(

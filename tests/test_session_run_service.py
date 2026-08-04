@@ -1,3 +1,5 @@
+from datetime import UTC, datetime, timedelta
+
 import pytest
 
 from full_view_agent.application.errors import (
@@ -257,6 +259,33 @@ async def test_reauthentication_ledger_is_idempotent_across_crash_retries() -> N
     assert replayed == resumed
     assert resumed.status == "running"
     assert resumed.state_version == pending.run_state_version + 1
+
+
+@pytest.mark.asyncio
+async def test_expired_reauthentication_request_is_atomically_reissued() -> None:
+    store = InMemoryAgentStore()
+    service = SessionRunService(store)
+    session = await service.create_session(user_id="user-01", title="认证过期")
+    queued = await service.create_run(
+        user_id="user-01", session_id=session.session_id, request=run_request()
+    )
+    await service.start_run(user_id="user-01", run_id=queued.run_id)
+    waiting, expired = await service.wait_for_reauthentication(
+        user_id="user-01", run_id=queued.run_id
+    )
+    store.input_requests[queued.run_id] = expired.model_copy(
+        update={"expires_at": datetime.now(UTC) - timedelta(seconds=1)}
+    )
+
+    renewed_waiting, renewed = await service.wait_for_reauthentication(
+        user_id="user-01", run_id=queued.run_id
+    )
+
+    assert renewed.input_request_id != expired.input_request_id
+    assert renewed.kind == "reauth"
+    assert renewed.run_state_version == waiting.state_version + 1
+    assert renewed_waiting.state_version == renewed.run_state_version
+    assert renewed.expires_at > datetime.now(UTC)
 
 
 @pytest.mark.asyncio
