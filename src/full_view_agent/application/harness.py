@@ -16,10 +16,17 @@ from full_view_agent.application.answer_grounding import (
     remove_lines_with_numbers,
     remove_lines_with_values,
 )
-from full_view_agent.application.errors import BudgetExceeded, LoopDetected
+from full_view_agent.application.errors import (
+    BudgetExceeded,
+    LoopDetected,
+    ModelContractError,
+)
 from full_view_agent.application.fingerprints import canonical_fingerprint
 from full_view_agent.application.session_run_service import new_id
+from full_view_agent.domain.analysis_intent import AnalysisIntentV1
 from full_view_agent.domain.models import AuthContext, ToolResult
+
+ANALYSIS_INTENT_TOOL_ID = "agent.request_regional_analysis"
 
 
 @dataclass(frozen=True)
@@ -58,7 +65,19 @@ class FinishAction:
     legacy: bool = False
 
 
-HarnessAction = ToolAction | FinishAction
+@dataclass(frozen=True)
+class AnalysisIntentAction:
+    """Validated model intent that must be handled by a dedicated bridge.
+
+    It is deliberately not a ``ToolAction``: the model may express analysis
+    goals and scope, but it may not smuggle an executable capability call into
+    the regular Tool pipeline.
+    """
+
+    intent: AnalysisIntentV1
+
+
+HarnessAction = ToolAction | FinishAction | AnalysisIntentAction
 
 
 @dataclass(frozen=True)
@@ -487,6 +506,14 @@ class AgentHarness:
         if control.state.model_turns >= self._limits.max_model_turns:
             raise BudgetExceeded("maximum model turns exceeded")
         action = await planner.decide(control.state)
+        if isinstance(action, AnalysisIntentAction):
+            # The ordinary Harness has no trusted intent-compilation/execution
+            # bridge yet. Reject before checkpoints, hooks, or adapters can
+            # observe the action. A later graph node may consume this action
+            # explicitly, but it must never fall through to Tool execution.
+            raise ModelContractError(
+                "analysis intent execution bridge is not configured"
+            )
         state = replace(control.state, model_turns=control.state.model_turns + 1)
         return replace(control, state=state), action
 
@@ -569,8 +596,10 @@ class AgentHarness:
         self, *, planner: Planner, control: HarnessControl
     ) -> tuple[HarnessControl, ToolAction | None, str | None]:
         control, action = await self.plan_action_once(planner=planner, control=control)
-        if not isinstance(action, FinishAction):
+        if isinstance(action, ToolAction):
             return control, action, None
+        if not isinstance(action, FinishAction):
+            raise ModelContractError("unsupported Harness action")
         control, summary = await self.validate_once(action=action, control=control)
         return control, None, summary
 
@@ -698,6 +727,8 @@ class AgentHarness:
                 if summary is not None:
                     return HarnessResult(summary=summary, state=control.state)
                 continue
+            if not isinstance(action, ToolAction):
+                raise ModelContractError("unsupported Harness action")
             execution = await self.authorize_and_execute_once(
                 action=action,
                 auth_context=auth_context,

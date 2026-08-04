@@ -1,6 +1,9 @@
 import json
 from typing import Protocol
 
+from full_view_agent.application.analysis_intent_presenter import (
+    AnalysisIntentToolPresentation,
+)
 from full_view_agent.application.errors import ResourceNotFound
 from full_view_agent.application.harness import HarnessState
 from full_view_agent.application.model_provider import (
@@ -41,6 +44,12 @@ class SemanticToolPresenting(Protocol):
     ) -> SemanticToolPresentation | None: ...
 
 
+class AnalysisIntentToolPresenting(Protocol):
+    def present(
+        self, *, auth_context: AuthContext
+    ) -> AnalysisIntentToolPresentation | None: ...
+
+
 class AgentContextBuilder:
     def __init__(
         self,
@@ -50,12 +59,14 @@ class AgentContextBuilder:
         max_context_messages: int = MAX_CONTEXT_MESSAGES,
         max_context_chars: int = MAX_CONTEXT_CHARS,
         semantic_presenter: SemanticToolPresenting | None = None,
+        analysis_intent_presenter: AnalysisIntentToolPresenting | None = None,
     ) -> None:
         self._store = store
         self._registry = registry
         self._max_messages = max_context_messages
         self._max_chars = max_context_chars
         self._semantic_presenter = semantic_presenter
+        self._analysis_intent_presenter = analysis_intent_presenter
 
     async def build(
         self,
@@ -83,6 +94,11 @@ class AgentContextBuilder:
         semantic_presentation = (
             self._semantic_presenter.present(auth_context=auth_context)
             if self._semantic_presenter is not None
+            else None
+        )
+        analysis_intent_presentation = (
+            self._analysis_intent_presenter.present(auth_context=auth_context)
+            if self._analysis_intent_presenter is not None
             else None
         )
         shadowed_tool_ids = (
@@ -262,6 +278,14 @@ class AgentContextBuilder:
                     description=semantic_presentation.description,
                     input_schema=semantic_presentation.input_schema,
                     server_arguments=semantic_presentation.server_arguments,
+                )
+            )
+        if analysis_intent_presentation is not None:
+            tools.append(
+                ModelToolDefinition(
+                    tool_id=analysis_intent_presentation.tool_id,
+                    description=analysis_intent_presentation.description,
+                    input_schema=analysis_intent_presentation.input_schema,
                 )
             )
         return ModelRequest(

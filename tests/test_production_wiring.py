@@ -17,7 +17,7 @@ from pydantic import SecretStr
 from full_view_agent.api.app import RuntimeContainer
 from full_view_agent.application.capability_service import CapabilityService
 from full_view_agent.application.context_builder import AgentContextBuilder
-from full_view_agent.application.harness import HarnessState
+from full_view_agent.application.harness import ANALYSIS_INTENT_TOOL_ID, HarnessState
 from full_view_agent.application.native_orchestrator import NativeOrchestrator
 from full_view_agent.application.policy import MinimalPolicyAdapter
 from full_view_agent.application.prompt_catalog import (
@@ -316,6 +316,55 @@ def test_runtime_container_default_langgraph_wires_semantic_stack(
 
     assert isinstance(container.executor, LangGraphOrchestrator)
     _assert_semantic_stack_wired(container)
+
+
+def test_runtime_container_does_not_wire_analysis_intent_presenter(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # P2 研判意图虚拟能力在本切片保持未接线：默认生产组合根不注入
+    # presenter，模型永远看不到 agent.request_regional_analysis。
+    monkeypatch.delenv("FULL_VIEW_ORCHESTRATOR", raising=False)
+
+    container = RuntimeContainer(model_provider=_StubModelProvider())
+
+    planner_factory = container.executor._planner_factory  # noqa: SLF001
+    assert planner_factory is not None
+    assert (  # noqa: SLF001
+        planner_factory._context_builder._analysis_intent_presenter  # noqa: SLF001
+        is None
+    )
+
+
+@pytest.mark.asyncio
+async def test_production_context_never_advertises_analysis_intent_tool(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.delenv("FULL_VIEW_ORCHESTRATOR", raising=False)
+
+    container = RuntimeContainer(model_provider=_StubModelProvider())
+    # session/run 必须建在 container 自己的 store 上：被断言的
+    # ContextBuilder 正是绑定该 store 的生产实例。
+    assert container.store is not None
+    service = SessionRunService(container.store)
+    session = await service.create_session(user_id="user-wiring", title="研判")
+    run = await service.create_run(
+        user_id="user-wiring",
+        session_id=session.session_id,
+        request=run_request(),
+    )
+    auth_context = _full_governance_auth_context().model_copy(
+        update={"session_id": session.session_id, "run_id": run.run_id}
+    )
+    planner_factory = container.executor._planner_factory  # noqa: SLF001
+    assert planner_factory is not None
+
+    request = await planner_factory._context_builder.build(  # noqa: SLF001
+        user_id="user-wiring",
+        auth_context=auth_context,
+        state=HarnessState(),
+    )
+
+    assert ANALYSIS_INTENT_TOOL_ID not in [tool.tool_id for tool in request.tools]
 
 
 # ---------------------------------------------------------------------------

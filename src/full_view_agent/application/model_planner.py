@@ -11,6 +11,8 @@ from full_view_agent.application.answer_claims import (
 from full_view_agent.application.context_builder import AgentContextBuilder
 from full_view_agent.application.errors import BudgetExceeded, ModelContractError
 from full_view_agent.application.harness import (
+    ANALYSIS_INTENT_TOOL_ID,
+    AnalysisIntentAction,
     FinishAction,
     HarnessState,
     Planner,
@@ -21,6 +23,7 @@ from full_view_agent.application.model_provider import (
     ModelRequest,
     ModelToolDefinition,
 )
+from full_view_agent.domain.analysis_intent import AnalysisIntentV1
 from full_view_agent.domain.models import AuthContext
 
 logger = logging.getLogger(__name__)
@@ -66,7 +69,9 @@ class ModelPlanner:
     def total_tokens(self) -> int:
         return self._total_tokens
 
-    async def decide(self, state: HarnessState) -> ToolAction | FinishAction:
+    async def decide(
+        self, state: HarnessState
+    ) -> ToolAction | FinishAction | AnalysisIntentAction:
         request = await self._context_builder.build(
             user_id=self._user_id,
             auth_context=self._auth_context,
@@ -125,6 +130,16 @@ class ModelPlanner:
             advertised = advertised_tools.get(call.tool_id)
             if advertised is None:
                 raise ModelContractError("model selected an unavailable tool")
+            if call.tool_id == ANALYSIS_INTENT_TOOL_ID:
+                # This virtual capability is not a Tool. Validate exactly the
+                # model-owned payload and never merge server-owned arguments.
+                try:
+                    intent = AnalysisIntentV1.model_validate(call.arguments)
+                except ValueError as exc:
+                    raise ModelContractError(
+                        "model returned an invalid analysis intent"
+                    ) from exc
+                return AnalysisIntentAction(intent=intent)
             server_arguments = advertised.server_arguments
             attempted_server_fields = sorted(
                 set(call.arguments).intersection(server_arguments)
