@@ -164,7 +164,11 @@ async def test_openai_provider_round_trips_reserved_finish_tool() -> None:
 
 @pytest.mark.asyncio
 async def test_openai_compatible_provider_rejects_malformed_tool_arguments() -> None:
+    attempts = 0
+
     def handler(_request: httpx.Request) -> httpx.Response:
+        nonlocal attempts
+        attempts += 1
         return httpx.Response(
             200,
             json={
@@ -209,6 +213,133 @@ async def test_openai_compatible_provider_rejects_malformed_tool_arguments() -> 
             await provider.complete(request)
 
     assert exc_info.value.code == "model_contract_error"
+    assert attempts == 2
+
+
+@pytest.mark.asyncio
+async def test_openai_compatible_provider_accepts_object_tool_arguments() -> None:
+    transport = httpx.MockTransport(
+        lambda _request: httpx.Response(
+            200,
+            json={
+                "choices": [
+                    {
+                        "finish_reason": "tool_calls",
+                        "message": {
+                            "content": None,
+                            "tool_calls": [
+                                {
+                                    "type": "function",
+                                    "function": {
+                                        "name": "governance__resolve_area",
+                                        "arguments": {"query": "翠苑"},
+                                    },
+                                }
+                            ],
+                        },
+                    }
+                ],
+                "usage": {
+                    "prompt_tokens": 20,
+                    "completion_tokens": 5,
+                    "total_tokens": 25,
+                },
+            },
+        )
+    )
+    async with httpx.AsyncClient(transport=transport) as client:
+        response = await OpenAICompatibleModelProvider(
+            base_url="http://model.test/v1",
+            model="qwen-test",
+            client=client,
+        ).complete(
+            ModelRequest(
+                messages=(ModelMessage(role="user", content="翠苑租房"),),
+                tools=(
+                    ModelToolDefinition(
+                        tool_id="governance.resolve_area",
+                        description="解析标准区划",
+                        input_schema={"type": "object"},
+                    ),
+                ),
+            )
+        )
+
+    assert response.tool_calls[0].arguments == {"query": "翠苑"}
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("failure", ["invalid_usage", "unknown_tool"])
+async def test_openai_compatible_provider_does_not_retry_stable_contract_errors(
+    failure: str,
+) -> None:
+    attempts = 0
+
+    def handler(_request: httpx.Request) -> httpx.Response:
+        nonlocal attempts
+        attempts += 1
+        if failure == "invalid_usage":
+            return httpx.Response(
+                200,
+                json={
+                    "choices": [
+                        {
+                            "finish_reason": "stop",
+                            "message": {"content": "完成", "tool_calls": []},
+                        }
+                    ]
+                },
+            )
+        return httpx.Response(
+            200,
+            json={
+                "choices": [
+                    {
+                        "finish_reason": "tool_calls",
+                        "message": {
+                            "content": None,
+                            "tool_calls": [
+                                {
+                                    "type": "function",
+                                    "function": {
+                                        "name": "governance__unknown",
+                                        "arguments": "{}",
+                                    },
+                                }
+                            ],
+                        },
+                    }
+                ],
+                "usage": {
+                    "prompt_tokens": 1,
+                    "completion_tokens": 1,
+                    "total_tokens": 2,
+                },
+            },
+        )
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        provider = OpenAICompatibleModelProvider(
+            base_url="http://model.test/v1",
+            model="qwen-test",
+            client=client,
+        )
+        with pytest.raises(errors.ApplicationError) as exc_info:
+            await provider.complete(
+                ModelRequest(
+                    messages=(ModelMessage(role="user", content="查询"),),
+                    tools=(
+                        ModelToolDefinition(
+                            tool_id="governance.resolve_area",
+                            description="解析标准区划",
+                            input_schema={"type": "object"},
+                        ),
+                    ),
+                )
+            )
+
+    assert exc_info.value.code == "model_contract_error"
+    assert attempts == 1
 
 
 @pytest.mark.asyncio

@@ -1,4 +1,5 @@
 import json
+import logging
 
 import httpx
 from pydantic import SecretStr
@@ -15,6 +16,10 @@ from full_view_agent.application.model_provider import (
     ModelToolCall,
     ModelUsage,
 )
+
+logger = logging.getLogger(__name__)
+_MAX_CONTRACT_ATTEMPTS = 2
+_RETRYABLE_CONTRACT_REASONS = frozenset({"invalid_tool_arguments_json"})
 
 
 class OpenAICompatibleModelProvider:
@@ -68,74 +73,121 @@ class OpenAICompatibleModelProvider:
             if self._api_key is not None
             else {}
         )
-        try:
-            if self._client is None:
-                async with httpx.AsyncClient() as client:
-                    response = await client.post(
+        for attempt in range(_MAX_CONTRACT_ATTEMPTS):
+            try:
+                if self._client is None:
+                    async with httpx.AsyncClient() as client:
+                        response = await client.post(
+                            f"{self._base_url}/chat/completions",
+                            json=payload,
+                            headers=headers,
+                            timeout=self._timeout_seconds,
+                        )
+                else:
+                    response = await self._client.post(
                         f"{self._base_url}/chat/completions",
                         json=payload,
                         headers=headers,
                         timeout=self._timeout_seconds,
                     )
-            else:
-                response = await self._client.post(
-                    f"{self._base_url}/chat/completions",
-                    json=payload,
-                    headers=headers,
-                    timeout=self._timeout_seconds,
-                )
-            response.raise_for_status()
-        except httpx.TimeoutException as exc:
-            raise ModelProviderTimeout("model request timed out") from exc
-        except httpx.HTTPError as exc:
-            raise ModelProviderUnavailable("model provider is unavailable") from exc
-        try:
-            body = response.json()
-            choice = body["choices"][0]
-            message = choice["message"]
-            parsed_calls: list[ModelToolCall] = []
-            raw_tool_calls = message.get("tool_calls")
-            if raw_tool_calls is None:
-                raw_tool_calls = []
-            elif not isinstance(raw_tool_calls, list):
-                raise TypeError("tool_calls must be a list or null")
-            for item in raw_tool_calls:
-                arguments = json.loads(item["function"]["arguments"])
-                if not isinstance(arguments, dict):
-                    raise TypeError("tool arguments must be an object")
-                parsed_calls.append(
-                    ModelToolCall(
-                        tool_id=tool_names[item["function"]["name"]],
-                        arguments=arguments,
+                response.raise_for_status()
+            except httpx.TimeoutException as exc:
+                raise ModelProviderTimeout("model request timed out") from exc
+            except httpx.HTTPError as exc:
+                raise ModelProviderUnavailable("model provider is unavailable") from exc
+            try:
+                return _parse_response(response, tool_names=tool_names)
+            except ModelContractError as exc:
+                reason = _contract_failure_reason(exc)
+                if (
+                    reason in _RETRYABLE_CONTRACT_REASONS
+                    and attempt + 1 < _MAX_CONTRACT_ATTEMPTS
+                ):
+                    logger.warning(
+                        "model response contract violation; retrying once (reason=%s)",
+                        reason,
                     )
-                )
-            usage = body.get("usage")
-            if not isinstance(usage, dict):
-                raise ModelContractError("model response omitted valid token usage")
-            prompt_tokens = usage.get("prompt_tokens")
-            completion_tokens = usage.get("completion_tokens")
-            total_tokens = usage.get("total_tokens")
-            if (
-                not isinstance(prompt_tokens, int)
-                or not isinstance(completion_tokens, int)
-                or not isinstance(total_tokens, int)
-                or prompt_tokens < 0
-                or completion_tokens < 0
-                or total_tokens <= 0
-            ):
-                raise ModelContractError("model response omitted valid token usage")
-            return ModelResponse(
-                content=message.get("content"),
-                tool_calls=tuple(parsed_calls),
-                finish_reason=choice.get("finish_reason", "unknown"),
-                usage=ModelUsage(
-                    prompt_tokens=prompt_tokens,
-                    completion_tokens=completion_tokens,
-                    total_tokens=total_tokens,
-                ),
+                    continue
+                raise
+        raise RuntimeError("unreachable model contract retry state")
+
+
+def _parse_response(
+    response: httpx.Response,
+    *,
+    tool_names: dict[str, str],
+) -> ModelResponse:
+    try:
+        body = response.json()
+        choice = body["choices"][0]
+        message = choice["message"]
+        parsed_calls: list[ModelToolCall] = []
+        raw_tool_calls = message.get("tool_calls")
+        if raw_tool_calls is None:
+            raw_tool_calls = []
+        elif not isinstance(raw_tool_calls, list):
+            raise TypeError("tool_calls must be a list or null")
+        for item in raw_tool_calls:
+            raw_arguments = item["function"]["arguments"]
+            arguments = (
+                dict(raw_arguments)
+                if isinstance(raw_arguments, dict)
+                else json.loads(raw_arguments)
             )
-        except (KeyError, IndexError, TypeError, ValueError) as exc:
-            raise ModelContractError("model response violated the provider contract") from exc
+            if not isinstance(arguments, dict):
+                raise TypeError("tool arguments must be an object")
+            parsed_calls.append(
+                ModelToolCall(
+                    tool_id=tool_names[item["function"]["name"]],
+                    arguments=arguments,
+                )
+            )
+        usage = body.get("usage")
+        if not isinstance(usage, dict):
+            raise ModelContractError("model response omitted valid token usage")
+        prompt_tokens = usage.get("prompt_tokens")
+        completion_tokens = usage.get("completion_tokens")
+        total_tokens = usage.get("total_tokens")
+        if (
+            not isinstance(prompt_tokens, int)
+            or not isinstance(completion_tokens, int)
+            or not isinstance(total_tokens, int)
+            or prompt_tokens < 0
+            or completion_tokens < 0
+            or total_tokens <= 0
+        ):
+            raise ModelContractError("model response omitted valid token usage")
+        return ModelResponse(
+            content=message.get("content"),
+            tool_calls=tuple(parsed_calls),
+            finish_reason=choice.get("finish_reason", "unknown"),
+            usage=ModelUsage(
+                prompt_tokens=prompt_tokens,
+                completion_tokens=completion_tokens,
+                total_tokens=total_tokens,
+            ),
+        )
+    except ModelContractError:
+        raise
+    except (KeyError, IndexError, TypeError, ValueError) as exc:
+        raise ModelContractError("model response violated the provider contract") from exc
+
+
+def _contract_failure_reason(exc: ModelContractError) -> str:
+    if "token usage" in str(exc):
+        return "invalid_token_usage"
+    cause = exc.__cause__
+    if isinstance(cause, json.JSONDecodeError):
+        return "invalid_tool_arguments_json"
+    if isinstance(cause, KeyError):
+        return "missing_or_unknown_response_field"
+    if isinstance(cause, IndexError):
+        return "missing_choice"
+    if isinstance(cause, TypeError):
+        return "invalid_response_field_type"
+    if isinstance(cause, ValueError):
+        return "invalid_response_value"
+    return "invalid_response_contract"
 
 
 def _serialize_message(message: ModelMessage) -> dict[str, object]:
