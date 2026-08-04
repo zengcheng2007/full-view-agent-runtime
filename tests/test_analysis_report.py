@@ -762,6 +762,18 @@ async def test_report_round_trips_and_future_extensions_are_empty() -> None:
         )
 
 
+def test_report_contract_exposes_no_generic_data_view_hack() -> None:
+    """过期元数据必须由网关按 kind 显式构造。
+
+    报告契约不提供通用 ``data`` 视图属性：那会让网关的通用过期分支
+    误把研判报告读成对象画像元数据。
+    """
+    from full_view_agent.domain import analysis_report as analysis_report_module
+
+    assert not hasattr(AnalysisReportDataResult, "data")
+    assert not hasattr(analysis_report_module, "AnalysisReportDataView")
+
+
 @pytest.mark.asyncio
 async def test_report_contract_itself_rejects_status_and_limitation_pollution() -> None:
     executor, port, catalog = _executor(statuses={"housing": "partial"})

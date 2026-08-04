@@ -1609,6 +1609,83 @@ async def test_expired_result_keeps_metadata_but_rejects_payload_items() -> None
 
 
 @pytest.mark.asyncio
+async def test_expired_analysis_report_metadata_is_explicit_not_object_profile() -> None:
+    from datetime import UTC, datetime, timedelta
+
+    from full_view_agent.application.analysis_report import (
+        ANALYSIS_REPORT_DATA_SCHEMA_REF,
+    )
+    from full_view_agent.domain.analysis_report import AnalysisReportDataResult
+
+    runtime = runtime_fixture()
+    app = create_app(runtime)
+    auth = {"geoToken": "test-token-expired-analysis-report"}
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=app), base_url="http://test"
+    ) as client:
+        session_response = await client.post(
+            "/agent-api/v1/sessions",
+            headers={**auth, "Idempotency-Key": "idem-expired-analysis-session"},
+            json={"title": "过期研判报告"},
+        )
+        session_id = session_response.json()["data"]["session_id"]
+        owner_user_id = runtime.store.sessions[session_id].owner_user_id
+        run = await runtime.service.create_run(
+            user_id=owner_user_id,
+            session_id=session_id,
+            request=run_request(
+                message_id="web-msg-expired-analysis",
+                client_instance_id="cli-expired-analysis",
+            ),
+        )
+        await runtime.service.start_run(user_id=owner_user_id, run_id=run.run_id)
+        result = AnalysisReportDataResult(
+            result_id="res-expired-analysis-01",
+            data_schema_ref=ANALYSIS_REPORT_DATA_SCHEMA_REF,
+            result_fingerprint="sha256:" + "ab" * 32,
+            plan_id="plan-expired-analysis-01",
+            request_id="req-expired-analysis-01",
+            status="failed",
+            reason_code="ANALYSIS_FAILED",
+            sections=(),
+        ).model_copy(
+            update={
+                "payload_expires_at": datetime.now(UTC) - timedelta(seconds=1),
+                "evidence_ids": ["evd-expired-analysis-01"],
+            }
+        )
+        await runtime.store.save_result(
+            user_id=owner_user_id,
+            run_id=run.run_id,
+            result=result,
+        )
+
+        metadata = await client.get(
+            "/agent-api/v1/results/res-expired-analysis-01",
+            headers=auth,
+        )
+        items = await client.get(
+            "/agent-api/v1/results/res-expired-analysis-01/items",
+            headers=auth,
+        )
+
+    assert metadata.status_code == 200
+    data = metadata.json()["data"]
+    assert data["kind"] == "analysis_report"
+    assert data["payload_status"] == "expired"
+    assert "data" not in data
+    assert data["title"] == "区域研判报告"
+    assert data["summary"] == {
+        "status": "failed",
+        "section_count": 0,
+        "text": "区域研判报告 Payload 已过期。",
+    }
+    assert data["evidence_ids"] == ["evd-expired-analysis-01"]
+    assert items.status_code == 410
+    assert items.json()["error"]["code"] == "result_payload_expired"
+
+
+@pytest.mark.asyncio
 async def test_result_exposes_owner_scoped_evidence_without_internal_query_details() -> None:
     runtime = runtime_fixture()
     app = create_app(runtime)

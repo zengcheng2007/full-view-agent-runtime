@@ -140,6 +140,58 @@ def test_export_contracts_writes_openapi_and_versioned_json_schemas(tmp_path) ->
         ).is_file()
 
 
+def test_exported_contracts_cover_the_analysis_report_union(tmp_path) -> None:
+    export_contracts(tmp_path)
+
+    result_metadata = json.loads(
+        (tmp_path / "schemas" / "data" / "result-metadata.schema.json").read_text(
+            encoding="utf-8"
+        )
+    )
+    assert "analysis_report" in result_metadata["properties"]["kind"]["enum"]
+
+    tool_result = json.loads(
+        (tmp_path / "schemas" / "tools" / "tool-result.schema.json").read_text(
+            encoding="utf-8"
+        )
+    )
+    assert "AnalysisReportDataResult" in tool_result["$defs"]
+    data_result = tool_result["properties"]["data_result"]["anyOf"][0]
+    assert (
+        data_result["discriminator"]["mapping"]["analysis_report"]
+        == "#/$defs/AnalysisReportDataResult"
+    )
+    assert {"$ref": "#/$defs/AnalysisReportDataResult"} in data_result["oneOf"]
+
+    openapi = yaml.safe_load(
+        (tmp_path / "openapi" / "agent-api-v1.yaml").read_text(encoding="utf-8")
+    )
+    assert "AnalysisReportDataResult" in openapi["components"]["schemas"]
+
+
+def test_committed_contracts_cover_the_analysis_report_union() -> None:
+    committed_root = Path(__file__).resolve().parents[2] / "contracts"
+
+    result_metadata = json.loads(
+        (
+            committed_root / "schemas" / "data" / "result-metadata.schema.json"
+        ).read_text(encoding="utf-8")
+    )
+    assert "analysis_report" in result_metadata["properties"]["kind"]["enum"]
+
+    tool_result = json.loads(
+        (
+            committed_root / "schemas" / "tools" / "tool-result.schema.json"
+        ).read_text(encoding="utf-8")
+    )
+    assert "AnalysisReportDataResult" in tool_result["$defs"]
+
+    openapi = yaml.safe_load(
+        (committed_root / "openapi" / "agent-api-v1.yaml").read_text(encoding="utf-8")
+    )
+    assert "AnalysisReportDataResult" in openapi["components"]["schemas"]
+
+
 def test_committed_contracts_match_fresh_export(tmp_path) -> None:
     export_contracts(tmp_path)
     committed_root = Path(__file__).resolve().parents[2] / "contracts"

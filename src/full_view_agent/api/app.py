@@ -1425,6 +1425,13 @@ def _expired_result_metadata(result: DataResult) -> ResultMetadata:
             "candidate_count": result.candidate_count,
             "text": "区划候选 Payload 已过期。",
         }
+    elif result.kind == "analysis_report":
+        title = "区域研判报告"
+        summary = {
+            "status": result.status,
+            "section_count": len(result.sections),
+            "text": "区域研判报告 Payload 已过期。",
+        }
     else:
         title = result.data.title
         summary = {"text": "对象画像 Payload 已过期。"}

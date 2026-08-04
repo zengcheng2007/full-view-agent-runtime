@@ -77,14 +77,6 @@ class AnalysisReportExtensions(ContractModel):
     evidence_graph_refs: tuple[str, ...] = Field(default=(), max_length=0)
 
 
-class AnalysisReportDataView(ContractModel):
-    """报告通用只读视图；不进入序列化契约，不承载 payload。"""
-
-    model_config = ConfigDict(extra="forbid", frozen=True)
-
-    title: str
-
-
 class AnalysisReportDataResult(ContractModel):
     """框架无关的区域研判结构化结果（DataResult union 成员）。
 
@@ -157,8 +149,3 @@ class AnalysisReportDataResult(ContractModel):
         if self.limitations != expected_limitations:
             raise ValueError("report limitations must exactly match non-success sections")
         return self
-
-    @property
-    def data(self) -> AnalysisReportDataView:
-        """通用过期元数据分支读取的只读视图；服务端固定文案，非模型输入。"""
-        return AnalysisReportDataView(title="区域研判报告")
