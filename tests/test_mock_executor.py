@@ -461,15 +461,21 @@ async def test_executor_persists_result_and_evidence_for_every_successful_tool()
     messages = await store.list_messages(user_id="user-01", session_id=session.session_id)
     assistant = messages[-1]
     published = await events.list_events(run_id=run.run_id)
-    assert sorted(store.results) == ["res-multi-1", "res-multi-2"]
+    persisted_result_ids = set(store.results)
+    assert len(persisted_result_ids) == 2
+    assert persisted_result_ids.isdisjoint({"res-multi-1", "res-multi-2"})
     assert len(store.evidence) == 2
-    assert sum(event.type == "result.available" for event in published) == 2
+    result_events = [event for event in published if event.type == "result.available"]
+    assert {event.data["result_id"] for event in result_events} == persisted_result_ids
     assert sum(event.type == "evidence.available" for event in published) == 2
-    assert [item.result_id for item in assistant.content if item.type == "result_reference"] == [
-        "res-multi-1",
-        "res-multi-2",
-    ]
+    assert {
+        item.result_id for item in assistant.content if item.type == "result_reference"
+    } == persisted_result_ids
+    assert {evidence.result_id for evidence in store.evidence.values()} == (
+        persisted_result_ids
+    )
     assert len(assistant.evidence_ids) == 2
+    assert set(assistant.evidence_ids) == set(store.evidence)
 
 
 @pytest.mark.asyncio
