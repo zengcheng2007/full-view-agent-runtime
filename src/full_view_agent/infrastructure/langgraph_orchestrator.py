@@ -191,6 +191,12 @@ class LangGraphOrchestrator(NativeOrchestrator):
             "checkpoint_ns": mapping.checkpoint_ns,
         }
         config: RunnableConfig = {"configurable": configurable}
+        # One model action can span plan/execute/observe/validate.  LangGraph's
+        # default recursion limit (25) is lower than a valid Harness path with
+        # the default eight model turns, so size the framework guard above the
+        # authoritative Harness budget.  Harness remains responsible for the
+        # user-visible budget/loop outcome.
+        config["recursion_limit"] = (4 * self._harness.model_turn_limit) + 5
 
         async with self._checkpoint_manager.saver() as saver:
             compiled = graph.compile(checkpointer=saver)

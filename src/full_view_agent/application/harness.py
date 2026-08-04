@@ -460,6 +460,12 @@ class AgentHarness:
         self._tool_call_id_factory = tool_call_id_factory or (lambda: new_id("tcl"))
         self._call_fingerprinter = call_fingerprinter or DefaultToolCallFingerprinter()
 
+    @property
+    def model_turn_limit(self) -> int:
+        """Expose the framework-neutral action bound to orchestration adapters."""
+
+        return self._limits.max_model_turns
+
     def begin(
         self,
         *,

@@ -46,10 +46,13 @@ from full_view_agent.application.ports import OrchestrationPort
 from full_view_agent.application.session_run_service import SessionRunService
 from full_view_agent.application.tool_registry import ToolRegistry
 from full_view_agent.domain.models import (
+    AreaCandidatesData,
+    AreaCandidatesResult,
     AuthContext,
     AuthDataScopes,
     AuthorizedAreaScope,
     DataResult,
+    ToolResult,
 )
 from full_view_agent.infrastructure.event_broker import InMemoryEventBroker
 from full_view_agent.infrastructure.governance_adapter import (
@@ -136,6 +139,49 @@ class _BudgetPlanner:
                     "group_by": ["street"],
                 }
             },
+        )
+
+
+class _LongValidPathPlanner:
+    """Five distinct tools plus a two-pass completion revision exceed 25 graph steps."""
+
+    async def decide(self, state: HarnessState) -> ToolAction | FinishAction:
+        if state.model_turns < 5:
+            return ToolAction(
+                tool_id="governance.resolve_area",
+                arguments={"query": f"unresolved-{state.model_turns}"},
+            )
+        return FinishAction(summary="查询完成")
+
+
+class _UniqueResultExecutor:
+    async def execute(
+        self,
+        *,
+        tool_call_id: str,
+        tool_id: str,
+        raw_arguments: dict[str, object],
+        auth_context: AuthContext,
+    ) -> ToolResult:
+        del raw_arguments, auth_context
+        self._count = getattr(self, "_count", 0) + 1
+        return ToolResult(
+            tool_call_id=tool_call_id,
+            tool_id=tool_id,
+            tool_version="1.0.0",
+            status="success",
+            summary="区划未解析",
+            data_result=AreaCandidatesResult(
+                result_id=f"res_graph_path_{self._count}",
+                data_schema_ref="schema://data/area-candidates/1.0.0",
+                result_fingerprint=f"sha256:{self._count:064x}",
+                data=AreaCandidatesData(
+                    resolved_area_code=None,
+                    ambiguous=False,
+                    candidates=[],
+                ),
+                candidate_count=0,
+            ),
         )
 
 
@@ -438,6 +484,27 @@ async def test_langgraph_drives_harness_one_step_at_a_time() -> None:
     assert harness.execute_calls == 1
     assert harness.observe_calls == 1
     assert harness.validate_calls == 2
+
+
+@pytest.mark.asyncio
+async def test_langgraph_framework_limit_cannot_preempt_harness_completion() -> None:
+    harness = AgentHarness(
+        tool_executor=_UniqueResultExecutor(),
+        validator=DeterministicCompletionValidator(),
+    )
+    orch, store, events = _langgraph_factory(
+        harness=harness,
+        planner=_LongValidPathPlanner(),
+    )
+    run_id = await _make_run(store)
+
+    await orch.execute(user_id="u", run_id=run_id)
+
+    run = await store.get_run(user_id="u", run_id=run_id)
+    assert run.status == "completed"
+    event_types = [event.type for event in await events.list_events(run_id=run_id)]
+    assert "run.completed" in event_types
+    assert "run.failed" not in event_types
     run = await store.get_run(user_id="u", run_id=run_id)
     assert run.status == "completed"
 
