@@ -255,11 +255,10 @@ async def test_execution_rejects_a_general_agent_run() -> None:
         transport=httpx.ASGITransport(app=app), base_url="http://test"
     ) as client:
         run = await _create_run(client, "general-run", mode="agent")
-        plan = await _create_plan(client, "general-run", str(run["run_id"]))
         response = await client.post(
-            f"/agent-api/v1/runs/{run['run_id']}/analysis-plans/{plan['plan_id']}/executions",
+            f"/agent-api/v1/runs/{run['run_id']}/analysis-plans/plan-not-used/executions",
             headers={"geoToken": "general-run"},
-            json={"request_id": plan["request_id"]},
+            json={"request_id": "request-not-used"},
         )
 
     assert response.status_code == 409
