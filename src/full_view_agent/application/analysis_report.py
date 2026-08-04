@@ -16,6 +16,9 @@ from full_view_agent.application.analysis_semantic_spec import (
     AnalysisSemanticSpecError,
     AnalysisSemanticSpecFactory,
 )
+from full_view_agent.application.analysis_step_ledger import (
+    analysis_step_tool_call_id,
+)
 from full_view_agent.application.errors import ResourceNotFound
 from full_view_agent.application.fingerprints import canonical_fingerprint
 from full_view_agent.application.ports import AgentStore
@@ -419,9 +422,11 @@ class AnalysisReportAssembler:
                     "CHILD_TOOL_MISMATCH",
                     "child ToolResult does not match the planned canonical capability",
                 )
-            expected_tool_call_id = canonical_fingerprint(
-                domain="analysis-step-tool-call:1.0",
-                value={"plan_id": plan.plan_id, "step_id": planned.step_id},
+            expected_tool_call_id = analysis_step_tool_call_id(
+                tenant_id=auth_context.principal.tenant_id,
+                run_id=auth_context.run_id,
+                plan_id=plan.plan_id,
+                step_id=planned.step_id,
             )
             if tool_result.tool_call_id != expected_tool_call_id:
                 self._reject(

@@ -12,12 +12,34 @@ AnalysisStepLedgerStatus = Literal[
 ]
 
 
-def analysis_step_tool_call_id(*, plan_id: str, step_id: str) -> str:
-    """Derive the canonical call identity already used by AnalysisPlanExecutor."""
+def analysis_step_tool_call_id(
+    *, tenant_id: str, run_id: str, plan_id: str, step_id: str
+) -> str:
+    """Derive a tenant/run-scoped canonical call identity for one plan step."""
     return canonical_fingerprint(
-        domain="analysis-step-tool-call:1.0",
-        value={"plan_id": plan_id, "step_id": step_id},
+        domain="analysis-step-tool-call:1.1",
+        value={
+            "tenant_id": tenant_id,
+            "run_id": run_id,
+            "plan_id": plan_id,
+            "step_id": step_id,
+        },
     )
+
+
+class AnalysisStepObservationValidator(Protocol):
+    """Verifies that terminal ledger references belong to this observation."""
+
+    async def validate(
+        self,
+        *,
+        tenant_id: str,
+        user_id: str,
+        run_id: str,
+        tool_call_id: str,
+        result_id: str,
+        evidence_ids: tuple[str, ...],
+    ) -> None: ...
 
 
 class AnalysisStepLedgerEntry(ContractModel):

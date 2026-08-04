@@ -7,20 +7,35 @@ import os
 from pathlib import Path
 from uuid import uuid4
 
+import psycopg
 import pytest
 
+from full_view_agent.application.analysis_observation_validator import (
+    AgentStoreAnalysisObservationValidator,
+)
 from full_view_agent.application.analysis_step_ledger import (
     AnalysisStepLedgerConflict,
     analysis_step_tool_call_id,
 )
 from full_view_agent.application.errors import ResourceNotFound, RunStateConflict
+from full_view_agent.application.tool_observation_service import ToolObservationService
+from full_view_agent.application.tool_registry import ToolRegistry
 from full_view_agent.infrastructure.analysis_step_ledger_store import (
     InMemoryAnalysisStepLedgerStore,
     PostgresAnalysisStepLedgerStore,
 )
+from full_view_agent.infrastructure.event_broker import InMemoryEventBroker
+from full_view_agent.infrastructure.memory_store import InMemoryAgentStore
+
+from .test_tool_observation_service import _action, _running_run, _tool_result
 
 FINGERPRINT_A = "sha256:" + "a" * 64
 FINGERPRINT_B = "sha256:" + "b" * 64
+
+
+class _AcceptingObservationValidator:
+    async def validate(self, **_kwargs) -> None:
+        return None
 
 
 def _reserve_args(**overrides: str) -> dict[str, str]:
@@ -32,11 +47,21 @@ def _reserve_args(**overrides: str) -> dict[str, str]:
         "request_id": "request-a",
         "step_id": "step-population",
         "tool_call_id": analysis_step_tool_call_id(
-            plan_id="plan-a", step_id="step-population"
+            tenant_id="tenant-a",
+            run_id="run-a",
+            plan_id="plan-a",
+            step_id="step-population",
         ),
         "invocation_fingerprint": FINGERPRINT_A,
     }
     values.update(overrides)
+    if "tool_call_id" not in overrides:
+        values["tool_call_id"] = analysis_step_tool_call_id(
+            tenant_id=values["tenant_id"],
+            run_id=values["run_id"],
+            plan_id=values["plan_id"],
+            step_id=values["step_id"],
+        )
     return values
 
 
@@ -70,6 +95,114 @@ def test_v005_migration_is_portable_and_has_step_authority_columns() -> None:
         assert column in migration
     assert "PRIMARY KEY (run_id, step_id)" in migration
     assert "JSONB" not in migration.upper()
+    assert migration.strip().startswith("-- Migration V005")
+    assert "BEGIN;" in migration
+    assert "WHERE version = 5" in migration
+    assert migration.strip().endswith("COMMIT;")
+
+
+def test_tool_call_identity_is_scoped_to_tenant_and_run() -> None:
+    base = analysis_step_tool_call_id(
+        tenant_id="tenant-a",
+        run_id="run-a",
+        plan_id="plan-a",
+        step_id="step-population",
+    )
+    assert base != analysis_step_tool_call_id(
+        tenant_id="tenant-b",
+        run_id="run-a",
+        plan_id="plan-a",
+        step_id="step-population",
+    )
+    assert base != analysis_step_tool_call_id(
+        tenant_id="tenant-a",
+        run_id="run-b",
+        plan_id="plan-a",
+        step_id="step-population",
+    )
+
+
+@pytest.mark.asyncio
+async def test_memory_rejects_unverified_persisted_references() -> None:
+    store = InMemoryAnalysisStepLedgerStore()
+    reserved = await store.reserve_step(**_reserve_args())
+    executing = await store.transition_step(
+        **_transition_identity(),
+        expected_version=reserved.version,
+        status="executing",
+        result_id=None,
+        evidence_ids=(),
+    )
+    with pytest.raises(AnalysisStepLedgerConflict) as exc_info:
+        await store.transition_step(
+            **_transition_identity(),
+            expected_version=executing.version,
+            status="persisted",
+            result_id="does-not-exist",
+            evidence_ids=("does-not-exist",),
+        )
+    assert exc_info.value.code == "STEP_OBSERVATION_UNVERIFIED"
+
+
+@pytest.mark.asyncio
+async def test_agent_store_validator_accepts_only_the_durable_observation() -> None:
+    agent_store = InMemoryAgentStore()
+    _service, run = await _running_run(agent_store)
+    tool_call_id = analysis_step_tool_call_id(
+        tenant_id="tenant-a",
+        run_id=run.run_id,
+        plan_id="plan-a",
+        step_id="step-population",
+    )
+    observation = await ToolObservationService(
+        store=agent_store,
+        events=InMemoryEventBroker(),
+        registry=ToolRegistry.default(),
+        evidence_source_system="test-source",
+    ).persist(
+        user_id="user-01",
+        run=run,
+        action=_action(),
+        tool_result=_tool_result().model_copy(update={"tool_call_id": tool_call_id}),
+    )
+    ledger = InMemoryAnalysisStepLedgerStore(
+        observation_validator=AgentStoreAnalysisObservationValidator(agent_store)
+    )
+    reserved = await ledger.reserve_step(
+        tenant_id="tenant-a",
+        user_id="user-01",
+        run_id=run.run_id,
+        plan_id="plan-a",
+        request_id="request-a",
+        step_id="step-population",
+        tool_call_id=tool_call_id,
+        invocation_fingerprint=FINGERPRINT_A,
+    )
+    executing = await ledger.transition_step(
+        tenant_id="tenant-a",
+        user_id="user-01",
+        run_id=run.run_id,
+        step_id="step-population",
+        invocation_fingerprint=FINGERPRINT_A,
+        expected_version=reserved.version,
+        status="executing",
+        result_id=None,
+        evidence_ids=(),
+    )
+
+    persisted = await ledger.transition_step(
+        tenant_id="tenant-a",
+        user_id="user-01",
+        run_id=run.run_id,
+        step_id="step-population",
+        invocation_fingerprint=FINGERPRINT_A,
+        expected_version=executing.version,
+        status="persisted",
+        result_id=observation.data_result.result_id,
+        evidence_ids=(observation.evidence.evidence_id,),
+    )
+
+    assert persisted.result_id == observation.data_result.result_id
 
 
 @pytest.mark.asyncio
@@ -134,7 +267,9 @@ async def test_memory_wrong_invocation_fingerprint_fails_closed() -> None:
 
 @pytest.mark.asyncio
 async def test_memory_persisted_replay_returns_same_references() -> None:
-    store = InMemoryAnalysisStepLedgerStore()
+    store = InMemoryAnalysisStepLedgerStore(
+        observation_validator=_AcceptingObservationValidator()
+    )
     reserved = await store.reserve_step(**_reserve_args())
     executing = await store.transition_step(
         **_transition_identity(),
@@ -263,6 +398,13 @@ async def test_postgres_concurrency_isolation_recovery_and_restart() -> None:
     store = PostgresAnalysisStepLedgerStore(dsn=dsn, schema=schema)
     await store.initialize()
     try:
+        async with await psycopg.AsyncConnection.connect(dsn) as connection:
+            version = await (
+                await connection.execute(
+                    f'SELECT version FROM "{schema}".schema_version WHERE version = 5'
+                )
+            ).fetchone()
+        assert version == (5,)
         first, second = await asyncio.gather(
             store.reserve_step(**_reserve_args()),
             store.reserve_step(**_reserve_args()),
@@ -304,10 +446,46 @@ async def test_postgres_concurrency_isolation_recovery_and_restart() -> None:
 
 
 @pytest.mark.asyncio
+async def test_postgres_rejects_unverified_persisted_references() -> None:
+    schema = f"fva_step_{uuid4().hex[:12]}"
+    store = PostgresAnalysisStepLedgerStore(
+        dsn=_postgres_test_dsn(), schema=schema
+    )
+    await store.initialize()
+    try:
+        reserved = await store.reserve_step(**_reserve_args())
+        executing = await store.transition_step(
+            **_transition_identity(),
+            expected_version=reserved.version,
+            status="executing",
+            result_id=None,
+            evidence_ids=(),
+        )
+        with pytest.raises(AnalysisStepLedgerConflict) as exc_info:
+            await store.transition_step(
+                **_transition_identity(),
+                expected_version=executing.version,
+                status="persisted",
+                result_id="does-not-exist",
+                evidence_ids=("does-not-exist",),
+            )
+        assert exc_info.value.code == "STEP_OBSERVATION_UNVERIFIED"
+        current = await store.get_step(
+            **_transition_identity(),
+        )
+        assert current.status == "executing"
+    finally:
+        await store.drop_schema()
+
+
+@pytest.mark.asyncio
 async def test_postgres_persisted_replay_survives_restart() -> None:
     schema = f"fva_step_{uuid4().hex[:12]}"
     dsn = _postgres_test_dsn()
-    store = PostgresAnalysisStepLedgerStore(dsn=dsn, schema=schema)
+    validator = _AcceptingObservationValidator()
+    store = PostgresAnalysisStepLedgerStore(
+        dsn=dsn, schema=schema, observation_validator=validator
+    )
     await store.initialize()
     try:
         reserved = await store.reserve_step(**_reserve_args())
@@ -325,7 +503,9 @@ async def test_postgres_persisted_replay_survives_restart() -> None:
             result_id="result-a",
             evidence_ids=("evidence-a",),
         )
-        restarted = PostgresAnalysisStepLedgerStore(dsn=dsn, schema=schema)
+        restarted = PostgresAnalysisStepLedgerStore(
+            dsn=dsn, schema=schema, observation_validator=validator
+        )
         replayed = await restarted.transition_step(
             **_transition_identity(),
             expected_version=executing.version,

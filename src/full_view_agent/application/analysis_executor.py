@@ -21,8 +21,10 @@ from full_view_agent.application.analysis_semantic_spec import (
     AnalysisSemanticSpecError,
     AnalysisSemanticSpecFactory,
 )
+from full_view_agent.application.analysis_step_ledger import (
+    analysis_step_tool_call_id,
+)
 from full_view_agent.application.errors import ReauthenticationRequired
-from full_view_agent.application.fingerprints import canonical_fingerprint
 from full_view_agent.application.ports import AgentStore
 from full_view_agent.application.semantic_executor import SemanticToolExecutor
 from full_view_agent.application.trusted_analysis_plan import (
@@ -341,9 +343,11 @@ class AnalysisPlanExecutor:
         raw_arguments: dict[str, object],
         call_counter: list[int],
     ) -> AnalysisStepExecution:
-        tool_call_id = canonical_fingerprint(
-            domain="analysis-step-tool-call:1.0",
-            value={"plan_id": plan.plan_id, "step_id": step.step_id},
+        tool_call_id = analysis_step_tool_call_id(
+            tenant_id=auth_context.principal.tenant_id,
+            run_id=auth_context.run_id,
+            plan_id=plan.plan_id,
+            step_id=step.step_id,
         )
         try:
             async with asyncio.timeout(step.timeout_ms / 1000):

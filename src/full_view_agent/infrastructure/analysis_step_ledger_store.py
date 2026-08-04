@@ -15,6 +15,7 @@ from full_view_agent.application.analysis_step_ledger import (
     AnalysisStepLedgerConflict,
     AnalysisStepLedgerEntry,
     AnalysisStepLedgerStatus,
+    AnalysisStepObservationValidator,
     analysis_step_tool_call_id,
 )
 from full_view_agent.application.errors import ResourceNotFound, RunStateConflict
@@ -30,9 +31,12 @@ _TRANSITIONS: dict[AnalysisStepLedgerStatus, frozenset[AnalysisStepLedgerStatus]
 
 
 class InMemoryAnalysisStepLedgerStore:
-    def __init__(self) -> None:
+    def __init__(
+        self, *, observation_validator: AnalysisStepObservationValidator | None = None
+    ) -> None:
         self._entries: dict[tuple[str, str], AnalysisStepLedgerEntry] = {}
         self._lock = asyncio.Lock()
+        self._observation_validator = observation_validator
 
     async def reserve_step(
         self,
@@ -100,6 +104,15 @@ class InMemoryAnalysisStepLedgerStore:
         result_id: str | None,
         evidence_ids: tuple[str, ...],
     ) -> AnalysisStepLedgerEntry:
+        await self._validate_persisted_observation(
+            tenant_id=tenant_id,
+            user_id=user_id,
+            run_id=run_id,
+            step_id=step_id,
+            status=status,
+            result_id=result_id,
+            evidence_ids=evidence_ids,
+        )
         async with self._lock:
             existing = self._entries.get((run_id, step_id))
             if existing is None:
@@ -117,6 +130,36 @@ class InMemoryAnalysisStepLedgerStore:
             if updated is not existing:
                 self._entries[(run_id, step_id)] = updated
             return updated
+
+    async def _validate_persisted_observation(
+        self,
+        *,
+        tenant_id: str,
+        user_id: str,
+        run_id: str,
+        step_id: str,
+        status: AnalysisStepLedgerStatus,
+        result_id: str | None,
+        evidence_ids: tuple[str, ...],
+    ) -> None:
+        if status != "persisted" or result_id is None or not evidence_ids:
+            return
+        entry = self._entries.get((run_id, step_id))
+        if entry is None:
+            raise ResourceNotFound("analysis step ledger entry not found")
+        if self._observation_validator is None:
+            raise AnalysisStepLedgerConflict(
+                "STEP_OBSERVATION_UNVERIFIED",
+                "persisted step references require a trusted observation validator",
+            )
+        await self._observation_validator.validate(
+            tenant_id=tenant_id,
+            user_id=user_id,
+            run_id=run_id,
+            tool_call_id=entry.tool_call_id,
+            result_id=result_id,
+            evidence_ids=evidence_ids,
+        )
 
     async def mark_indeterminate_if_executing(
         self,
@@ -142,13 +185,20 @@ class InMemoryAnalysisStepLedgerStore:
 
 
 class PostgresAnalysisStepLedgerStore:
-    def __init__(self, *, dsn: str, schema: str = "full_view_agent") -> None:
+    def __init__(
+        self,
+        *,
+        dsn: str,
+        schema: str = "full_view_agent",
+        observation_validator: AnalysisStepObservationValidator | None = None,
+    ) -> None:
         if not _SAFE_IDENTIFIER.fullmatch(schema):
             raise ValueError("PostgreSQL schema must be a safe lower-case identifier")
         self._dsn = dsn
         self._schema = schema
         self._init_lock = asyncio.Lock()
         self._initialized = False
+        self._observation_validator = observation_validator
 
     async def initialize(self) -> None:
         if self._initialized:
@@ -255,6 +305,20 @@ class PostgresAnalysisStepLedgerStore:
             if row is None:
                 raise ResourceNotFound("analysis step ledger entry not found")
             existing = _entry_from_row(row)
+            if status == "persisted" and result_id is not None and evidence_ids:
+                if self._observation_validator is None:
+                    raise AnalysisStepLedgerConflict(
+                        "STEP_OBSERVATION_UNVERIFIED",
+                        "persisted step references require a trusted observation validator",
+                    )
+                await self._observation_validator.validate(
+                    tenant_id=tenant_id,
+                    user_id=user_id,
+                    run_id=run_id,
+                    tool_call_id=existing.tool_call_id,
+                    result_id=result_id,
+                    evidence_ids=evidence_ids,
+                )
             updated = _validated_transition(
                 existing,
                 tenant_id=tenant_id,
@@ -329,6 +393,8 @@ class PostgresAnalysisStepLedgerStore:
     def _ddl_statements(self) -> tuple[str, ...]:
         prefix = f'"{self._schema}".'
         return (
+            f"CREATE TABLE IF NOT EXISTS {prefix}schema_version ("
+            "version INTEGER PRIMARY KEY, applied_at TIMESTAMPTZ NOT NULL DEFAULT now())",
             f"CREATE TABLE IF NOT EXISTS {prefix}analysis_step_ledger ("
             "tenant_id TEXT NOT NULL, user_id TEXT NOT NULL, run_id TEXT NOT NULL, "
             "plan_id TEXT NOT NULL, request_id TEXT NOT NULL, step_id TEXT NOT NULL, "
@@ -343,12 +409,17 @@ class PostgresAnalysisStepLedgerStore:
             f"ON {prefix}analysis_step_ledger(tenant_id, user_id, run_id)",
             f"CREATE INDEX IF NOT EXISTS idx_fva_analysis_step_call "
             f"ON {prefix}analysis_step_ledger(tool_call_id)",
+            f"INSERT INTO {prefix}schema_version (version) VALUES (5) "
+            "ON CONFLICT DO NOTHING",
         )
 
 
 def _reserved_entry(**values: str) -> AnalysisStepLedgerEntry:
     expected_call_id = analysis_step_tool_call_id(
-        plan_id=values["plan_id"], step_id=values["step_id"]
+        tenant_id=values["tenant_id"],
+        run_id=values["run_id"],
+        plan_id=values["plan_id"],
+        step_id=values["step_id"],
     )
     if values["tool_call_id"] != expected_call_id:
         raise AnalysisStepLedgerConflict(

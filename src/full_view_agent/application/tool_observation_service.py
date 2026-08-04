@@ -42,6 +42,15 @@ class ToolObservationPort(Protocol):
     ) -> PersistedToolObservation: ...
 
 
+def durable_tool_result_id(*, run_id: str, tool_call_id: str) -> str:
+    """Return the stable Result identity for a crash-replayed Tool call."""
+
+    return canonical_fingerprint(
+        domain="tool-observation-result:1.0",
+        value={"run_id": run_id, "tool_call_id": tool_call_id},
+    )
+
+
 class ToolObservationService:
     """Persist one observation before exposing events or UI commands.
 
@@ -78,9 +87,9 @@ class ToolObservationService:
         # observation identity: a crash may re-execute the same tool call and
         # produce a fresh random id.  Bind the durable result to the run-scoped
         # tool call so replay converges before any row or event is written.
-        result_id = canonical_fingerprint(
-            domain="tool-observation-result:1.0",
-            value={"run_id": run.run_id, "tool_call_id": tool_result.tool_call_id},
+        result_id = durable_tool_result_id(
+            run_id=run.run_id,
+            tool_call_id=tool_result.tool_call_id,
         )
         data_result = data_result.model_copy(update={"result_id": result_id})
         evidence_id = canonical_fingerprint(

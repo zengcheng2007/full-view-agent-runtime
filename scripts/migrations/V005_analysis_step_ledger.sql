@@ -1,3 +1,9 @@
+-- Migration V005: crash-safe analysis step authority ledger.
+
+BEGIN;
+
+CREATE SCHEMA IF NOT EXISTS full_view_agent;
+
 CREATE TABLE IF NOT EXISTS full_view_agent.analysis_step_ledger (
     tenant_id TEXT NOT NULL,
     user_id TEXT NOT NULL,
@@ -26,3 +32,11 @@ CREATE INDEX IF NOT EXISTS idx_fva_analysis_step_owner
 
 CREATE INDEX IF NOT EXISTS idx_fva_analysis_step_call
     ON full_view_agent.analysis_step_ledger(tool_call_id);
+
+INSERT INTO full_view_agent.schema_version (version)
+SELECT 5
+WHERE NOT EXISTS (
+    SELECT 1 FROM full_view_agent.schema_version WHERE version = 5
+);
+
+COMMIT;
