@@ -116,6 +116,20 @@ async def test_memory_capture_rejects_different_intent_and_hides_owner() -> None
         )
 
 
+async def test_memory_tampered_intent_fingerprint_fails_closed() -> None:
+    store = InMemoryAnalysisIntentHandoffStore()
+    captured = await store.capture(**capture_args())  # type: ignore[arg-type]
+    store._handoffs["run-a"] = captured.model_copy(  # noqa: SLF001
+        update={"intent": intent("housing")}
+    )
+
+    with pytest.raises(AnalysisIntentHandoffConflict) as exc_info:
+        await store.get_for_run(
+            tenant_id="tenant-a", user_id="user-a", run_id="run-a"
+        )
+    assert exc_info.value.code == "HANDOFF_STORE_INVALID"
+
+
 async def test_memory_lifecycle_is_cas_guarded_and_replayable() -> None:
     store = InMemoryAnalysisIntentHandoffStore()
     captured = await store.capture(**capture_args())  # type: ignore[arg-type]
@@ -306,6 +320,35 @@ async def test_postgres_corrupted_payload_fails_closed() -> None:
                 f'UPDATE "{schema}".analysis_intent_handoffs '
                 "SET intent_json = %s WHERE run_id = %s",
                 ('{"goals":["not-a-goal"]}', "run-a"),
+            )
+        with pytest.raises(AnalysisIntentHandoffConflict) as exc_info:
+            await store.get_for_run(
+                tenant_id="tenant-a", user_id="user-a", run_id="run-a"
+            )
+        assert exc_info.value.code == "HANDOFF_STORE_INVALID"
+    finally:
+        await store.drop_schema()
+
+
+@pytest.mark.parametrize("tampered_column", ["intent_json", "intent_fingerprint"])
+async def test_postgres_tampered_intent_authority_fails_closed(
+    tampered_column: str,
+) -> None:
+    schema = f"test_handoff_{uuid4().hex[:10]}"
+    dsn = postgres_dsn()
+    store = PostgresAnalysisIntentHandoffStore(dsn=dsn, schema=schema)
+    try:
+        await store.capture(**capture_args())  # type: ignore[arg-type]
+        tampered_value = (
+            intent("housing").model_dump_json()
+            if tampered_column == "intent_json"
+            else "sha256:" + "0" * 64
+        )
+        async with await psycopg.AsyncConnection.connect(dsn) as connection:
+            await connection.execute(
+                f'UPDATE "{schema}".analysis_intent_handoffs '
+                f"SET {tampered_column} = %s WHERE run_id = %s",
+                (tampered_value, "run-a"),
             )
         with pytest.raises(AnalysisIntentHandoffConflict) as exc_info:
             await store.get_for_run(

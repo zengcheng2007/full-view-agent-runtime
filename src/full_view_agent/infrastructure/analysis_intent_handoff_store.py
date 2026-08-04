@@ -5,6 +5,7 @@
 from __future__ import annotations
 
 import asyncio
+import hmac
 import json
 import re
 from datetime import UTC, datetime
@@ -54,6 +55,7 @@ class InMemoryAnalysisIntentHandoffStore:
             if existing is None:
                 self._handoffs[run_id] = requested
                 return requested
+            _validate_handoff_integrity(existing)
             _require_owner(existing, tenant_id=tenant_id, user_id=user_id)
             _require_same_capture(existing, requested)
             return existing
@@ -65,6 +67,7 @@ class InMemoryAnalysisIntentHandoffStore:
             existing = self._handoffs.get(run_id)
             if existing is None:
                 raise ResourceNotFound("analysis intent handoff not found")
+            _validate_handoff_integrity(existing)
             _require_owner(existing, tenant_id=tenant_id, user_id=user_id)
             return existing
 
@@ -87,6 +90,7 @@ class InMemoryAnalysisIntentHandoffStore:
             existing = self._handoffs.get(run_id)
             if existing is None:
                 raise ResourceNotFound("analysis intent handoff not found")
+            _validate_handoff_integrity(existing)
             _require_owner(existing, tenant_id=tenant_id, user_id=user_id)
             requested = _advanced_handoff(
                 existing,
@@ -310,7 +314,7 @@ _SELECT_COLUMNS = (
 def _new_handoff(
     *, tenant_id: str, user_id: str, session_id: str, run_id: str, intent: AnalysisIntentV1
 ) -> AnalysisIntentHandoff:
-    return AnalysisIntentHandoff(
+    handoff = AnalysisIntentHandoff(
         handoff_id=new_id("ahf"),
         tenant_id=tenant_id,
         user_id=user_id,
@@ -321,6 +325,20 @@ def _new_handoff(
             domain="analysis-intent-handoff:1.0", value=intent
         ),
     )
+    _validate_handoff_integrity(handoff)
+    return handoff
+
+
+def _validate_handoff_integrity(handoff: AnalysisIntentHandoff) -> None:
+    """Fail closed when the durable intent no longer matches its authority hash."""
+    expected = canonical_fingerprint(
+        domain="analysis-intent-handoff:1.0", value=handoff.intent
+    )
+    if not hmac.compare_digest(handoff.intent_fingerprint, expected):
+        raise AnalysisIntentHandoffConflict(
+            "HANDOFF_STORE_INVALID",
+            "stored handoff intent does not match its authority fingerprint",
+        )
 
 
 def _advanced_handoff(
@@ -398,6 +416,7 @@ def _options_json(options: tuple[HandoffClarificationOption, ...]) -> str:
 
 
 def _handoff_values(handoff: AnalysisIntentHandoff) -> tuple[object, ...]:
+    _validate_handoff_integrity(handoff)
     return (
         handoff.handoff_id,
         handoff.tenant_id,
@@ -421,7 +440,7 @@ def _handoff_values(handoff: AnalysisIntentHandoff) -> tuple[object, ...]:
 
 def _handoff_from_row(row: tuple[object, ...]) -> AnalysisIntentHandoff:
     try:
-        return AnalysisIntentHandoff(
+        handoff = AnalysisIntentHandoff(
             handoff_id=str(row[0]),
             tenant_id=str(row[1]),
             user_id=str(row[2]),
@@ -440,6 +459,10 @@ def _handoff_from_row(row: tuple[object, ...]) -> AnalysisIntentHandoff:
             created_at=row[15],  # type: ignore[arg-type]
             updated_at=row[16],  # type: ignore[arg-type]
         )
+        _validate_handoff_integrity(handoff)
+        return handoff
+    except AnalysisIntentHandoffConflict:
+        raise
     except (TypeError, ValueError, ValidationError) as exc:
         raise AnalysisIntentHandoffConflict(
             "HANDOFF_STORE_INVALID", "stored handoff failed contract validation"
