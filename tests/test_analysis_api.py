@@ -1,6 +1,8 @@
 """HTTP contract for trusted server-created AnalysisPlan resources."""
 
+import os
 from datetime import UTC, datetime, timedelta
+from uuid import uuid4
 
 import httpx
 import pytest
@@ -8,6 +10,9 @@ from pydantic import SecretStr
 
 from full_view_agent.api.app import RuntimeContainer, create_app
 from full_view_agent.domain.models import LegacyIdentitySnapshot, Principal
+from full_view_agent.infrastructure.analysis_plan_repository import (
+    PostgresAnalysisPlanRepository,
+)
 from full_view_agent.infrastructure.credential_broker import InMemoryCredentialBroker
 from full_view_agent.infrastructure.legacy_identity import HashedLegacyIdentityAdapter
 
@@ -17,7 +22,8 @@ class _MutableIdentityAdapter:
         self.tenant_id = "tenant-a"
         self.authorized = True
 
-    async def resolve(self, _raw_token: SecretStr) -> LegacyIdentitySnapshot:
+    async def resolve(self, raw_token: SecretStr) -> LegacyIdentitySnapshot:
+        del raw_token
         return LegacyIdentitySnapshot(
             principal=Principal(
                 tenant_id=self.tenant_id,
@@ -136,6 +142,49 @@ async def test_create_analysis_plan_is_server_authored_persisted_and_idempotent(
 
 
 @pytest.mark.asyncio
+async def test_create_analysis_plan_persists_through_real_postgres_api_path() -> None:
+    dsn = os.getenv("FULL_VIEW_TEST_DATABASE_URL")
+    if not dsn:
+        pytest.skip("FULL_VIEW_TEST_DATABASE_URL is not configured")
+    schema = f"fva_analysis_api_{uuid4().hex}"
+    repository = PostgresAnalysisPlanRepository(dsn=dsn, schema=schema)
+    runtime = RuntimeContainer(
+        identity_port=HashedLegacyIdentityAdapter(),
+        credentials=InMemoryCredentialBroker(),
+        analysis_plan_repository=repository,
+    )
+    token = "analysis-postgres-owner"
+    try:
+        async with httpx.AsyncClient(
+            transport=httpx.ASGITransport(app=create_app(runtime)),
+            base_url="http://test",
+        ) as client:
+            run_id = await _create_run(client, token)
+            response = await client.post(
+                f"/agent-api/v1/runs/{run_id}/analysis-plans",
+                headers={
+                    "geoToken": token,
+                    "Idempotency-Key": "analysis-postgres-plan",
+                },
+                json=_analysis_request(),
+            )
+
+        assert response.status_code == 201
+        identity = await runtime.identity_port.resolve(SecretStr(token))
+        restarted = PostgresAnalysisPlanRepository(dsn=dsn, schema=schema)
+        stored = await restarted.get(
+            tenant_id=identity.principal.tenant_id,
+            user_id=identity.principal.user_id,
+            run_id=run_id,
+            plan_id=response.json()["data"]["plan_id"],
+        )
+        assert stored is not None
+        assert stored.request_id == "analysis-request-01"
+    finally:
+        await repository.drop_schema()
+
+
+@pytest.mark.asyncio
 async def test_analysis_plan_refreshes_authorization_from_current_request() -> None:
     runtime = _runtime()
     app = create_app(runtime)
@@ -145,10 +194,12 @@ async def test_analysis_plan_refreshes_authorization_from_current_request() -> N
         base_url="http://test",
     ) as client:
         run_id = await _create_run(client, token)
+        assert runtime.auth_contexts is not None
         before = await runtime.auth_contexts.get(
             user_id=(await runtime.identity_port.resolve(SecretStr(token))).principal.user_id,
             run_id=run_id,
         )
+        assert before is not None
         response = await client.post(
             f"/agent-api/v1/runs/{run_id}/analysis-plans",
             headers={"geoToken": token, "Idempotency-Key": "analysis-refresh-plan"},
