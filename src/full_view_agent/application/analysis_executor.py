@@ -15,13 +15,20 @@ from full_view_agent.application.analysis_plan_integrity import (
 )
 from full_view_agent.application.analysis_plan_repository import (
     AnalysisPlanRepository,
-    AnalysisPlanStoreRejected,
 )
 from full_view_agent.application.analysis_planner import AnalysisPlanner
+from full_view_agent.application.analysis_semantic_spec import (
+    AnalysisSemanticSpecError,
+    AnalysisSemanticSpecFactory,
+)
 from full_view_agent.application.errors import ReauthenticationRequired
 from full_view_agent.application.fingerprints import canonical_fingerprint
 from full_view_agent.application.ports import AgentStore
 from full_view_agent.application.semantic_executor import SemanticToolExecutor
+from full_view_agent.application.trusted_analysis_plan import (
+    AnalysisExecutionRejected,
+    TrustedAnalysisPlanLoader,
+)
 from full_view_agent.domain.analysis_execution import (
     AnalysisExecutionResult,
     AnalysisExecutionStatus,
@@ -55,14 +62,6 @@ class AnalysisPlanExecutionPort(Protocol):
     ) -> AnalysisExecutionResult: ...
 
 
-class AnalysisExecutionRejected(Exception):
-    """任何工具调用前的计划完整性拒绝。"""
-
-    def __init__(self, code: str, message: str) -> None:
-        self.code = code
-        super().__init__(f"analysis execution rejected [{code}]: {message}")
-
-
 class AnalysisPlanExecutor:
     """按 DAG ready set 执行计划，并严格实施并发与时间预算。"""
 
@@ -89,7 +88,12 @@ class AnalysisPlanExecutor:
             raise ValueError("analysis executor and planner must share the same catalog")
         self._semantic_executor = semantic_executor
         self._planner = planner
-        self._plan_repository = plan_repository
+        self._plan_loader = TrustedAnalysisPlanLoader(
+            catalog=catalog,
+            planner=planner,
+            repository=plan_repository,
+        )
+        self._semantic_spec_factory = AnalysisSemanticSpecFactory(catalog)
 
     async def execute(
         self,
@@ -98,35 +102,11 @@ class AnalysisPlanExecutor:
         request_id: str,
         auth_context: AuthContext,
     ) -> AnalysisExecutionResult:
-        try:
-            loaded = await self._plan_repository.get(
-                tenant_id=auth_context.principal.tenant_id,
-                user_id=auth_context.principal.user_id,
-                run_id=auth_context.run_id,
-                plan_id=plan_id,
-            )
-        except AnalysisPlanStoreRejected as exc:
-            raise AnalysisExecutionRejected(
-                "PLAN_STORE_REJECTED",
-                "server-side analysis plan failed integrity validation",
-            ) from exc
-        if loaded is None:
-            raise AnalysisExecutionRejected(
-                "PLAN_NOT_FOUND", "server-side analysis plan was not found"
-            )
-        plan = self._revalidate_plan(loaded)
-        if plan.plan_id != plan_id:
-            raise AnalysisExecutionRejected(
-                "PLAN_SOURCE_ID_MISMATCH",
-                "loaded plan id does not match the requested plan id",
-            )
-        if plan.request_id != request_id:
-            raise AnalysisExecutionRejected(
-                "PLAN_REQUEST_MISMATCH",
-                "loaded plan is not bound to this execution request",
-            )
-        self._validate_plan_snapshot(plan)
-        self._validate_replanning(plan, auth_context=auth_context)
+        plan = await self._plan_loader.load(
+            plan_id=plan_id,
+            request_id=request_id,
+            auth_context=auth_context,
+        )
         semantic_arguments = {
             step.step_id: self._semantic_arguments(plan, step)
             for step in plan.steps
@@ -434,26 +414,16 @@ class AnalysisPlanExecutor:
         plan: AnalysisPlan,
         step: AnalysisStep,
     ) -> dict[str, object]:
-        subject = self._catalog.subject(step.subject)
-        if subject is None or not isinstance(step.scope_ref, AreaScopeRef):
+        try:
+            spec = self._semantic_spec_factory.build(plan, step)
+        except AnalysisSemanticSpecError as exc:
             raise AnalysisExecutionRejected(
                 "QUERY_SPEC_NOT_DERIVABLE", "step subject or scope is not executable"
-            )
-        group_by = self._default_group_by(subject, step.scope_ref)
+            ) from exc
         return {
             "catalog_version": plan.catalog_version,
             "catalog_fingerprint": plan.catalog_fingerprint,
-            "spec": {
-                "subject": subject.subject_id,
-                "metrics": [metric.metric_id for metric in subject.metrics],
-                "scope": step.scope_ref.scope.model_dump(mode="json"),
-                "group_by": group_by,
-                "filters": [
-                    required.model_dump(mode="json")
-                    for required in subject.required_filters
-                ],
-                "output": "table",
-            },
+            "spec": spec.model_dump(mode="json"),
         }
 
     @staticmethod

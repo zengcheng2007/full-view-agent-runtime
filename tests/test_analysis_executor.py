@@ -177,6 +177,22 @@ class _ControlledSemanticPort(SemanticToolExecutor):
             if subject in self.exceptions:
                 raise self.exceptions[subject]
             status = self.statuses.get(subject)
+            if status == "partial":
+                real = await self.inner.execute(
+                    tool_call_id=tool_call_id,
+                    tool_id=tool_id,
+                    raw_arguments=raw_arguments,
+                    auth_context=auth_context,
+                )
+                return real.model_copy(
+                    update={
+                        "status": "partial",
+                        "summary": self.summaries.get(
+                            subject, f"{subject} controlled partial"
+                        ),
+                        "warnings": [f"{subject.upper()}_PARTIAL"],
+                    }
+                )
             if status is not None:
                 return ToolResult(
                     tool_call_id=tool_call_id,
