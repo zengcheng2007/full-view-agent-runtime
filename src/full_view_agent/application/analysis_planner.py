@@ -79,6 +79,15 @@ class AnalysisPlanner:
         """只读暴露规划所用 Catalog，供组合根防止错接。"""
         return self._catalog
 
+    @property
+    def default_budget(self) -> PlanBudget:
+        """只读暴露服务端默认预算策略。
+
+        ``PlanBudget`` 为 frozen 契约模型，可安全共享实例；意图编译服务
+        用它绑定幂等指纹——默认预算变化必须产生新的 request_id。
+        """
+        return self._default_budget
+
     def plan(
         self,
         request: AnalysisRequest,

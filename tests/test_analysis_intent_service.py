@@ -80,8 +80,14 @@ def make_auth_context(
     entitlements: tuple[str, ...] = ALL_ENTITLEMENTS,
     datasets: tuple[str, ...] = ALL_DATASETS,
     area_codes: tuple[str, ...] = ("3301",),
+    areas: tuple[tuple[str, bool], ...] | None = None,
     field_policy_set: str = "governance_analyst_v1",
 ) -> AuthContext:
+    effective_areas = (
+        areas
+        if areas is not None
+        else tuple((code, True) for code in area_codes)
+    )
     return AuthContext.model_validate(
         {
             "auth_context_id": f"authctx-{user_id}-{run_id}",
@@ -99,8 +105,8 @@ def make_auth_context(
             "entitlements": list(entitlements),
             "data_scopes": {
                 "areas": [
-                    {"area_code": code, "include_descendants": True}
-                    for code in area_codes
+                    {"area_code": code, "include_descendants": include}
+                    for code, include in effective_areas
                 ],
                 "datasets": list(datasets),
                 "field_policy_set": field_policy_set,
@@ -136,12 +142,13 @@ def build_service(
     catalog: SemanticCatalog | None = None,
     resolver: FakeAreaResolver | None = None,
     repository: InMemoryAnalysisPlanRepository | None = None,
+    default_budget: PlanBudget | None = None,
 ) -> tuple[
     AnalysisIntentCompilationService,
     InMemoryAnalysisPlanRepository,
 ]:
     catalog = catalog or SemanticCatalog.default()
-    planner = AnalysisPlanner(catalog)
+    planner = AnalysisPlanner(catalog, default_budget=default_budget)
     repository = repository or InMemoryAnalysisPlanRepository()
     planning = AnalysisPlanningService(planner=planner, repository=repository)
     service = AnalysisIntentCompilationService(
@@ -611,3 +618,310 @@ async def test_area_authorization_follows_scope_direction() -> None:
             named_intent("housing", area_query="杭州市"), auth_context=district_only
         )
     assert exc_info.value.code == "AREA_NOT_AUTHORIZED"
+
+
+# ---------------------------------------------------------------------------
+# request_id 必须绑定解析后的可信编译上下文（scope/授权/Catalog/预算）
+# ---------------------------------------------------------------------------
+
+
+async def test_current_area_change_produces_distinct_request_ids() -> None:
+    # current_area 意图载荷不含任何区划字段：上下文区划从 330106 变到
+    # 330108 时，可信 scope 已不同，request_id 必须不同，否则同一
+    # request_id 会对应两个不同 plan，破坏唯一语义与恢复。
+    service, repository = build_service()
+    auth_context = make_auth_context()
+
+    first = await service.compile_intent(
+        current_intent("population"),
+        auth_context=auth_context,
+        current_area_code="330106",
+    )
+    second = await service.compile_intent(
+        current_intent("population"),
+        auth_context=auth_context,
+        current_area_code="330108",
+    )
+
+    assert first.scope_ref.scope.area_code == "330106"
+    assert second.scope_ref.scope.area_code == "330108"
+    assert first.request_id != second.request_id
+    assert first.plan_id != second.plan_id
+    assert len(repository._records) == 2
+
+
+async def test_resolver_drift_produces_distinct_request_ids() -> None:
+    # 同一 area_query 在解析器映射漂移后解析到不同区划：request_id 必须
+    # 绑定解析结果而非原始查询文本。
+    auth_context = make_auth_context()
+    service_before, repository = build_service(
+        resolver=FakeAreaResolver(
+            {"西湖区": (ResolvedArea(area_code="330106", area_name="西湖区"),)}
+        )
+    )
+    before = await service_before.compile_intent(
+        named_intent("population"), auth_context=auth_context
+    )
+
+    service_after, _ = build_service(
+        resolver=FakeAreaResolver(
+            {"西湖区": (ResolvedArea(area_code="330108", area_name="西湖区"),)}
+        ),
+        repository=repository,
+    )
+    after = await service_after.compile_intent(
+        named_intent("population"), auth_context=auth_context
+    )
+
+    assert before.scope_ref.scope.area_code == "330106"
+    assert after.scope_ref.scope.area_code == "330108"
+    assert before.request_id != after.request_id
+    assert before.plan_id != after.plan_id
+    assert len(repository._records) == 2
+
+
+async def test_catalog_change_produces_distinct_request_ids() -> None:
+    # Catalog 版本/执行指纹变化会改变编译产物：request_id 必须随之变化，
+    # 避免同一 (tenant,user,run,request_id) 唯一键下出现不同 plan 内容。
+    catalog = SemanticCatalog.default()
+    revised = SemanticCatalog(
+        catalog_version=f"{catalog.catalog_version}-rev2",
+        supported_spec_versions=catalog.supported_spec_versions,
+        subjects=catalog.subjects,
+        bindings=catalog.bindings,
+    )
+    assert revised.execution_fingerprint != catalog.execution_fingerprint
+
+    service_before, _ = build_service(catalog=catalog)
+    service_after, _ = build_service(catalog=revised)
+    auth_context = make_auth_context()
+
+    before = await service_before.compile_intent(
+        named_intent("population"), auth_context=auth_context
+    )
+    after = await service_after.compile_intent(
+        named_intent("population"), auth_context=auth_context
+    )
+
+    assert before.request_id != after.request_id
+
+
+async def test_default_budget_change_produces_distinct_request_ids() -> None:
+    # 服务端默认预算是编译上下文的一部分：默认预算策略变化必须产生新的
+    # request_id（编译产物 constraints 随之改变）。
+    service_default, _ = build_service()
+    service_tight, _ = build_service(
+        default_budget=PlanBudget(max_tool_calls=8, total_timeout_ms=30_000)
+    )
+    auth_context = make_auth_context()
+
+    baseline = await service_default.compile_intent(
+        named_intent("population"), auth_context=auth_context
+    )
+    tight = await service_tight.compile_intent(
+        named_intent("population"), auth_context=auth_context
+    )
+
+    assert baseline.constraints != tight.constraints
+    assert baseline.request_id != tight.request_id
+
+
+async def test_planner_exposes_read_only_default_budget() -> None:
+    budget = PlanBudget(max_tool_calls=5)
+    planner = AnalysisPlanner(SemanticCatalog.default(), default_budget=budget)
+    assert planner.default_budget == budget
+    assert AnalysisPlanner(SemanticCatalog.default()).default_budget == PlanBudget()
+
+
+# ---------------------------------------------------------------------------
+# 授权视图规范化：顺序/重复不影响 request_id 与 plan
+# ---------------------------------------------------------------------------
+
+
+async def test_authorization_order_and_duplicates_do_not_change_request_id() -> None:
+    service, repository = build_service()
+    baseline = make_auth_context()
+    shuffled = make_auth_context(
+        entitlements=ALL_ENTITLEMENTS[::-1] + (ALL_ENTITLEMENTS[0],),
+        datasets=ALL_DATASETS[::-1] + (ALL_DATASETS[0],),
+        areas=(("3301", True), ("3301", True)),
+    )
+
+    first = await service.compile_intent(
+        named_intent("population"), auth_context=baseline
+    )
+    second = await service.compile_intent(
+        named_intent("population"), auth_context=shuffled
+    )
+
+    assert second.request_id == first.request_id
+    assert second.plan_id == first.plan_id
+    assert len(repository._records) == 1
+
+
+# ---------------------------------------------------------------------------
+# resolver 候选硬化：去重/冲突 fail closed/确定性顺序/上界
+# ---------------------------------------------------------------------------
+
+
+async def test_duplicate_candidate_entries_are_deduped_not_ambiguous() -> None:
+    service, _ = build_service(
+        resolver=FakeAreaResolver(
+            {
+                "西湖区": (
+                    ResolvedArea(area_code="330106", area_name="西湖区"),
+                    ResolvedArea(area_code="330106", area_name="西湖区"),
+                )
+            }
+        )
+    )
+
+    plan = await service.compile_intent(
+        named_intent("population"), auth_context=make_auth_context()
+    )
+
+    assert plan.scope_ref.scope.area_code == "330106"
+
+
+async def test_same_area_code_with_conflicting_names_fails_closed() -> None:
+    service, repository = build_service(
+        resolver=FakeAreaResolver(
+            {
+                "西湖区": (
+                    ResolvedArea(area_code="330106", area_name="西湖区"),
+                    ResolvedArea(area_code="330106", area_name="灵隐区"),
+                )
+            }
+        )
+    )
+
+    with pytest.raises(AnalysisIntentRejected) as exc_info:
+        await service.compile_intent(
+            named_intent("population"), auth_context=make_auth_context()
+        )
+
+    assert exc_info.value.code == "AREA_CANDIDATE_CONFLICT"
+    assert repository._records == {}
+
+
+async def test_clarification_candidates_are_deterministically_ordered() -> None:
+    # resolver 返回顺序任意：歧义候选必须按编码确定性排序。
+    service, _ = build_service(
+        resolver=FakeAreaResolver(
+            {
+                "新区": (
+                    ResolvedArea(area_code="330110", area_name="临江新区"),
+                    ResolvedArea(area_code="330109", area_name="钱塘新区"),
+                )
+            }
+        )
+    )
+
+    with pytest.raises(AnalysisIntentClarificationRequired) as exc_info:
+        await service.compile_intent(
+            named_intent("population", area_query="新区"),
+            auth_context=make_auth_context(),
+        )
+
+    assert [candidate.area_code for candidate in exc_info.value.candidates] == [
+        "330109",
+        "330110",
+    ]
+
+
+async def test_candidate_count_above_bound_fails_closed() -> None:
+    overflow = tuple(
+        ResolvedArea(area_code=f"3301{i:02d}", area_name=f"候选区{i}")
+        for i in range(33)
+    )
+    service, repository = build_service(
+        resolver=FakeAreaResolver({"大区": overflow})
+    )
+
+    with pytest.raises(AnalysisIntentRejected) as exc_info:
+        await service.compile_intent(
+            named_intent("population", area_query="大区"),
+            auth_context=make_auth_context(),
+        )
+
+    assert exc_info.value.code == "AREA_CANDIDATES_OVERFLOW"
+    assert repository._records == {}
+
+
+async def test_any_structurally_invalid_candidate_fails_closed() -> None:
+    # 候选必须先完整结构校验：任一候选结构非法即整体 fail closed，
+    # 不得静默丢弃后继续编译。
+    service, repository = build_service(
+        resolver=FakeAreaResolver(
+            {
+                "混合坏区": (
+                    ResolvedArea(area_code="330106", area_name="西湖区"),
+                    ResolvedArea(area_code="33010600X", area_name="坏编码区"),
+                )
+            }
+        )
+    )
+
+    with pytest.raises(AnalysisIntentRejected) as exc_info:
+        await service.compile_intent(
+            named_intent("population", area_query="混合坏区"),
+            auth_context=make_auth_context(),
+        )
+
+    assert exc_info.value.code == "AREA_CODE_INVALID"
+    assert repository._records == {}
+
+
+async def test_validation_bypassed_candidate_is_revalidated_and_rejected() -> None:
+    # 绕过校验构造（model_construct）的候选必须被重新校验拦截。
+    smuggled = ResolvedArea.model_construct(
+        area_code="330106", area_name="区" * 101
+    )
+    service, repository = build_service(
+        resolver=FakeAreaResolver({"西湖区": (smuggled,)})
+    )
+
+    with pytest.raises(AnalysisIntentRejected) as exc_info:
+        await service.compile_intent(
+            named_intent("population"), auth_context=make_auth_context()
+        )
+
+    assert exc_info.value.code == "AREA_CODE_INVALID"
+    assert repository._records == {}
+
+
+def test_resolved_area_contract_is_frozen_bounded_and_strict() -> None:
+    area = ResolvedArea(area_code="330106", area_name="西湖区")
+
+    with pytest.raises(ValidationError):
+        area.area_name = "滨江区"  # type: ignore[misc]
+    with pytest.raises(ValidationError):
+        ResolvedArea(area_code="", area_name="西湖区")
+    with pytest.raises(ValidationError):
+        ResolvedArea(area_code="3" * 33, area_name="西湖区")
+    with pytest.raises(ValidationError):
+        ResolvedArea(area_code="330106", area_name="")
+    with pytest.raises(ValidationError):
+        ResolvedArea(area_code="330106", area_name="区" * 101)
+    with pytest.raises(ValidationError):
+        ResolvedArea(area_code="330106", area_name="西湖区", evil="inject")  # type: ignore[call-arg]
+
+
+# ---------------------------------------------------------------------------
+# 类型化 fail closed：非字符串 current_area_code 不允许 TypeError 逃逸
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("hint", [330106, ("330106",), ["330106"], b"330106"])
+async def test_non_string_current_area_hint_fails_closed_typed(hint: object) -> None:
+    service, repository = build_service()
+
+    with pytest.raises(AnalysisIntentRejected) as exc_info:
+        await service.compile_intent(
+            current_intent("population"),
+            auth_context=make_auth_context(),
+            current_area_code=hint,  # type: ignore[arg-type]
+        )
+
+    assert exc_info.value.code == "CURRENT_AREA_INVALID"
+    assert repository._records == {}
