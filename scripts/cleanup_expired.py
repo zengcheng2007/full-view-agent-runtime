@@ -50,6 +50,13 @@ async def cleanup_expired(
         )
         run_ids = [row[0] for row in await old_runs_result.fetchall()]
         if run_ids:
+            # Analysis plans are authoritative run-scoped records and have no
+            # foreign key to the product ledger, so delete them explicitly
+            # before their owning runs.
+            await conn.execute(
+                f"DELETE FROM {prefix}analysis_plans WHERE run_id = ANY(%s)",
+                (run_ids,),
+            )
             # Delete receipts via frontend_commands (receipts have no run_id)
             await conn.execute(
                 f"DELETE FROM {prefix}frontend_command_receipts "

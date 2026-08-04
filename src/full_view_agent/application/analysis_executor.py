@@ -13,7 +13,10 @@ from pydantic import ValidationError
 from full_view_agent.application.analysis_plan_integrity import (
     recompute_analysis_plan_id,
 )
-from full_view_agent.application.analysis_plan_repository import AnalysisPlanRepository
+from full_view_agent.application.analysis_plan_repository import (
+    AnalysisPlanRepository,
+    AnalysisPlanStoreRejected,
+)
 from full_view_agent.application.analysis_planner import AnalysisPlanner
 from full_view_agent.application.errors import ReauthenticationRequired
 from full_view_agent.application.fingerprints import canonical_fingerprint
@@ -92,12 +95,18 @@ class AnalysisPlanExecutor:
         request_id: str,
         auth_context: AuthContext,
     ) -> AnalysisExecutionResult:
-        loaded = await self._plan_repository.get(
-            tenant_id=auth_context.principal.tenant_id,
-            user_id=auth_context.principal.user_id,
-            run_id=auth_context.run_id,
-            plan_id=plan_id,
-        )
+        try:
+            loaded = await self._plan_repository.get(
+                tenant_id=auth_context.principal.tenant_id,
+                user_id=auth_context.principal.user_id,
+                run_id=auth_context.run_id,
+                plan_id=plan_id,
+            )
+        except AnalysisPlanStoreRejected as exc:
+            raise AnalysisExecutionRejected(
+                "PLAN_STORE_REJECTED",
+                "server-side analysis plan failed integrity validation",
+            ) from exc
         if loaded is None:
             raise AnalysisExecutionRejected(
                 "PLAN_NOT_FOUND", "server-side analysis plan was not found"

@@ -6,6 +6,9 @@ from uuid import uuid4
 
 import pytest
 
+from full_view_agent.infrastructure.analysis_plan_repository import (
+    PostgresAnalysisPlanRepository,
+)
 from full_view_agent.infrastructure.postgres_persistence import PostgresAgentPersistence
 from scripts.cleanup_expired import cleanup_expired
 
@@ -23,6 +26,8 @@ async def test_cleanup_deletes_receipts_via_commands_and_evidence_via_results() 
     schema = f"fva_cleanup_{uuid4().hex[:12]}"
     store = PostgresAgentPersistence(dsn=pg_dsn, schema=schema)
     await store.initialize()
+    plan_store = PostgresAnalysisPlanRepository(dsn=pg_dsn, schema=schema)
+    await plan_store.initialize()
     try:
         import psycopg
 
@@ -76,6 +81,24 @@ async def test_cleanup_deletes_receipts_via_commands_and_evidence_via_results() 
                 "VALUES (%s, %s, %s, %s, %s)",
                 ("msg-cleanup", "ses-cleanup", run_id, past, "{}"),
             )
+            await conn.execute(
+                f"INSERT INTO {prefix}analysis_plans "
+                "(namespace, tenant_id, user_id, run_id, plan_id, request_id, "
+                "plan_json, catalog_version, catalog_fingerprint, created_at) "
+                "VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)",
+                (
+                    "namespace-cleanup",
+                    "tenant-cleanup",
+                    "user-cleanup",
+                    run_id,
+                    "plan-cleanup",
+                    "request-cleanup",
+                    "{}",
+                    "test-version",
+                    "test-fingerprint",
+                    past,
+                ),
+            )
             await conn.commit()
 
         # Run the actual cleanup function (not duplicated SQL)
@@ -91,6 +114,7 @@ async def test_cleanup_deletes_receipts_via_commands_and_evidence_via_results() 
                 "evidence",
                 "results",
                 "messages",
+                "analysis_plans",
                 "runs",
             ):
                 count = await conn.execute(

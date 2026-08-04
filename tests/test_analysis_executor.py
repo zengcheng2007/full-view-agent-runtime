@@ -15,6 +15,9 @@ from full_view_agent.application.analysis_executor import (
 from full_view_agent.application.analysis_plan_integrity import (
     recompute_analysis_plan_id,
 )
+from full_view_agent.application.analysis_plan_repository import (
+    AnalysisPlanStoreRejected,
+)
 from full_view_agent.application.analysis_planner import AnalysisPlanner
 from full_view_agent.application.errors import ReauthenticationRequired
 from full_view_agent.application.fingerprints import canonical_fingerprint
@@ -74,6 +77,7 @@ class _InMemoryAnalysisPlanRepository:
 
     def __init__(self) -> None:
         self.plans: dict[tuple[str, str, str, str], AnalysisPlan] = {}
+        self.error: AnalysisPlanStoreRejected | None = None
 
     async def get(
         self,
@@ -83,6 +87,8 @@ class _InMemoryAnalysisPlanRepository:
         run_id: str,
         plan_id: str,
     ) -> AnalysisPlan | None:
+        if self.error is not None:
+            raise self.error
         return self.plans.get((tenant_id, user_id, run_id, plan_id))
 
 
@@ -246,6 +252,25 @@ async def _execute_loaded(
         )
     finally:
         port.planner.expected_plan = None
+
+
+@pytest.mark.asyncio
+async def test_repository_integrity_failure_uses_stable_execution_rejection() -> None:
+    executor, port, _ = _executor()
+    port.plan_repository.error = AnalysisPlanStoreRejected(
+        "PLAN_JSON_INVALID",
+        "stored plan JSON is invalid",
+    )
+
+    with pytest.raises(AnalysisExecutionRejected) as exc_info:
+        await executor.execute(
+            plan_id="plan-corrupt",
+            request_id="request-corrupt",
+            auth_context=_full_auth_context(),
+        )
+
+    assert exc_info.value.code == "PLAN_STORE_REJECTED"
+    assert isinstance(exc_info.value.__cause__, AnalysisPlanStoreRejected)
 
 
 def _overview_plan(
