@@ -7,8 +7,18 @@ from pydantic import ConfigDict, Field, model_validator
 from full_view_agent.application.fingerprints import canonical_fingerprint
 from full_view_agent.domain.models import ContractModel
 
+AnalysisCheckpointStatus = Literal[
+    "success", "partial", "denied", "failed", "timeout", "skipped"
+]
 AnalysisStepLedgerStatus = Literal[
-    "reserved", "executing", "persisted", "indeterminate", "failed"
+    "reserved",
+    "executing",
+    "waiting_reauth",
+    "observed",
+    "persisted",
+    "synthetic",
+    "indeterminate",
+    "failed",
 ]
 
 
@@ -56,6 +66,8 @@ class AnalysisStepLedgerEntry(ContractModel):
     tool_call_id: str = Field(pattern=r"^sha256:[0-9a-f]{64}$")
     invocation_fingerprint: str = Field(pattern=r"^sha256:[0-9a-f]{64}$")
     status: AnalysisStepLedgerStatus = "reserved"
+    result_status: AnalysisCheckpointStatus | None = None
+    reason_code: str | None = Field(default=None, min_length=1, max_length=256)
     result_id: str | None = Field(default=None, min_length=1, max_length=128)
     evidence_ids: tuple[str, ...] = Field(default=(), max_length=64)
     version: int = Field(default=1, ge=1)
@@ -65,13 +77,49 @@ class AnalysisStepLedgerEntry(ContractModel):
         if len(self.evidence_ids) != len(set(self.evidence_ids)):
             raise ValueError("evidence ids must be unique")
         if self.status == "persisted":
-            if self.result_id is None or not self.evidence_ids:
+            if (
+                self.result_status not in {"success", "partial"}
+                or self.reason_code is None
+                or self.result_id is None
+                or not self.evidence_ids
+            ):
                 raise ValueError(
-                    "persisted steps require a result and at least one evidence id"
+                    "persisted steps require outcome, result and evidence references"
                 )
-        elif self.result_id is not None or self.evidence_ids:
+        elif self.status == "observed":
+            if (
+                self.result_status not in {"success", "partial"}
+                or self.reason_code is None
+                or self.result_id is not None
+                or self.evidence_ids
+            ):
+                raise ValueError(
+                    "observed steps require an outcome without result references"
+                )
+        elif self.status == "failed":
+            if (
+                self.result_status not in {"denied", "failed"}
+                or self.reason_code is None
+                or self.result_id is not None
+                or self.evidence_ids
+            ):
+                raise ValueError("failed steps require a denied or failed outcome")
+        elif self.status == "synthetic":
+            if (
+                self.result_status not in {"timeout", "skipped"}
+                or self.reason_code is None
+                or self.result_id is not None
+                or self.evidence_ids
+            ):
+                raise ValueError("synthetic steps require a timeout or skipped outcome")
+        elif (
+            self.result_status is not None
+            or self.reason_code is not None
+            or self.result_id is not None
+            or self.evidence_ids
+        ):
             raise ValueError(
-                "only persisted steps may carry result and evidence references"
+                "only terminal or observed steps may carry an outcome"
             )
         return self
 
@@ -120,9 +168,11 @@ class AnalysisStepLedgerStore(Protocol):
         status: AnalysisStepLedgerStatus,
         result_id: str | None,
         evidence_ids: tuple[str, ...],
+        result_status: AnalysisCheckpointStatus | None = None,
+        reason_code: str | None = None,
     ) -> AnalysisStepLedgerEntry: ...
 
-    async def mark_indeterminate_if_executing(
+    async def mark_indeterminate_if_unfinished(
         self,
         *,
         tenant_id: str,

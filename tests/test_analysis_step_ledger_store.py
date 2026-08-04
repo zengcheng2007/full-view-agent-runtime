@@ -99,6 +99,21 @@ def test_v005_migration_is_portable_and_has_step_authority_columns() -> None:
     assert migration.strip().startswith("-- Migration V005")
     assert "BEGIN;" in migration
     assert "WHERE version = 5" in migration
+    assert "result_status" not in migration
+    assert migration.strip().endswith("COMMIT;")
+
+
+def test_v006_migration_upgrades_outcomes_without_rewriting_v005() -> None:
+    migration = (
+        Path(__file__).parents[1]
+        / "scripts/migrations/V006_analysis_step_outcomes.sql"
+    ).read_text(encoding="utf-8")
+
+    assert "ADD COLUMN IF NOT EXISTS result_status TEXT" in migration
+    assert "ADD COLUMN IF NOT EXISTS reason_code TEXT" in migration
+    assert "waiting_reauth" in migration
+    assert "synthetic" in migration
+    assert "WHERE version = 6" in migration
     assert migration.strip().endswith("COMMIT;")
 
 
@@ -139,6 +154,8 @@ async def test_memory_rejects_unverified_persisted_references() -> None:
             **_transition_identity(),
             expected_version=executing.version,
             status="persisted",
+            result_status="success",
+            reason_code="STEP_TEST",
             result_id="does-not-exist",
             evidence_ids=("does-not-exist",),
         )
@@ -191,14 +208,29 @@ async def test_agent_store_validator_accepts_only_the_durable_observation() -> N
         evidence_ids=(),
     )
 
-    persisted = await ledger.transition_step(
+    observed = await ledger.transition_step(
         tenant_id="tenant-a",
         user_id="user-01",
         run_id=run.run_id,
         step_id="step-population",
         invocation_fingerprint=FINGERPRINT_A,
         expected_version=executing.version,
+        status="observed",
+        result_status="success",
+        reason_code="STEP_TEST",
+        result_id=None,
+        evidence_ids=(),
+    )
+    persisted = await ledger.transition_step(
+        tenant_id="tenant-a",
+        user_id="user-01",
+        run_id=run.run_id,
+        step_id="step-population",
+        invocation_fingerprint=FINGERPRINT_A,
+        expected_version=observed.version,
         status="persisted",
+        result_status="success",
+        reason_code="STEP_TEST",
         result_id=observation.data_result.result_id,
         evidence_ids=(observation.evidence.evidence_id,),
     )
@@ -279,17 +311,30 @@ async def test_memory_persisted_replay_returns_same_references() -> None:
         result_id=None,
         evidence_ids=(),
     )
-    persisted = await store.transition_step(
+    observed = await store.transition_step(
         **_transition_identity(),
         expected_version=executing.version,
+        status="observed",
+        result_status="success",
+        reason_code="STEP_TEST",
+        result_id=None,
+        evidence_ids=(),
+    )
+    persisted = await store.transition_step(
+        **_transition_identity(),
+        expected_version=observed.version,
         status="persisted",
+        result_status="success",
+        reason_code="STEP_TEST",
         result_id="result-a",
         evidence_ids=("evidence-a", "evidence-b"),
     )
     replayed = await store.transition_step(
         **_transition_identity(),
-        expected_version=executing.version,
+        expected_version=observed.version,
         status="persisted",
+        result_status="success",
+        reason_code="STEP_TEST",
         result_id="result-a",
         evidence_ids=("evidence-a", "evidence-b"),
     )
@@ -297,7 +342,7 @@ async def test_memory_persisted_replay_returns_same_references() -> None:
     assert persisted == replayed
     assert persisted.result_id == "result-a"
     assert persisted.evidence_ids == ("evidence-a", "evidence-b")
-    assert persisted.version == 3
+    assert persisted.version == 4
 
 
 @pytest.mark.asyncio
@@ -403,11 +448,11 @@ async def test_postgres_concurrency_isolation_recovery_and_restart() -> None:
             version = await (
                 await connection.execute(
                     sql.SQL(
-                        "SELECT version FROM {}.schema_version WHERE version = 5"
+                        "SELECT version FROM {}.schema_version WHERE version = 6"
                     ).format(sql.Identifier(schema))
                 )
             ).fetchone()
-        assert version == (5,)
+        assert version == (6,)
         first, second = await asyncio.gather(
             store.reserve_step(**_reserve_args()),
             store.reserve_step(**_reserve_args()),
@@ -469,6 +514,8 @@ async def test_postgres_rejects_unverified_persisted_references() -> None:
                 **_transition_identity(),
                 expected_version=executing.version,
                 status="persisted",
+                result_status="success",
+                reason_code="STEP_TEST",
                 result_id="does-not-exist",
                 evidence_ids=("does-not-exist",),
             )
@@ -499,10 +546,21 @@ async def test_postgres_persisted_replay_survives_restart() -> None:
             result_id=None,
             evidence_ids=(),
         )
-        persisted = await store.transition_step(
+        observed = await store.transition_step(
             **_transition_identity(),
             expected_version=executing.version,
+            status="observed",
+            result_status="partial",
+            reason_code="STEP_PARTIAL",
+            result_id=None,
+            evidence_ids=(),
+        )
+        persisted = await store.transition_step(
+            **_transition_identity(),
+            expected_version=observed.version,
             status="persisted",
+            result_status="partial",
+            reason_code="STEP_PARTIAL",
             result_id="result-a",
             evidence_ids=("evidence-a",),
         )
@@ -511,8 +569,10 @@ async def test_postgres_persisted_replay_survives_restart() -> None:
         )
         replayed = await restarted.transition_step(
             **_transition_identity(),
-            expected_version=executing.version,
+            expected_version=observed.version,
             status="persisted",
+            result_status="partial",
+            reason_code="STEP_PARTIAL",
             result_id="result-a",
             evidence_ids=("evidence-a",),
         )

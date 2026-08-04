@@ -12,6 +12,7 @@ import psycopg
 from pydantic import ValidationError
 
 from full_view_agent.application.analysis_step_ledger import (
+    AnalysisCheckpointStatus,
     AnalysisStepLedgerConflict,
     AnalysisStepLedgerEntry,
     AnalysisStepLedgerStatus,
@@ -22,9 +23,14 @@ from full_view_agent.application.errors import ResourceNotFound, RunStateConflic
 
 _SAFE_IDENTIFIER = re.compile(r"^[a-z][a-z0-9_]{0,62}$")
 _TRANSITIONS: dict[AnalysisStepLedgerStatus, frozenset[AnalysisStepLedgerStatus]] = {
-    "reserved": frozenset({"executing"}),
-    "executing": frozenset({"persisted", "indeterminate", "failed"}),
+    "reserved": frozenset({"executing", "synthetic"}),
+    "executing": frozenset(
+        {"waiting_reauth", "observed", "indeterminate", "failed"}
+    ),
+    "waiting_reauth": frozenset({"executing"}),
+    "observed": frozenset({"persisted", "indeterminate"}),
     "persisted": frozenset(),
+    "synthetic": frozenset(),
     "indeterminate": frozenset(),
     "failed": frozenset(),
 }
@@ -103,6 +109,8 @@ class InMemoryAnalysisStepLedgerStore:
         status: AnalysisStepLedgerStatus,
         result_id: str | None,
         evidence_ids: tuple[str, ...],
+        result_status: AnalysisCheckpointStatus | None = None,
+        reason_code: str | None = None,
     ) -> AnalysisStepLedgerEntry:
         await self._validate_persisted_observation(
             tenant_id=tenant_id,
@@ -127,6 +135,8 @@ class InMemoryAnalysisStepLedgerStore:
                 status=status,
                 result_id=result_id,
                 evidence_ids=evidence_ids,
+                result_status=result_status,
+                reason_code=reason_code,
             )
             if updated is not existing:
                 self._entries[(run_id, step_id)] = updated
@@ -165,7 +175,7 @@ class InMemoryAnalysisStepLedgerStore:
             evidence_ids=evidence_ids,
         )
 
-    async def mark_indeterminate_if_executing(
+    async def mark_indeterminate_if_unfinished(
         self,
         *,
         tenant_id: str,
@@ -186,6 +196,10 @@ class InMemoryAnalysisStepLedgerStore:
             result_id=None,
             evidence_ids=(),
         )
+
+    async def mark_indeterminate_if_executing(self, **values) -> AnalysisStepLedgerEntry:
+        """Compatibility alias retained for existing recovery callers."""
+        return await self.mark_indeterminate_if_unfinished(**values)
 
 
 class PostgresAnalysisStepLedgerStore:
@@ -250,9 +264,10 @@ class PostgresAnalysisStepLedgerStore:
             await connection.execute(
                 f'INSERT INTO "{self._schema}".analysis_step_ledger '
                 "(tenant_id, user_id, run_id, plan_id, request_id, step_id, "
-                "tool_call_id, invocation_fingerprint, status, result_id, "
+                "tool_call_id, invocation_fingerprint, status, result_status, "
+                "reason_code, result_id, "
                 "evidence_ids, version) VALUES (%s, %s, %s, %s, %s, %s, %s, "
-                "%s, %s, %s, %s, %s) ON CONFLICT (run_id, step_id) DO NOTHING",
+                "%s, %s, %s, %s, %s, %s, %s) ON CONFLICT (run_id, step_id) DO NOTHING",
                 _entry_values(requested),
             )
             row = await self._select_entry(connection, run_id=run_id, step_id=step_id)
@@ -300,6 +315,8 @@ class PostgresAnalysisStepLedgerStore:
         status: AnalysisStepLedgerStatus,
         result_id: str | None,
         evidence_ids: tuple[str, ...],
+        result_status: AnalysisCheckpointStatus | None = None,
+        reason_code: str | None = None,
     ) -> AnalysisStepLedgerEntry:
         await self.initialize()
         async with await psycopg.AsyncConnection.connect(self._dsn) as connection:
@@ -334,19 +351,24 @@ class PostgresAnalysisStepLedgerStore:
                 status=status,
                 result_id=result_id,
                 evidence_ids=evidence_ids,
+                result_status=result_status,
+                reason_code=reason_code,
             )
             if updated is existing:
                 return existing
             changed = await (
                 await connection.execute(
                     f'UPDATE "{self._schema}".analysis_step_ledger SET '
-                    "status = %s, result_id = %s, evidence_ids = %s, version = %s "
+                    "status = %s, result_status = %s, reason_code = %s, result_id = %s, "
+                    "evidence_ids = %s, version = %s "
                     "WHERE run_id = %s AND step_id = %s AND version = %s "
                     "RETURNING tenant_id, user_id, run_id, plan_id, request_id, "
                     "step_id, tool_call_id, invocation_fingerprint, status, "
-                    "result_id, evidence_ids, version",
+                    "result_status, reason_code, result_id, evidence_ids, version",
                     (
                         updated.status,
+                        updated.result_status,
+                        updated.reason_code,
                         updated.result_id,
                         _evidence_json(updated.evidence_ids),
                         updated.version,
@@ -360,7 +382,7 @@ class PostgresAnalysisStepLedgerStore:
                 raise RunStateConflict("analysis step ledger version changed")
             return _entry_from_row(changed)
 
-    async def mark_indeterminate_if_executing(
+    async def mark_indeterminate_if_unfinished(
         self,
         *,
         tenant_id: str,
@@ -380,7 +402,12 @@ class PostgresAnalysisStepLedgerStore:
             status="indeterminate",
             result_id=None,
             evidence_ids=(),
+            result_status=None,
         )
+
+    async def mark_indeterminate_if_executing(self, **values) -> AnalysisStepLedgerEntry:
+        """Compatibility alias retained for existing recovery callers."""
+        return await self.mark_indeterminate_if_unfinished(**values)
 
     async def _select_entry(
         self, connection, *, run_id: str, step_id: str, for_update: bool = False
@@ -389,7 +416,8 @@ class PostgresAnalysisStepLedgerStore:
         return await (
             await connection.execute(
                 f'SELECT tenant_id, user_id, run_id, plan_id, request_id, step_id, '
-                "tool_call_id, invocation_fingerprint, status, result_id, evidence_ids, "
+                "tool_call_id, invocation_fingerprint, status, result_status, "
+                "reason_code, result_id, evidence_ids, "
                 f'version FROM "{self._schema}".analysis_step_ledger '
                 f"WHERE run_id = %s AND step_id = %s{suffix}",
                 (run_id, step_id),
@@ -405,17 +433,45 @@ class PostgresAnalysisStepLedgerStore:
             "tenant_id TEXT NOT NULL, user_id TEXT NOT NULL, run_id TEXT NOT NULL, "
             "plan_id TEXT NOT NULL, request_id TEXT NOT NULL, step_id TEXT NOT NULL, "
             "tool_call_id TEXT NOT NULL, invocation_fingerprint TEXT NOT NULL, "
-            "status TEXT NOT NULL CHECK (status IN ('reserved', 'executing', "
-            "'persisted', 'indeterminate', 'failed')), result_id TEXT, "
+            "status TEXT NOT NULL, result_status TEXT, reason_code TEXT, result_id TEXT, "
             "evidence_ids TEXT NOT NULL, version BIGINT NOT NULL CHECK (version > 0), "
-            "PRIMARY KEY (run_id, step_id), CHECK ((status = 'persisted' AND "
-            "result_id IS NOT NULL AND evidence_ids <> '[]') OR (status <> 'persisted' "
-            "AND result_id IS NULL AND evidence_ids = '[]')))",
+            "PRIMARY KEY (run_id, step_id))",
+            f"ALTER TABLE {prefix}analysis_step_ledger "
+            "ADD COLUMN IF NOT EXISTS result_status TEXT, "
+            "ADD COLUMN IF NOT EXISTS reason_code TEXT",
+            f"UPDATE {prefix}analysis_step_ledger SET result_status = 'success', "
+            "reason_code = 'STEP_MIGRATED' WHERE status = 'persisted' "
+            "AND result_status IS NULL",
+            f"UPDATE {prefix}analysis_step_ledger SET result_status = 'failed', "
+            "reason_code = 'STEP_MIGRATED_FAILED' WHERE status = 'failed' "
+            "AND result_status IS NULL",
+            f"ALTER TABLE {prefix}analysis_step_ledger "
+            "DROP CONSTRAINT IF EXISTS analysis_step_ledger_status_check, "
+            "DROP CONSTRAINT IF EXISTS analysis_step_ledger_check, "
+            "DROP CONSTRAINT IF EXISTS analysis_step_ledger_status_check_v6, "
+            "DROP CONSTRAINT IF EXISTS analysis_step_ledger_references_check_v6",
+            f"ALTER TABLE {prefix}analysis_step_ledger ADD CONSTRAINT "
+            "analysis_step_ledger_status_check_v6 CHECK (status IN ('reserved', "
+            "'executing', 'waiting_reauth', 'observed', 'persisted', 'synthetic', "
+            "'indeterminate', 'failed')), ADD CONSTRAINT "
+            "analysis_step_ledger_references_check_v6 CHECK ((status = 'persisted' "
+            "AND result_status IN ('success', 'partial') AND reason_code IS NOT NULL "
+            "AND result_id IS NOT NULL AND evidence_ids <> '[]') OR (status = 'observed' "
+            "AND result_status IN ('success', 'partial') AND reason_code IS NOT NULL "
+            "AND result_id IS NULL AND evidence_ids = '[]') OR (status = 'failed' "
+            "AND result_status IN ('denied', 'failed') AND reason_code IS NOT NULL "
+            "AND result_id IS NULL AND evidence_ids = '[]') OR (status = 'synthetic' "
+            "AND result_status IN ('timeout', 'skipped') AND reason_code IS NOT NULL "
+            "AND result_id IS NULL AND evidence_ids = '[]') OR (status IN ('reserved', "
+            "'executing', 'waiting_reauth', 'indeterminate') AND result_status IS NULL "
+            "AND reason_code IS NULL AND result_id IS NULL AND evidence_ids = '[]'))",
             f"CREATE INDEX IF NOT EXISTS idx_fva_analysis_step_owner "
             f"ON {prefix}analysis_step_ledger(tenant_id, user_id, run_id)",
             f"CREATE INDEX IF NOT EXISTS idx_fva_analysis_step_call "
             f"ON {prefix}analysis_step_ledger(tool_call_id)",
             f"INSERT INTO {prefix}schema_version (version) VALUES (5) "
+            "ON CONFLICT DO NOTHING",
+            f"INSERT INTO {prefix}schema_version (version) VALUES (6) "
             "ON CONFLICT DO NOTHING",
         )
 
@@ -450,11 +506,15 @@ def _validated_transition(
     status: AnalysisStepLedgerStatus,
     result_id: str | None,
     evidence_ids: tuple[str, ...],
+    result_status: AnalysisCheckpointStatus | None = None,
+    reason_code: str | None = None,
 ) -> AnalysisStepLedgerEntry:
     _require_owner(existing, tenant_id=tenant_id, user_id=user_id)
     _require_invocation(existing, invocation_fingerprint)
     if (
         existing.status == status
+        and existing.result_status == result_status
+        and existing.reason_code == reason_code
         and existing.result_id == result_id
         and existing.evidence_ids == evidence_ids
     ):
@@ -471,6 +531,8 @@ def _validated_transition(
             {
                 **existing.model_dump(mode="python"),
                 "status": status,
+                "result_status": result_status,
+                "reason_code": reason_code,
                 "result_id": result_id,
                 "evidence_ids": evidence_ids,
                 "version": existing.version + 1,
@@ -493,6 +555,8 @@ def _entry_values(entry: AnalysisStepLedgerEntry) -> tuple[object, ...]:
         entry.tool_call_id,
         entry.invocation_fingerprint,
         entry.status,
+        entry.result_status,
+        entry.reason_code,
         entry.result_id,
         _evidence_json(entry.evidence_ids),
         entry.version,
@@ -501,7 +565,7 @@ def _entry_values(entry: AnalysisStepLedgerEntry) -> tuple[object, ...]:
 
 def _entry_from_row(row: tuple[object, ...]) -> AnalysisStepLedgerEntry:
     try:
-        raw_evidence = json.loads(str(row[10]))
+        raw_evidence = json.loads(str(row[12]))
         if not isinstance(raw_evidence, list) or not all(
             isinstance(item, str) for item in raw_evidence
         ):
@@ -516,9 +580,13 @@ def _entry_from_row(row: tuple[object, ...]) -> AnalysisStepLedgerEntry:
             tool_call_id=str(row[6]),
             invocation_fingerprint=str(row[7]),
             status=str(row[8]),  # type: ignore[arg-type]
-            result_id=None if row[9] is None else str(row[9]),
+            result_status=(
+                None if row[9] is None else str(row[9])  # type: ignore[arg-type]
+            ),
+            reason_code=None if row[10] is None else str(row[10]),
+            result_id=None if row[11] is None else str(row[11]),
             evidence_ids=tuple(raw_evidence),
-            version=int(str(row[11])),
+            version=int(str(row[13])),
         )
     except (TypeError, ValueError, json.JSONDecodeError, ValidationError) as exc:
         raise AnalysisStepLedgerConflict(

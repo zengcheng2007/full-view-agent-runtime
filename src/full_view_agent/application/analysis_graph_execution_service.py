@@ -141,7 +141,7 @@ class AnalysisGraphExecutionService:
     ) -> AnalysisReduction:
         self._require_run(analysis_run_id, auth_context)
         plan = await self._load(plan_id, request_id, auth_context)
-        await self._require_binding(plan, auth_context)
+        fingerprint = await self._require_binding(plan, auth_context)
         completed_by_id = self._validated_completed(plan, completed)
         pending = [step for step in plan.steps if step.step_id not in completed_by_id]
         if not pending:
@@ -163,6 +163,12 @@ class AnalysisGraphExecutionService:
                         tool_call_consumed=False,
                     )
                 )
+            await self._persist_synthetic_checkpoints(
+                plan=plan,
+                checkpoints=tuple(additions),
+                invocation_fingerprint=fingerprint,
+                auth_context=auth_context,
+            )
             return AnalysisReduction(additions=tuple(additions), terminal=True)
 
         ready: list[str] = []
@@ -184,6 +190,12 @@ class AnalysisGraphExecutionService:
             elif all(item is not None for item in dependencies):
                 ready.append(step.step_id)
         if additions:
+            await self._persist_synthetic_checkpoints(
+                plan=plan,
+                checkpoints=tuple(additions),
+                invocation_fingerprint=fingerprint,
+                auth_context=auth_context,
+            )
             return AnalysisReduction(additions=tuple(additions), terminal=False)
         if not ready:
             raise RunStateConflict("analysis graph cannot make deterministic progress")
@@ -229,21 +241,51 @@ class AnalysisGraphExecutionService:
         if ledger.status == "persisted":
             return await self._checkpoint_from_persisted(step, ledger, auth_context)
         if ledger.status in {"failed", "indeterminate"}:
+            if ledger.status == "failed":
+                if ledger.result_status not in {"denied", "failed"}:
+                    raise RunStateConflict("failed analysis step has no terminal status")
+                terminal_status = ledger.result_status
+            else:
+                terminal_status = "failed"
             return AnalysisStepCheckpoint(
                 step_id=step.step_id,
-                status="failed",
+                status=terminal_status,
                 reason_code=(
                     "STEP_EXECUTION_INDETERMINATE"
                     if ledger.status == "indeterminate"
-                    else "STEP_EXECUTION_FAILED"
+                    else ledger.reason_code or "STEP_EXECUTION_FAILED"
                 ),
                 tool_call_consumed=True,
             )
-        if ledger.status == "executing":
+        if ledger.status == "synthetic":
+            if ledger.result_status not in {"skipped", "timeout"}:
+                raise RunStateConflict("synthetic analysis step has no terminal status")
+            return AnalysisStepCheckpoint(
+                step_id=step.step_id,
+                status=ledger.result_status,
+                reason_code=ledger.reason_code or "STEP_SYNTHETIC",
+                tool_call_consumed=False,
+            )
+        if ledger.status == "observed":
             recovered = await self._recover_observation(step, ledger, auth_context)
             if recovered is not None:
                 return recovered
-            indeterminate = await self._steps.mark_indeterminate_if_executing(
+            indeterminate = await self._steps.mark_indeterminate_if_unfinished(
+                tenant_id=ledger.tenant_id,
+                user_id=ledger.user_id,
+                run_id=ledger.run_id,
+                step_id=ledger.step_id,
+                invocation_fingerprint=ledger.invocation_fingerprint,
+                expected_version=ledger.version,
+            )
+            return AnalysisStepCheckpoint(
+                step_id=step.step_id,
+                status="failed",
+                reason_code="STEP_EXECUTION_INDETERMINATE",
+                tool_call_consumed=indeterminate.status == "indeterminate",
+            )
+        if ledger.status == "executing":
+            indeterminate = await self._steps.mark_indeterminate_if_unfinished(
                 tenant_id=ledger.tenant_id,
                 user_id=ledger.user_id,
                 run_id=ledger.run_id,
@@ -258,6 +300,12 @@ class AnalysisGraphExecutionService:
                 tool_call_consumed=indeterminate.status == "indeterminate",
             )
 
+        action = self._action(plan, step, auth_context)
+        harness = AgentHarness(
+            tool_executor=self._semantic_executor,
+            limits=HarnessLimits(max_tool_calls=1, max_model_turns=1),
+            tool_call_id_factory=lambda: tool_call_id,
+        )
         executing = await self._steps.transition_step(
             tenant_id=ledger.tenant_id,
             user_id=ledger.user_id,
@@ -269,20 +317,26 @@ class AnalysisGraphExecutionService:
             result_id=None,
             evidence_ids=(),
         )
-        action = self._action(plan, step, auth_context)
-        harness = AgentHarness(
-            tool_executor=self._semantic_executor,
-            limits=HarnessLimits(max_tool_calls=1, max_model_turns=1),
-            tool_call_id_factory=lambda: tool_call_id,
-        )
+        control = harness.begin()
         try:
             execution = await harness.authorize_and_execute_once(
                 action=action,
                 auth_context=auth_context,
-                control=harness.begin(),
+                control=control,
             )
-            harness.observe_once(execution=execution, control=harness.begin())
+            harness.observe_once(execution=execution, control=control)
         except ReauthenticationRequired:
+            await self._steps.transition_step(
+                tenant_id=executing.tenant_id,
+                user_id=executing.user_id,
+                run_id=executing.run_id,
+                step_id=executing.step_id,
+                invocation_fingerprint=executing.invocation_fingerprint,
+                expected_version=executing.version,
+                status="waiting_reauth",
+                result_id=None,
+                evidence_ids=(),
+            )
             raise
         except Exception:
             await self._steps.transition_step(
@@ -293,6 +347,8 @@ class AnalysisGraphExecutionService:
                 invocation_fingerprint=executing.invocation_fingerprint,
                 expected_version=executing.version,
                 status="failed",
+                result_status="failed",
+                reason_code="STEP_EXECUTION_ERROR",
                 result_id=None,
                 evidence_ids=(),
             )
@@ -303,6 +359,8 @@ class AnalysisGraphExecutionService:
             )
         result = execution.result
         if result.status not in {"success", "partial"} or result.data_result is None:
+            failure_status = cast(Literal["denied", "failed"], result.status)
+            failure_reason = result.warnings[0] if result.warnings else "STEP_FAILED"
             failed = await self._steps.transition_step(
                 tenant_id=executing.tenant_id,
                 user_id=executing.user_id,
@@ -311,15 +369,36 @@ class AnalysisGraphExecutionService:
                 invocation_fingerprint=executing.invocation_fingerprint,
                 expected_version=executing.version,
                 status="failed",
+                result_status=failure_status,
+                reason_code=failure_reason,
                 result_id=None,
                 evidence_ids=(),
             )
             return AnalysisStepCheckpoint(
                 step_id=step.step_id,
-                status="failed",
-                reason_code=(result.warnings[0] if result.warnings else "STEP_FAILED"),
+                status=failure_status,
+                reason_code=failure_reason,
                 tool_call_consumed=failed.status == "failed",
             )
+        usable_status = cast(Literal["success", "partial"], result.status)
+        usable_reason = (
+            result.warnings[0]
+            if result.warnings
+            else "STEP_SUCCEEDED" if usable_status == "success" else "STEP_PARTIAL"
+        )
+        observed = await self._steps.transition_step(
+            tenant_id=executing.tenant_id,
+            user_id=executing.user_id,
+            run_id=executing.run_id,
+            step_id=executing.step_id,
+            invocation_fingerprint=executing.invocation_fingerprint,
+            expected_version=executing.version,
+            status="observed",
+            result_status=usable_status,
+            reason_code=usable_reason,
+            result_id=None,
+            evidence_ids=(),
+        )
         persisted = await self._observations.persist(
             user_id=auth_context.principal.user_id,
             run=await self._result_store.get_run(
@@ -329,24 +408,22 @@ class AnalysisGraphExecutionService:
             tool_result=result,
         )
         terminal = await self._steps.transition_step(
-            tenant_id=executing.tenant_id,
-            user_id=executing.user_id,
-            run_id=executing.run_id,
-            step_id=executing.step_id,
-            invocation_fingerprint=executing.invocation_fingerprint,
-            expected_version=executing.version,
+            tenant_id=observed.tenant_id,
+            user_id=observed.user_id,
+            run_id=observed.run_id,
+            step_id=observed.step_id,
+            invocation_fingerprint=observed.invocation_fingerprint,
+            expected_version=observed.version,
             status="persisted",
+            result_status=observed.result_status,
+            reason_code=observed.reason_code,
             result_id=persisted.data_result.result_id,
             evidence_ids=(persisted.evidence.evidence_id,),
         )
         return AnalysisStepCheckpoint(
             step_id=step.step_id,
-            status=result.status,
-            reason_code=(
-                result.warnings[0]
-                if result.warnings
-                else "STEP_SUCCEEDED" if result.status == "success" else "STEP_PARTIAL"
-            ),
+            status=usable_status,
+            reason_code=usable_reason,
             result_id=terminal.result_id,
             evidence_ids=terminal.evidence_ids,
         )
@@ -366,8 +443,13 @@ class AnalysisGraphExecutionService:
         completed_by_id = self._validated_completed(plan, completed)
         if len(completed_by_id) != len(plan.steps):
             raise RunStateConflict("analysis cannot finalize with unfinished steps")
+        await self._validate_step_attestations(
+            plan=plan,
+            completed=completed_by_id,
+            invocation_fingerprint=fingerprint,
+            auth_context=auth_context,
+        )
         status = self._overall_status(tuple(completed_by_id.values()), bool(plan.omissions))
-        reason_code = f"ANALYSIS_{status.upper()}"
         binding = await self._bindings.get_binding(
             tenant_id=auth_context.principal.tenant_id,
             user_id=auth_context.principal.user_id,
@@ -381,9 +463,10 @@ class AnalysisGraphExecutionService:
                 plan_id=plan.plan_id,
                 request_id=plan.request_id,
                 status=terminal_status,
-                reason_code=reason_code,
+                reason_code=f"ANALYSIS_{terminal_status.upper()}",
                 report_result_id=binding.report_result_id,
             )
+        reason_code = f"ANALYSIS_{status.upper()}"
         if status == "failed":
             await self._bindings.update_binding(
                 tenant_id=binding.tenant_id,
@@ -474,6 +557,10 @@ class AnalysisGraphExecutionService:
         ledger: AnalysisStepLedgerEntry,
         auth_context: AuthContext,
     ) -> AnalysisStepCheckpoint | None:
+        if ledger.result_status is None:
+            raise RunStateConflict("observed analysis step has no outcome status")
+        if ledger.reason_code is None:
+            raise RunStateConflict("observed analysis step has no reason code")
         result_id = durable_tool_result_id(
             run_id=ledger.run_id, tool_call_id=ledger.tool_call_id
         )
@@ -495,13 +582,15 @@ class AnalysisGraphExecutionService:
             invocation_fingerprint=ledger.invocation_fingerprint,
             expected_version=ledger.version,
             status="persisted",
+            result_status=ledger.result_status,
+            reason_code=ledger.reason_code,
             result_id=result.result_id,
             evidence_ids=tuple(result.evidence_ids),
         )
         return AnalysisStepCheckpoint(
             step_id=step.step_id,
-            status="success",
-            reason_code="STEP_RECOVERED",
+            status=ledger.result_status,
+            reason_code=ledger.reason_code,
             result_id=persisted.result_id,
             evidence_ids=persisted.evidence_ids,
         )
@@ -514,6 +603,10 @@ class AnalysisGraphExecutionService:
     ) -> AnalysisStepCheckpoint:
         if ledger.result_id is None:
             raise RunStateConflict("persisted analysis step has no result")
+        if ledger.result_status is None:
+            raise RunStateConflict("persisted analysis step has no outcome status")
+        if ledger.reason_code is None:
+            raise RunStateConflict("persisted analysis step has no reason code")
         await self._result_store.get_result_for_run(
             user_id=auth_context.principal.user_id,
             run_id=ledger.run_id,
@@ -521,8 +614,8 @@ class AnalysisGraphExecutionService:
         )
         return AnalysisStepCheckpoint(
             step_id=step.step_id,
-            status="success",
-            reason_code="STEP_REPLAYED",
+            status=ledger.result_status,
+            reason_code=ledger.reason_code,
             result_id=ledger.result_id,
             evidence_ids=ledger.evidence_ids,
         )
@@ -590,6 +683,112 @@ class AnalysisGraphExecutionService:
             omissions=plan.omissions,
             tool_call_count=sum(item.tool_call_consumed for item in completed.values()),
         )
+
+    async def _validate_step_attestations(
+        self,
+        *,
+        plan: AnalysisPlan,
+        completed: dict[str, AnalysisStepCheckpoint],
+        invocation_fingerprint: str,
+        auth_context: AuthContext,
+    ) -> None:
+        """Reject caller checkpoints that are not backed by the durable step ledger."""
+        for step in plan.steps:
+            checkpoint = completed[step.step_id]
+            try:
+                ledger = await self._steps.get_step(
+                    tenant_id=auth_context.principal.tenant_id,
+                    user_id=auth_context.principal.user_id,
+                    run_id=auth_context.run_id,
+                    step_id=step.step_id,
+                    invocation_fingerprint=invocation_fingerprint,
+                )
+            except ResourceNotFound:
+                raise RunStateConflict(
+                    "analysis checkpoint has no durable step attestation"
+                ) from None
+            if ledger.status == "persisted":
+                if (
+                    checkpoint.status != ledger.result_status
+                    or checkpoint.result_id != ledger.result_id
+                    or checkpoint.evidence_ids != ledger.evidence_ids
+                ):
+                    raise RunStateConflict(
+                        "analysis checkpoint differs from its durable step attestation"
+                    )
+            elif ledger.status == "failed":
+                if (
+                    checkpoint.status != ledger.result_status
+                    or checkpoint.reason_code != ledger.reason_code
+                    or checkpoint.result_id is not None
+                    or checkpoint.evidence_ids
+                ):
+                    raise RunStateConflict(
+                        "failed analysis checkpoint differs from its step ledger"
+                    )
+            elif ledger.status == "indeterminate":
+                if (
+                    checkpoint.status != "failed"
+                    or checkpoint.reason_code != "STEP_EXECUTION_INDETERMINATE"
+                    or checkpoint.result_id is not None
+                    or checkpoint.evidence_ids
+                ):
+                    raise RunStateConflict(
+                        "indeterminate checkpoint differs from its step ledger"
+                    )
+            elif ledger.status == "synthetic":
+                if (
+                    checkpoint.status != ledger.result_status
+                    or checkpoint.reason_code != ledger.reason_code
+                    or checkpoint.result_id is not None
+                    or checkpoint.evidence_ids
+                ):
+                    raise RunStateConflict(
+                        "synthetic checkpoint differs from its step ledger"
+                    )
+            else:
+                raise RunStateConflict("analysis step is not terminal")
+
+    async def _persist_synthetic_checkpoints(
+        self,
+        *,
+        plan: AnalysisPlan,
+        checkpoints: tuple[AnalysisStepCheckpoint, ...],
+        invocation_fingerprint: str,
+        auth_context: AuthContext,
+    ) -> None:
+        for checkpoint in checkpoints:
+            if checkpoint.status not in {"skipped", "timeout"}:
+                raise RunStateConflict("synthetic checkpoint has an invalid status")
+            tool_call_id = analysis_step_tool_call_id(
+                tenant_id=auth_context.principal.tenant_id,
+                run_id=auth_context.run_id,
+                plan_id=plan.plan_id,
+                step_id=checkpoint.step_id,
+            )
+            ledger = await self._steps.reserve_step(
+                tenant_id=auth_context.principal.tenant_id,
+                user_id=auth_context.principal.user_id,
+                run_id=auth_context.run_id,
+                plan_id=plan.plan_id,
+                request_id=plan.request_id,
+                step_id=checkpoint.step_id,
+                tool_call_id=tool_call_id,
+                invocation_fingerprint=invocation_fingerprint,
+            )
+            await self._steps.transition_step(
+                tenant_id=ledger.tenant_id,
+                user_id=ledger.user_id,
+                run_id=ledger.run_id,
+                step_id=ledger.step_id,
+                invocation_fingerprint=ledger.invocation_fingerprint,
+                expected_version=ledger.version,
+                status="synthetic",
+                result_status=checkpoint.status,
+                reason_code=checkpoint.reason_code,
+                result_id=None,
+                evidence_ids=(),
+            )
 
     @staticmethod
     def _validated_completed(
