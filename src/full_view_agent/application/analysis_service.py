@@ -55,3 +55,7 @@ class AnalysisPlanningService:
             raise AnalysisPlanningUnavailable(
                 "server-side analysis plan authority rejected the plan"
             ) from exc
+        except Exception as exc:
+            raise AnalysisPlanningUnavailable(
+                "server-side analysis plan authority is unavailable"
+            ) from exc

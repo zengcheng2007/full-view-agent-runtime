@@ -1,12 +1,46 @@
 """HTTP contract for trusted server-created AnalysisPlan resources."""
 
+from datetime import UTC, datetime, timedelta
+
 import httpx
 import pytest
 from pydantic import SecretStr
 
 from full_view_agent.api.app import RuntimeContainer, create_app
+from full_view_agent.domain.models import LegacyIdentitySnapshot, Principal
 from full_view_agent.infrastructure.credential_broker import InMemoryCredentialBroker
 from full_view_agent.infrastructure.legacy_identity import HashedLegacyIdentityAdapter
+
+
+class _MutableIdentityAdapter:
+    def __init__(self) -> None:
+        self.tenant_id = "tenant-a"
+        self.authorized = True
+
+    async def resolve(self, _raw_token: SecretStr) -> LegacyIdentitySnapshot:
+        return LegacyIdentitySnapshot(
+            principal=Principal(
+                tenant_id=self.tenant_id,
+                user_id="analysis-user",
+                org_id="analysis-org",
+                roles=["governance_analyst"] if self.authorized else [],
+            ),
+            source=(
+                "legacy_geo_user_fixture"
+                if self.authorized
+                else "legacy_geo_gateway"
+            ),
+            source_session_expires_at=datetime.now(UTC) + timedelta(hours=1),
+            base_area_codes=["330106"],
+        )
+
+
+class _UnavailablePlanRepository:
+    async def save(self, **_kwargs):
+        raise RuntimeError("database connection lost")
+
+    async def get(self, **_kwargs):
+        return None
 
 
 def _runtime() -> RuntimeContainer:
@@ -99,6 +133,113 @@ async def test_create_analysis_plan_is_server_authored_persisted_and_idempotent(
     )
     assert stored is not None
     assert stored.plan_id == plan["plan_id"]
+
+
+@pytest.mark.asyncio
+async def test_analysis_plan_refreshes_authorization_from_current_request() -> None:
+    runtime = _runtime()
+    app = create_app(runtime)
+    token = "analysis-refresh"
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=app),
+        base_url="http://test",
+    ) as client:
+        run_id = await _create_run(client, token)
+        before = await runtime.auth_contexts.get(
+            user_id=(await runtime.identity_port.resolve(SecretStr(token))).principal.user_id,
+            run_id=run_id,
+        )
+        response = await client.post(
+            f"/agent-api/v1/runs/{run_id}/analysis-plans",
+            headers={"geoToken": token, "Idempotency-Key": "analysis-refresh-plan"},
+            json=_analysis_request(),
+        )
+        after = await runtime.auth_contexts.get(
+            user_id=before.principal.user_id,
+            run_id=run_id,
+        )
+
+    assert response.status_code == 201
+    assert after.auth_context_id != before.auth_context_id
+    assert after.principal == before.principal
+
+
+@pytest.mark.asyncio
+async def test_analysis_plan_rejects_same_user_from_another_tenant() -> None:
+    identity = _MutableIdentityAdapter()
+    runtime = RuntimeContainer(
+        identity_port=identity,
+        credentials=InMemoryCredentialBroker(),
+    )
+    app = create_app(runtime)
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=app),
+        base_url="http://test",
+    ) as client:
+        run_id = await _create_run(client, "tenant-switch")
+        identity.tenant_id = "tenant-b"
+        response = await client.post(
+            f"/agent-api/v1/runs/{run_id}/analysis-plans",
+            headers={"geoToken": "tenant-switch", "Idempotency-Key": "tenant-b-plan"},
+            json=_analysis_request(),
+        )
+
+    assert response.status_code == 404
+
+
+@pytest.mark.asyncio
+async def test_analysis_plan_uses_current_revoked_permissions() -> None:
+    identity = _MutableIdentityAdapter()
+    runtime = RuntimeContainer(
+        identity_port=identity,
+        credentials=InMemoryCredentialBroker(),
+    )
+    app = create_app(runtime)
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=app),
+        base_url="http://test",
+    ) as client:
+        run_id = await _create_run(client, "permission-revoked")
+        identity.authorized = False
+        response = await client.post(
+            f"/agent-api/v1/runs/{run_id}/analysis-plans",
+            headers={
+                "geoToken": "permission-revoked",
+                "Idempotency-Key": "permission-revoked-plan",
+            },
+            json=_analysis_request(),
+        )
+
+    assert response.status_code == 201
+    assert response.json()["data"]["steps"] == []
+    assert response.json()["data"]["omissions"][0]["reason_code"] == "NOT_ENTITLED"
+
+
+@pytest.mark.asyncio
+async def test_analysis_plan_store_outage_is_retryable_503() -> None:
+    runtime = RuntimeContainer(
+        identity_port=HashedLegacyIdentityAdapter(),
+        credentials=InMemoryCredentialBroker(),
+        analysis_plan_repository=_UnavailablePlanRepository(),
+    )
+    app = create_app(runtime)
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=app),
+        base_url="http://test",
+    ) as client:
+        run_id = await _create_run(client, "analysis-store-outage")
+        response = await client.post(
+            f"/agent-api/v1/runs/{run_id}/analysis-plans",
+            headers={
+                "geoToken": "analysis-store-outage",
+                "Idempotency-Key": "analysis-store-outage-plan",
+            },
+            json=_analysis_request(),
+        )
+
+    assert response.status_code == 503
+    assert response.json()["error"]["code"] == "analysis_planning_unavailable"
+    assert response.json()["error"]["retryable"] is True
 
 
 @pytest.mark.asyncio

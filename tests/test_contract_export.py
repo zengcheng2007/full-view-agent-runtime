@@ -33,6 +33,26 @@ def test_export_contracts_writes_openapi_and_versioned_json_schemas(tmp_path) ->
         "/agent-api/v1/runs/{run_id}/analysis-plans"
     ]["post"]["responses"]["201"]["content"]["application/json"]["schema"]
     assert analysis_plan_schema["$ref"].endswith("/AnalysisPlanResponse")
+    analysis_operation = openapi["paths"][
+        "/agent-api/v1/runs/{run_id}/analysis-plans"
+    ]["post"]
+    assert analysis_operation["security"] == [{"GeoToken": []}]
+    idempotency_header = next(
+        parameter
+        for parameter in analysis_operation["parameters"]
+        if parameter["name"] == "Idempotency-Key"
+    )
+    assert idempotency_header["in"] == "header"
+    assert idempotency_header["required"] is True
+    request_schema = analysis_operation["requestBody"]["content"][
+        "application/json"
+    ]["schema"]
+    assert request_schema["$ref"].endswith("/AnalysisRequest")
+    for status_code in ("401", "404", "409", "422", "503"):
+        error_schema = analysis_operation["responses"][status_code]["content"][
+            "application/json"
+        ]["schema"]
+        assert error_schema["$ref"].endswith("/ErrorResponse")
     event_content = openapi["paths"]["/agent-api/v1/runs/{run_id}/events"][
         "get"
     ]["responses"]["200"]["content"]

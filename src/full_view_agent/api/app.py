@@ -157,6 +157,24 @@ class ResponseMeta(ContractModel):
     idempotency_replayed: bool | None = None
 
 
+class ErrorDetail(ContractModel):
+    field: str
+    code: str
+    message: str
+
+
+class ErrorPayload(ContractModel):
+    code: str
+    message: str
+    retryable: bool = False
+    details: list[ErrorDetail] = Field(default_factory=list)
+
+
+class ErrorResponse(ContractModel):
+    error: ErrorPayload
+    meta: ResponseMeta
+
+
 class SessionResponse(ContractModel):
     data: AgentSession
     meta: ResponseMeta
@@ -681,11 +699,12 @@ def create_app(runtime: RuntimeContainer | None = None) -> FastAPI:
             status_code = 400
         elif isinstance(exc, AuthenticationFailed):
             status_code = 401
-        elif isinstance(exc, IdentityProviderUnavailable):
+        elif isinstance(
+            exc,
+            (IdentityProviderUnavailable, AnalysisPlanningUnavailable),
+        ):
             status_code = 503
             retryable = True
-        elif isinstance(exc, AnalysisPlanningUnavailable):
-            status_code = 503
         elif isinstance(
             exc,
             (AnalysisRequestRejected, WorkflowNotAvailable, InvalidCursor),
@@ -1001,7 +1020,17 @@ def create_app(runtime: RuntimeContainer | None = None) -> FastAPI:
             meta=ResponseMeta(request_id=new_id("req")),
         )
 
-    @app.post("/agent-api/v1/runs/{run_id}/analysis-plans", status_code=201)
+    @app.post(
+        "/agent-api/v1/runs/{run_id}/analysis-plans",
+        status_code=201,
+        responses={
+            401: {"model": ErrorResponse},
+            404: {"model": ErrorResponse},
+            409: {"model": ErrorResponse},
+            422: {"model": ErrorResponse},
+            503: {"model": ErrorResponse},
+        },
+    )
     async def create_analysis_plan(
         run_id: str,
         body: AnalysisRequest,
@@ -1009,13 +1038,28 @@ def create_app(runtime: RuntimeContainer | None = None) -> FastAPI:
         idempotency_key: Annotated[str, Header(alias="Idempotency-Key", min_length=1)],
     ) -> AnalysisPlanResponse:
         async def operation() -> AnalysisPlan:
-            await app.state.runtime.store.get_run(
+            run = await app.state.runtime.store.get_run(
                 user_id=user.user_id,
                 run_id=run_id,
             )
-            auth_context = await app.state.runtime.auth_contexts.get(
+            previous_context = await app.state.runtime.auth_contexts.get(
                 user_id=user.user_id,
                 run_id=run_id,
+            )
+            if (
+                previous_context.principal.user_id != user.identity.principal.user_id
+                or previous_context.principal.tenant_id
+                != user.identity.principal.tenant_id
+            ):
+                raise ResourceNotFound("run was not found for the current identity")
+            auth_context = await app.state.runtime.admission.admit(
+                identity=user.identity,
+                raw_token=user.raw_token,
+                session_id=run.session_id,
+                run_id=run_id,
+            )
+            await app.state.runtime.credentials.revoke(
+                credential_ref=previous_context.credential_ref,
             )
             return await app.state.runtime.analysis_planning.create_plan(
                 request=body,
