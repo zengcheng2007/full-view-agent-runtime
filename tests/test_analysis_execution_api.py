@@ -1,5 +1,6 @@
 """HTTP contract for explicit server-side analysis plan execution."""
 
+import asyncio
 from datetime import UTC, datetime, timedelta
 
 import httpx
@@ -52,6 +53,9 @@ class _RecordingOrchestrator:
             report_result_id="res_report_analysis_01",
         )
 
+    async def resume(self, **_values) -> AnalysisRunOutcome:
+        raise AssertionError("resume was not expected")
+
 
 class _MutableIdentityAdapter:
     def __init__(self) -> None:
@@ -90,7 +94,43 @@ def test_analysis_orchestrator_is_composed_when_enabled(monkeypatch) -> None:
     assert runtime.analysis_orchestrator is not None
 
 
-async def _create_run(client: httpx.AsyncClient, token: str) -> dict[str, object]:
+@pytest.mark.asyncio
+async def test_public_analysis_run_is_exclusive_and_reaches_terminal(monkeypatch) -> None:
+    monkeypatch.setenv("FULL_VIEW_ANALYSIS_EXECUTION_ENABLED", "true")
+    runtime = _runtime(orchestrator=None)
+    app = create_app(runtime)
+    token = "analysis-exclusive"
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=app), base_url="http://test"
+    ) as client:
+        run = await _create_run(client, token)
+        identity = await runtime.identity_port.resolve(SecretStr(token))
+        await asyncio.sleep(0.05)
+        queued = await runtime.store.get_run(
+            user_id=identity.principal.user_id, run_id=str(run["run_id"])
+        )
+        assert queued.status == "queued"
+        plan = await _create_plan(client, token, str(run["run_id"]))
+        response = await client.post(
+            f"/agent-api/v1/runs/{run['run_id']}/analysis-plans/{plan['plan_id']}/executions",
+            headers={"geoToken": token},
+            json={"request_id": plan["request_id"]},
+        )
+
+    assert response.status_code == 200
+    terminal = await runtime.store.get_run(
+        user_id=identity.principal.user_id, run_id=str(run["run_id"])
+    )
+    assert terminal.status == "completed"
+    messages = await runtime.store.list_messages(
+        user_id=identity.principal.user_id, session_id=str(run["session_id"])
+    )
+    assert [message.role for message in messages] == ["user", "assistant"]
+
+
+async def _create_run(
+    client: httpx.AsyncClient, token: str, *, mode: str = "analysis"
+) -> dict[str, object]:
     session = await client.post(
         "/agent-api/v1/sessions",
         headers={"geoToken": token, "Idempotency-Key": f"session-{token}"},
@@ -110,7 +150,7 @@ async def _create_run(client: httpx.AsyncClient, token: str) -> dict[str, object
                 "frontend_command_schema_versions": ["1.0"],
                 "supported_commands": ["panel.show_table"],
             },
-            "mode": "agent",
+            "mode": mode,
         },
     )
     assert run.status_code == 202
@@ -204,6 +244,25 @@ async def test_execution_rejects_another_user_run() -> None:
 
     assert response.status_code == 404
     assert response.json()["error"]["code"] == "resource_not_found"
+    assert orchestrator.calls == []
+
+
+@pytest.mark.asyncio
+async def test_execution_rejects_a_general_agent_run() -> None:
+    orchestrator = _RecordingOrchestrator()
+    app = create_app(_runtime(orchestrator=orchestrator))
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=app), base_url="http://test"
+    ) as client:
+        run = await _create_run(client, "general-run", mode="agent")
+        plan = await _create_plan(client, "general-run", str(run["run_id"]))
+        response = await client.post(
+            f"/agent-api/v1/runs/{run['run_id']}/analysis-plans/{plan['plan_id']}/executions",
+            headers={"geoToken": "general-run"},
+            json={"request_id": plan["request_id"]},
+        )
+
+    assert response.status_code == 409
     assert orchestrator.calls == []
 
 

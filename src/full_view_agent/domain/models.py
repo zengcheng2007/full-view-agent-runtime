@@ -302,13 +302,15 @@ class PolicyDecision(ContractModel):
 class RunCreateRequest(ContractModel):
     input: MessageInput
     client: ClientCapabilities
-    mode: Literal["agent", "workflow"] = "agent"
+    mode: Literal["agent", "workflow", "analysis"] = "agent"
     workflow_ref: WorkflowRef | None = None
 
     @model_validator(mode="after")
     def validate_workflow_reference(self) -> "RunCreateRequest":
         if self.mode == "workflow" and self.workflow_ref is None:
             raise ValueError("workflow_ref is required when mode=workflow")
+        if self.mode != "workflow" and self.workflow_ref is not None:
+            raise ValueError("workflow_ref is only allowed when mode=workflow")
         return self
 
 
@@ -335,7 +337,7 @@ class AgentRun(ContractModel):
     status: RunStatus
     outcome: RunOutcome | None = None
     completion_reason_code: str | None = None
-    mode: Literal["agent", "workflow"] = "agent"
+    mode: Literal["agent", "workflow", "analysis"] = "agent"
     workflow_ref: WorkflowRef | None = None
     input_message_id: str
     base_context_version: int = Field(ge=1)
@@ -501,6 +503,16 @@ class RunInputBody(ContractModel):
     client_instance_id: str = Field(min_length=1, max_length=128)
     run_state_version: int = Field(ge=1)
     response: RunInputResponse
+    analysis_plan_id: str | None = Field(default=None, min_length=1, max_length=128)
+    analysis_request_id: str | None = Field(default=None, min_length=1, max_length=128)
+
+    @model_validator(mode="after")
+    def validate_analysis_references(self) -> "RunInputBody":
+        if (self.analysis_plan_id is None) != (self.analysis_request_id is None):
+            raise ValueError(
+                "analysis_plan_id and analysis_request_id must be supplied together"
+            )
+        return self
 
 
 class SessionContext(ContractModel):

@@ -237,6 +237,19 @@ class AnalysisOrchestratorPort(Protocol):
         auth_context: AuthContext,
     ) -> AnalysisRunOutcome: ...
 
+    async def resume(
+        self,
+        *,
+        user_id: str,
+        session_id: str,
+        analysis_run_id: str,
+        plan_id: str,
+        request_id: str,
+        input_request_id: str,
+        run_state_version: int,
+        auth_context: AuthContext,
+    ) -> AnalysisRunOutcome: ...
+
 
 @runtime_checkable
 class OrchestrationPort(Protocol):

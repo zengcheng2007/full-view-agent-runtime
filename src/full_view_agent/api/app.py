@@ -92,10 +92,12 @@ from full_view_agent.domain.models import (
     LegacyIdentitySnapshot,
     PopulationMetricRow,
     ResultMetadata,
+    ResultReferenceContent,
     RunCreateRequest,
     RunInputBody,
     Steer,
     TableDataResult,
+    TextContent,
 )
 from full_view_agent.infrastructure.analysis_plan_repository import (
     InMemoryAnalysisPlanRepository,
@@ -594,8 +596,9 @@ class RuntimeContainer:
         assert self.store is not None
         recoverable = await self.store.list_recoverable_runs()
         for user_id, run in recoverable:
-            self.schedule_run(user_id=user_id, run_id=run.run_id)
-        return len(recoverable)
+            if run.mode != "analysis":
+                self.schedule_run(user_id=user_id, run_id=run.run_id)
+        return sum(run.mode != "analysis" for _, run in recoverable)
 
 
 async def require_geotoken(
@@ -628,6 +631,95 @@ def request_fingerprint(*, domain: str, payload: dict[str, object]) -> str:
         separators=(",", ":"),
     )
     return f"sha256:{hashlib.sha256(canonical.encode('utf-8')).hexdigest()}"
+
+
+async def _complete_analysis_run(
+    *,
+    runtime: RuntimeContainer,
+    user_id: str,
+    run: AgentRun,
+    outcome: AnalysisRunOutcome,
+) -> None:
+    """Persist the user-visible message and own the dedicated Run terminal state."""
+    assert runtime.store is not None
+    assert runtime.events is not None
+    current = await runtime.store.get_run(user_id=user_id, run_id=run.run_id)
+    messages = await runtime.store.list_messages(
+        user_id=user_id, session_id=run.session_id
+    )
+    result_message = next(
+        (
+            message
+            for message in messages
+            if message.run_id == run.run_id and message.role == "assistant"
+        ),
+        None,
+    )
+    if result_message is None and current.status not in {
+        "completed",
+        "failed",
+        "cancelled",
+        "expired",
+    }:
+        content: list[TextContent | ResultReferenceContent] = [
+            TextContent(type="text", text=outcome.reason_code)
+        ]
+        evidence_ids: list[str] = []
+        if outcome.report_result_id is not None:
+            content.append(
+                ResultReferenceContent(
+                    type="result_reference",
+                    result_id=outcome.report_result_id,
+                    label="区域研判报告",
+                )
+            )
+        result_message = AgentMessage(
+            message_id=new_id("msg"),
+            session_id=run.session_id,
+            run_id=run.run_id,
+            role="assistant",
+            content=content,
+            evidence_ids=evidence_ids,
+        )
+        await runtime.store.save_message(
+            user_id=user_id, run_id=run.run_id, message=result_message
+        )
+    if result_message is not None:
+        await runtime.events.publish(
+            event_type="assistant.message.completed",
+            session_id=run.session_id,
+            run_id=run.run_id,
+            data={"message": result_message.model_dump(mode="json")},
+            idempotency_key=f"analysis:{run.run_id}:assistant",
+        )
+    if current.status not in {"completed", "failed", "cancelled", "expired"}:
+        if outcome.status == "failed":
+            current = await runtime.service.fail_run(
+                user_id=user_id,
+                run_id=run.run_id,
+                completion_reason_code=outcome.reason_code,
+            )
+        else:
+            current = await runtime.service.complete_run(
+                user_id=user_id,
+                run_id=run.run_id,
+                outcome="success" if outcome.status == "completed" else "partial",
+                completion_reason_code=outcome.reason_code,
+            )
+    await runtime.events.publish(
+        event_type="run.completed" if current.status == "completed" else "run.failed",
+        session_id=current.session_id,
+        run_id=current.run_id,
+        data={
+            "status": current.status,
+            "outcome": current.outcome,
+            "completion_reason_code": current.completion_reason_code,
+            "result_message_id": (
+                result_message.message_id if result_message is not None else None
+            ),
+        },
+        idempotency_key=f"analysis:{run.run_id}:terminal",
+    )
 
 
 def create_app(runtime: RuntimeContainer | None = None) -> FastAPI:
@@ -1006,7 +1098,7 @@ def create_app(runtime: RuntimeContainer | None = None) -> FastAPI:
             operation=operation,
         )
         effective_replay = replayed or natural_replayed
-        if not effective_replay:
+        if not effective_replay and run.mode != "analysis":
             app.state.runtime.schedule_run(user_id=user.user_id, run_id=run.run_id)
         return RunResponse(
             data=run,
@@ -1096,6 +1188,10 @@ def create_app(runtime: RuntimeContainer | None = None) -> FastAPI:
             user_id=user.user_id,
             run_id=run_id,
         )
+        if run.mode != "analysis":
+            raise RunStateConflict(
+                "analysis execution requires a run created with mode=analysis"
+            )
         previous_context = await app.state.runtime.auth_contexts.get(
             user_id=user.user_id,
             run_id=run_id,
@@ -1212,16 +1308,64 @@ def create_app(runtime: RuntimeContainer | None = None) -> FastAPI:
             session_id=run.session_id,
             run_id=run_id,
         )
-        await app.state.runtime.credentials.revoke(
-            credential_ref=previous_context.credential_ref,
-        )
-        outcome = await app.state.runtime.analysis_orchestrator.run(
+        try:
+            await app.state.runtime.credentials.revoke(
+                credential_ref=previous_context.credential_ref,
+            )
+        except Exception:
+            await app.state.runtime.credentials.revoke(
+                credential_ref=auth_context.credential_ref,
+            )
+            raise
+        if run.status == "queued":
+            run = await app.state.runtime.service.start_run(
+                user_id=user.user_id, run_id=run_id
+            )
+        elif run.status not in {
+            "running",
+            "waiting_input",
+            "completed",
+            "failed",
+        }:
+            raise RunStateConflict("analysis run is not executable")
+        try:
+            outcome = await app.state.runtime.analysis_orchestrator.run(
+                user_id=user.user_id,
+                session_id=run.session_id,
+                analysis_run_id=run_id,
+                plan_id=plan_id,
+                request_id=body.request_id,
+                auth_context=auth_context,
+            )
+        except ReauthenticationRequired:
+            raise
+        except Exception:
+            current = await app.state.runtime.store.get_run(
+                user_id=user.user_id, run_id=run_id
+            )
+            if current.status in {"queued", "running"}:
+                failed = await app.state.runtime.service.fail_run(
+                    user_id=user.user_id,
+                    run_id=run_id,
+                    completion_reason_code="analysis_execution_failed",
+                )
+                await app.state.runtime.events.publish(
+                    event_type="run.failed",
+                    session_id=failed.session_id,
+                    run_id=failed.run_id,
+                    data={
+                        "status": failed.status,
+                        "outcome": failed.outcome,
+                        "completion_reason_code": failed.completion_reason_code,
+                    },
+                    idempotency_key=f"analysis:{run_id}:terminal",
+                )
+            raise
+        await _complete_analysis_run(
+            runtime=app.state.runtime,
             user_id=user.user_id,
-            session_id=run.session_id,
-            analysis_run_id=run_id,
-            plan_id=plan_id,
-            request_id=body.request_id,
-            auth_context=auth_context,
+            run=run,
+            outcome=outcome,
         )
         return AnalysisExecutionResponse(
             data=outcome,
@@ -1278,7 +1422,7 @@ def create_app(runtime: RuntimeContainer | None = None) -> FastAPI:
                 run_id=run_id,
             )
             try:
-                await app.state.runtime.admission.admit(
+                auth_context = await app.state.runtime.admission.admit(
                     identity=user.identity,
                     raw_token=user.raw_token,
                     session_id=current.session_id,
@@ -1310,16 +1454,51 @@ def create_app(runtime: RuntimeContainer | None = None) -> FastAPI:
                         data=event_data,
                     )
                 raise
-            await app.state.runtime.credentials.revoke(
-                credential_ref=previous_context.credential_ref,
-            )
-            # Port handles resume_from_input + schedule
-            await app.state.runtime.executor.resume(
-                user_id=user.user_id,
-                run_id=run_id,
-                input_request_id=body.input_request_id,
-                run_state_version=body.run_state_version,
-            )
+            try:
+                await app.state.runtime.credentials.revoke(
+                    credential_ref=previous_context.credential_ref,
+                )
+            except Exception:
+                await app.state.runtime.credentials.revoke(
+                    credential_ref=auth_context.credential_ref,
+                )
+                raise
+            if current.mode == "analysis":
+                if app.state.runtime.analysis_orchestrator is None:
+                    raise AnalysisExecutionUnavailable(
+                        "analysis execution orchestrator is not configured"
+                    )
+                if (
+                    body.analysis_plan_id is None
+                    or body.analysis_request_id is None
+                ):
+                    raise RunStateConflict(
+                        "analysis resume requires trusted plan references"
+                    )
+                outcome = await app.state.runtime.analysis_orchestrator.resume(
+                    user_id=user.user_id,
+                    session_id=current.session_id,
+                    analysis_run_id=run_id,
+                    plan_id=body.analysis_plan_id,
+                    request_id=body.analysis_request_id,
+                    input_request_id=body.input_request_id,
+                    run_state_version=body.run_state_version,
+                    auth_context=auth_context,
+                )
+                await _complete_analysis_run(
+                    runtime=app.state.runtime,
+                    user_id=user.user_id,
+                    run=current,
+                    outcome=outcome,
+                )
+            else:
+                # General orchestrator owns resume_from_input + scheduling.
+                await app.state.runtime.executor.resume(
+                    user_id=user.user_id,
+                    run_id=run_id,
+                    input_request_id=body.input_request_id,
+                    run_state_version=body.run_state_version,
+                )
             resumed = await app.state.runtime.store.get_run(
                 user_id=user.user_id, run_id=run_id,
             )
@@ -1347,7 +1526,10 @@ def create_app(runtime: RuntimeContainer | None = None) -> FastAPI:
             ),
             operation=operation,
         )
-        if not replayed:
+        current = await app.state.runtime.store.get_run(
+            user_id=user.user_id, run_id=run_id
+        )
+        if not replayed and current.mode != "analysis":
             app.state.runtime.schedule_run(user_id=user.user_id, run_id=run_id)
         return RunResponse(
             data=resumed,
