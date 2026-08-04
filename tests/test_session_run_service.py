@@ -260,6 +260,20 @@ async def test_reauthentication_ledger_is_idempotent_across_crash_retries() -> N
     assert resumed.status == "running"
     assert resumed.state_version == pending.run_state_version + 1
 
+    completed = await service.complete_run(
+        user_id="user-01",
+        run_id=queued.run_id,
+        outcome="success",
+        completion_reason_code="goal_completed",
+    )
+    replayed_after_completion = await service.resume_from_input(
+        user_id="user-01",
+        run_id=queued.run_id,
+        input_request_id=pending.input_request_id,
+        run_state_version=pending.run_state_version,
+    )
+    assert replayed_after_completion == completed
+
 
 @pytest.mark.asyncio
 async def test_expired_reauthentication_request_is_atomically_reissued() -> None:

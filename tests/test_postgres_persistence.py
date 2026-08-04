@@ -166,6 +166,20 @@ async def test_postgres_reauthentication_retry_is_idempotent_after_restart() -> 
         assert replayed == resumed
         assert resumed.status == "running"
         assert resumed.state_version == pending.run_state_version + 1
+
+        completed = await service.complete_run(
+            user_id="user-01",
+            run_id=queued.run_id,
+            outcome="success",
+            completion_reason_code="goal_completed",
+        )
+        replayed_after_completion = await restarted.resume_from_input(
+            user_id="user-01",
+            run_id=queued.run_id,
+            input_request_id=pending.input_request_id,
+            run_state_version=pending.run_state_version,
+        )
+        assert replayed_after_completion == completed
     finally:
         await store.drop_schema()
 
