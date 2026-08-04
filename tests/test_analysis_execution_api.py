@@ -9,6 +9,7 @@ from pydantic import SecretStr
 
 from full_view_agent.api.app import RuntimeContainer, create_app
 from full_view_agent.application.analysis_graph import AnalysisRunOutcome
+from full_view_agent.application.errors import ReauthenticationRequired
 from full_view_agent.domain.models import (
     AuthContext,
     LegacyIdentitySnapshot,
@@ -55,6 +56,54 @@ class _RecordingOrchestrator:
 
     async def resume(self, **_values) -> AnalysisRunOutcome:
         raise AssertionError("resume was not expected")
+
+
+class _ReauthenticationOrchestrator:
+    def __init__(self) -> None:
+        self.runtime: RuntimeContainer | None = None
+        self.resume_calls = 0
+
+    async def run(
+        self,
+        *,
+        user_id: str,
+        analysis_run_id: str,
+        **_values: object,
+    ) -> AnalysisRunOutcome:
+        assert self.runtime is not None
+        await self.runtime.service.wait_for_reauthentication(
+            user_id=user_id,
+            run_id=analysis_run_id,
+        )
+        raise ReauthenticationRequired("analysis credential expired")
+
+    async def resume(
+        self,
+        *,
+        user_id: str,
+        analysis_run_id: str,
+        plan_id: str,
+        request_id: str,
+        input_request_id: str,
+        run_state_version: int,
+        **_values: object,
+    ) -> AnalysisRunOutcome:
+        assert self.runtime is not None
+        self.resume_calls += 1
+        await self.runtime.service.resume_from_input(
+            user_id=user_id,
+            run_id=analysis_run_id,
+            input_request_id=input_request_id,
+            run_state_version=run_state_version,
+        )
+        return AnalysisRunOutcome(
+            analysis_run_id=analysis_run_id,
+            plan_id=plan_id,
+            request_id=request_id,
+            status="completed",
+            reason_code="all_steps_completed",
+            report_result_id="res_report_after_reauth",
+        )
 
 
 class _MutableIdentityAdapter:
@@ -386,3 +435,60 @@ async def test_execution_rejects_request_id_that_does_not_match_plan() -> None:
     assert response.status_code == 409
     assert response.json()["error"]["code"] == "run_state_conflict"
     assert orchestrator.calls == []
+
+
+@pytest.mark.asyncio
+async def test_analysis_reauthentication_is_exposed_and_resumes_to_terminal() -> None:
+    orchestrator = _ReauthenticationOrchestrator()
+    runtime = _runtime(orchestrator=orchestrator)  # type: ignore[arg-type]
+    orchestrator.runtime = runtime
+    app = create_app(runtime)
+    token = "execution-reauth"
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=app), base_url="http://test"
+    ) as client:
+        run = await _create_run(client, token)
+        plan = await _create_plan(client, token, str(run["run_id"]))
+        execution = await client.post(
+            f"/agent-api/v1/runs/{run['run_id']}/analysis-plans/{plan['plan_id']}/executions",
+            headers={"geoToken": token},
+            json={"request_id": plan["request_id"]},
+        )
+        assert execution.status_code == 409
+        assert execution.json()["error"]["code"] == "reauthentication_required"
+
+        events = await runtime.events.list_events(run_id=str(run["run_id"]))  # type: ignore[union-attr]
+        assert [event.type for event in events] == [
+            "run.waiting",
+            "input.required",
+            "reauth_required",
+        ]
+        required = events[1].data
+        assert required["analysis_plan_id"] == plan["plan_id"]
+        assert required["analysis_request_id"] == plan["request_id"]
+
+        resumed = await client.post(
+            f"/agent-api/v1/runs/{run['run_id']}/inputs",
+            headers={
+                "geoToken": token,
+                "Idempotency-Key": "resume-execution-reauth",
+            },
+            json={
+                "input_request_id": required["input_request_id"],
+                "client_instance_id": "client-execution-reauth",
+                "run_state_version": required["run_state_version"],
+                "response": {"type": "reauthenticated"},
+                "analysis_plan_id": required["analysis_plan_id"],
+                "analysis_request_id": required["analysis_request_id"],
+            },
+        )
+
+    assert resumed.status_code == 202
+    assert resumed.json()["data"]["status"] == "completed"
+    assert orchestrator.resume_calls == 1
+    terminal_events = await runtime.events.list_events(run_id=str(run["run_id"]))  # type: ignore[union-attr]
+    event_types = [event.type for event in terminal_events]
+    assert event_types.index("input.received") < event_types.index(
+        "assistant.message.completed"
+    )
+    assert event_types[-1] == "run.completed"

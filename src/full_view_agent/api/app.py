@@ -722,6 +722,43 @@ async def _complete_analysis_run(
     )
 
 
+async def _publish_analysis_reauthentication(
+    *,
+    runtime: RuntimeContainer,
+    user_id: str,
+    run_id: str,
+    plan_id: str,
+    request_id: str,
+) -> None:
+    """Expose a durable graph interrupt through the public event contract."""
+    assert runtime.events is not None
+    waiting, pending = await runtime.service.wait_for_reauthentication(
+        user_id=user_id,
+        run_id=run_id,
+    )
+    event_data = {
+        "status": waiting.status,
+        "waiting_for": waiting.waiting_for,
+        "input_request_id": pending.input_request_id,
+        "kind": pending.kind,
+        "prompt": pending.prompt,
+        "options": [option.model_dump(mode="json") for option in pending.options],
+        "allow_free_text": pending.allow_free_text,
+        "run_state_version": pending.run_state_version,
+        "expires_at": pending.expires_at.isoformat(),
+        "analysis_plan_id": plan_id,
+        "analysis_request_id": request_id,
+    }
+    for event_type in ("run.waiting", "input.required", "reauth_required"):
+        await runtime.events.publish(
+            event_type=event_type,
+            session_id=waiting.session_id,
+            run_id=waiting.run_id,
+            data=event_data,
+            idempotency_key=f"analysis:{run_id}:reauth:{event_type}",
+        )
+
+
 def create_app(runtime: RuntimeContainer | None = None) -> FastAPI:
     runtime = runtime or RuntimeContainer()
 
@@ -1208,9 +1245,15 @@ def create_app(runtime: RuntimeContainer | None = None) -> FastAPI:
             session_id=run.session_id,
             run_id=run_id,
         )
-        await app.state.runtime.credentials.revoke(
-            credential_ref=previous_context.credential_ref,
-        )
+        try:
+            await app.state.runtime.credentials.revoke(
+                credential_ref=previous_context.credential_ref,
+            )
+        except Exception:
+            await app.state.runtime.credentials.revoke(
+                credential_ref=auth_context.credential_ref,
+            )
+            raise
 
         async def operation() -> AnalysisPlan:
             return await app.state.runtime.analysis_planning.create_plan(
@@ -1342,6 +1385,13 @@ def create_app(runtime: RuntimeContainer | None = None) -> FastAPI:
                 auth_context=auth_context,
             )
         except ReauthenticationRequired:
+            await _publish_analysis_reauthentication(
+                runtime=app.state.runtime,
+                user_id=user.user_id,
+                run_id=run_id,
+                plan_id=plan_id,
+                request_id=body.request_id,
+            )
             raise
         except Exception:
             current = await app.state.runtime.store.get_run(
@@ -1479,6 +1529,22 @@ def create_app(runtime: RuntimeContainer | None = None) -> FastAPI:
                     raise RunStateConflict(
                         "analysis resume requires trusted plan references"
                     )
+                # Acknowledge the accepted input before the resumed graph can
+                # emit assistant and terminal events.
+                await app.state.runtime.events.publish(
+                    event_type="input.received",
+                    session_id=current.session_id,
+                    run_id=current.run_id,
+                    data={
+                        "input_request_id": body.input_request_id,
+                        "kind": "reauth",
+                        "client_instance_id": body.client_instance_id,
+                        "run_state_version": body.run_state_version,
+                    },
+                    idempotency_key=(
+                        f"analysis:{run_id}:input:{body.input_request_id}:received"
+                    ),
+                )
                 outcome = await app.state.runtime.analysis_orchestrator.resume(
                     user_id=user.user_id,
                     session_id=current.session_id,
@@ -1506,17 +1572,18 @@ def create_app(runtime: RuntimeContainer | None = None) -> FastAPI:
             resumed = await app.state.runtime.store.get_run(
                 user_id=user.user_id, run_id=run_id,
             )
-            await app.state.runtime.events.publish(
-                event_type="input.received",
-                session_id=resumed.session_id,
-                run_id=resumed.run_id,
-                data={
-                    "input_request_id": body.input_request_id,
-                    "kind": "reauth",
-                    "client_instance_id": body.client_instance_id,
-                    "run_state_version": body.run_state_version,
-                },
-            )
+            if current.mode != "analysis":
+                await app.state.runtime.events.publish(
+                    event_type="input.received",
+                    session_id=resumed.session_id,
+                    run_id=resumed.run_id,
+                    data={
+                        "input_request_id": body.input_request_id,
+                        "kind": "reauth",
+                        "client_instance_id": body.client_instance_id,
+                        "run_state_version": body.run_state_version,
+                    },
+                )
             return resumed
 
         scope = f"runs:{run_id}:inputs:create"
