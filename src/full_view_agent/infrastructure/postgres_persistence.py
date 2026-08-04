@@ -67,6 +67,15 @@ def _same_observation_command(
     return left.model_dump(exclude=excluded) == right.model_dump(exclude=excluded)
 
 
+def _same_result_identity(left: DataResult, right: DataResult) -> bool:
+    if left == right:
+        return True
+    if left.kind != "analysis_report" or right.kind != "analysis_report":
+        return False
+    excluded = {"created_at", "payload_expires_at"}
+    return left.model_dump(exclude=excluded) == right.model_dump(exclude=excluded)
+
+
 class EventNotifier(Protocol):
     async def publish(self, *, run_id: str, event_id: str) -> None: ...
 
@@ -374,9 +383,28 @@ class PostgresAgentPersistence:
             if run.status != "running" or session.active_run_id != run_id:
                 raise RunStateConflict("results can only be saved for an active run")
             await connection.execute(
+                "SELECT pg_advisory_xact_lock(hashtextextended(%s, 0))",
+                (f"result:{result.result_id}",),
+            )
+            existing_row = await (
+                await connection.execute(
+                    f'SELECT run_id, data_json FROM "{self._schema}".results '
+                    "WHERE result_id = %s FOR UPDATE",
+                    (result.result_id,),
+                )
+            ).fetchone()
+            if existing_row is not None:
+                existing = _DATA_RESULT_ADAPTER.validate_json(existing_row[1])
+                if existing_row[0] != run_id or not _same_result_identity(
+                    existing, result
+                ):
+                    raise RunStateConflict(
+                        "result identity is already bound differently"
+                    )
+                return existing
+            await connection.execute(
                 f'INSERT INTO "{self._schema}".results '
-                "(result_id, run_id, data_json) VALUES (%s, %s, %s) "
-                "ON CONFLICT (result_id) DO UPDATE SET data_json = EXCLUDED.data_json",
+                "(result_id, run_id, data_json) VALUES (%s, %s, %s)",
                 (result.result_id, run_id, result.model_dump_json()),
             )
         return result
@@ -509,6 +537,25 @@ class PostgresAgentPersistence:
             raise ResourceNotFound("result not found")
         return _DATA_RESULT_ADAPTER.validate_json(row[0])
 
+    async def get_result_for_run(
+        self, *, user_id: str, run_id: str, result_id: str
+    ) -> DataResult:
+        await self._ensure_initialized()
+        async with await psycopg.AsyncConnection.connect(self._dsn) as connection:
+            row = await (
+                await connection.execute(
+                    f'SELECT r.data_json, s.data_json '
+                    f'FROM "{self._schema}".results r '
+                    f'JOIN "{self._schema}".runs ru ON ru.run_id = r.run_id '
+                    f'JOIN "{self._schema}".sessions s ON s.session_id = ru.session_id '
+                    "WHERE r.result_id = %s AND r.run_id = %s",
+                    (result_id, run_id),
+                )
+            ).fetchone()
+        if row is None or AgentSession.model_validate_json(row[1]).owner_user_id != user_id:
+            raise ResourceNotFound("result not found")
+        return _DATA_RESULT_ADAPTER.validate_json(row[0])
+
     async def save_evidence(
         self, *, user_id: str, run_id: str, evidence: Evidence
     ) -> Evidence:
@@ -547,6 +594,26 @@ class PostgresAgentPersistence:
                     f'JOIN "{self._schema}".sessions s ON s.session_id = ru.session_id '
                     "WHERE e.evidence_id = %s",
                     (evidence_id,),
+                )
+            ).fetchone()
+        if row is None or AgentSession.model_validate_json(row[1]).owner_user_id != user_id:
+            raise ResourceNotFound("evidence not found")
+        return Evidence.model_validate_json(row[0])
+
+    async def get_evidence_for_run(
+        self, *, user_id: str, run_id: str, evidence_id: str
+    ) -> Evidence:
+        await self._ensure_initialized()
+        async with await psycopg.AsyncConnection.connect(self._dsn) as connection:
+            row = await (
+                await connection.execute(
+                    f'SELECT e.data_json, s.data_json '
+                    f'FROM "{self._schema}".evidence e '
+                    f'JOIN "{self._schema}".results r ON r.result_id = e.result_id '
+                    f'JOIN "{self._schema}".runs ru ON ru.run_id = r.run_id '
+                    f'JOIN "{self._schema}".sessions s ON s.session_id = ru.session_id '
+                    "WHERE e.evidence_id = %s AND r.run_id = %s",
+                    (evidence_id, run_id),
                 )
             ).fetchone()
         if row is None or AgentSession.model_validate_json(row[1]).owner_user_id != user_id:

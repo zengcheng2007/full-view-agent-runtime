@@ -636,17 +636,51 @@ async def test_child_result_must_be_readable_from_the_trusted_result_store() -> 
         )
     assert missing_error.value.code == "CHILD_RESULT_NOT_STORED"
 
+    first_step = execution.steps[0]
+    first_tool_result = first_step.tool_result
+    assert first_tool_result is not None and first_tool_result.data_result is not None
+    forged_evidence_result = first_tool_result.data_result.model_copy(
+        update={"evidence_ids": ["ev-does-not-exist"]}
+    )
+    store.results[forged_evidence_result.result_id] = forged_evidence_result
+    forged_evidence_execution = execution.model_copy(
+        update={
+            "steps": (
+                first_step.model_copy(
+                    update={
+                        "tool_result": first_tool_result.model_copy(
+                            update={"data_result": forged_evidence_result}
+                        )
+                    }
+                ),
+                *execution.steps[1:],
+            )
+        }
+    )
+    with pytest.raises(AnalysisReportAssemblyError) as evidence_error:
+        await _assembler(port, catalog, store).assemble(
+            plan_id=plan.plan_id,
+            request_id=plan.request_id,
+            auth_context=auth,
+            execution=forged_evidence_execution,
+        )
+    assert evidence_error.value.code == "CHILD_EVIDENCE_NOT_STORED"
+
     # 存储内容与执行证据不一致时同样 fail closed。
     first_result = execution.steps[0].tool_result
     assert first_result is not None and first_result.data_result is not None
     forged_data = EventFinishRateTable(
         rows=[EventFinishRateRow(level="community", finish_rate=1)]
     )
-    await store.save_result(
-        user_id=auth.principal.user_id,
-        run_id=auth.run_id,
-        result=first_result.data_result.model_copy(update={"data": forged_data}),
-    )
+    forged_result = first_result.data_result.model_copy(update={"data": forged_data})
+    with pytest.raises(RunStateConflict):
+        await store.save_result(
+            user_id=auth.principal.user_id,
+            run_id=auth.run_id,
+            result=forged_result,
+        )
+    # 绕过公开写接口模拟底层损坏，报告组装仍必须二次校验并 fail closed。
+    store.results[first_result.data_result.result_id] = forged_result
 
     with pytest.raises(AnalysisReportAssemblyError) as mismatch_error:
         await _assembler(port, catalog, store).assemble(
@@ -796,6 +830,7 @@ async def test_executor_and_assembler_form_a_closed_result_lifecycle() -> None:
         auth_context=auth,
         execution=execution,
     )
+    assert again == report
     assert again.result_id == report.result_id
     assert again.result_fingerprint == report.result_fingerprint
     assert len(store.results) == entries_before

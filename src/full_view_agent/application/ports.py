@@ -116,11 +116,19 @@ class AgentStore(Protocol):
         self, *, user_id: str, result_id: str
     ) -> DataResult: ...
 
+    async def get_result_for_run(
+        self, *, user_id: str, run_id: str, result_id: str
+    ) -> DataResult: ...
+
     async def save_evidence(
         self, *, user_id: str, run_id: str, evidence: Evidence
     ) -> Evidence: ...
 
     async def get_evidence(self, *, user_id: str, evidence_id: str) -> Evidence: ...
+
+    async def get_evidence_for_run(
+        self, *, user_id: str, run_id: str, evidence_id: str
+    ) -> Evidence: ...
 
     async def save_frontend_command(
         self, *, user_id: str, run_id: str, command: FrontendCommand

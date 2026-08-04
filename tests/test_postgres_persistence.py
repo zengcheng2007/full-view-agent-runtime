@@ -9,7 +9,7 @@ import psycopg
 import pytest
 from pydantic import SecretStr
 
-from full_view_agent.application.errors import ResourceNotFound
+from full_view_agent.application.errors import ResourceNotFound, RunStateConflict
 from full_view_agent.application.session_run_service import SessionRunService
 from full_view_agent.domain.models import (
     AgentMessage,
@@ -43,6 +43,60 @@ def test_postgres_event_store_exposes_retention_configuration() -> None:
 
     assert "event_retention_seconds" in parameters
     assert "event_notifier" in parameters
+
+
+@pytest.mark.asyncio
+async def test_postgres_result_identity_cannot_cross_runs_or_users() -> None:
+    schema = f"fva_test_{uuid4().hex[:12]}"
+    store = PostgresAgentPersistence(dsn=postgres_test_dsn(), schema=schema)
+    await store.initialize()
+    try:
+        service = SessionRunService(store)
+        alice_session = await service.create_session(user_id="alice", title="alice")
+        bob_session = await service.create_session(user_id="bob", title="bob")
+        alice_run = await service.create_run(
+            user_id="alice", session_id=alice_session.session_id, request=run_request()
+        )
+        bob_run = await service.create_run(
+            user_id="bob", session_id=bob_session.session_id, request=run_request()
+        )
+        await service.start_run(user_id="alice", run_id=alice_run.run_id)
+        await service.start_run(user_id="bob", run_id=bob_run.run_id)
+        alice_result = TableDataResult(
+            result_id="res-global-collision",
+            data_schema_ref="schema://data/population-metric-table/1.0.0",
+            result_fingerprint="sha256:alice",
+            data=PopulationMetricTable(rows=[]),
+            row_count=0,
+        )
+        bob_result = alice_result.model_copy(
+            update={"result_fingerprint": "sha256:bob"}
+        )
+
+        assert await store.save_result(
+            user_id="alice", run_id=alice_run.run_id, result=alice_result
+        ) == alice_result
+        assert await store.save_result(
+            user_id="alice", run_id=alice_run.run_id, result=alice_result
+        ) == alice_result
+        with pytest.raises(RunStateConflict):
+            await store.save_result(
+                user_id="bob", run_id=bob_run.run_id, result=bob_result
+            )
+
+        assert await store.get_result_for_run(
+            user_id="alice",
+            run_id=alice_run.run_id,
+            result_id=alice_result.result_id,
+        ) == alice_result
+        with pytest.raises(ResourceNotFound):
+            await store.get_result_for_run(
+                user_id="bob",
+                run_id=bob_run.run_id,
+                result_id=alice_result.result_id,
+            )
+    finally:
+        await store.drop_schema()
 
 
 @pytest.mark.asyncio

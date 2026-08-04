@@ -43,6 +43,15 @@ def _same_observation_command(
     return left.model_dump(exclude=excluded) == right.model_dump(exclude=excluded)
 
 
+def _same_result_identity(left: DataResult, right: DataResult) -> bool:
+    if left == right:
+        return True
+    if left.kind != "analysis_report" or right.kind != "analysis_report":
+        return False
+    excluded = {"created_at", "payload_expires_at"}
+    return left.model_dump(exclude=excluded) == right.model_dump(exclude=excluded)
+
+
 class InMemoryAgentStore:
     def __init__(self) -> None:
         self._lock = asyncio.Lock()
@@ -238,6 +247,12 @@ class InMemoryAgentStore:
                 raise ResourceNotFound("run not found")
             if run.status != "running" or session.active_run_id != run_id:
                 raise RunStateConflict("results can only be saved for an active run")
+            existing = self.results.get(result.result_id)
+            existing_run_id = self.result_run_ids.get(result.result_id)
+            if existing is not None:
+                if existing_run_id != run_id or not _same_result_identity(existing, result):
+                    raise RunStateConflict("result identity is already bound differently")
+                return existing
             self.results[result.result_id] = result
             self.result_run_ids[result.result_id] = run_id
             return result
@@ -311,6 +326,15 @@ class InMemoryAgentStore:
                 self.frontend_commands[command.command_id] = command
             return result, evidence, commands
 
+    async def get_result_for_run(
+        self, *, user_id: str, run_id: str, result_id: str
+    ) -> DataResult:
+        result = await self.get_result(user_id=user_id, result_id=result_id)
+        async with self._lock:
+            if self.result_run_ids.get(result_id) != run_id:
+                raise ResourceNotFound("result not found")
+        return result
+
     async def get_result(
         self,
         *,
@@ -356,6 +380,15 @@ class InMemoryAgentStore:
             if evidence is None or session is None or session.owner_user_id != user_id:
                 raise ResourceNotFound("evidence not found")
             return evidence
+
+    async def get_evidence_for_run(
+        self, *, user_id: str, run_id: str, evidence_id: str
+    ) -> Evidence:
+        evidence = await self.get_evidence(user_id=user_id, evidence_id=evidence_id)
+        async with self._lock:
+            if self.result_run_ids.get(evidence.result_id) != run_id:
+                raise ResourceNotFound("evidence not found")
+        return evidence
 
     async def save_frontend_command(
         self, *, user_id: str, run_id: str, command: FrontendCommand

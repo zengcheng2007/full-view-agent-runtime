@@ -173,6 +173,9 @@ class AnalysisReportAssembler:
                 )
 
         result_id, result_fingerprint = self._report_identity(
+            tenant_id=auth_context.principal.tenant_id,
+            user_id=auth_context.principal.user_id,
+            run_id=auth_context.run_id,
             plan_id=plan.plan_id,
             request_id=plan.request_id,
             status=expected_status,
@@ -212,7 +215,7 @@ class AnalysisReportAssembler:
             execution=execution,
         )
         try:
-            await self._result_store.save_result(
+            saved = await self._result_store.save_result(
                 user_id=auth_context.principal.user_id,
                 run_id=auth_context.run_id,
                 result=report,
@@ -223,8 +226,9 @@ class AnalysisReportAssembler:
                 "analysis report could not be saved into the result lifecycle",
             ) from exc
         try:
-            stored = await self._result_store.get_result(
+            stored = await self._result_store.get_result_for_run(
                 user_id=auth_context.principal.user_id,
+                run_id=auth_context.run_id,
                 result_id=report.result_id,
             )
         except ResourceNotFound as exc:
@@ -232,7 +236,12 @@ class AnalysisReportAssembler:
                 "REPORT_NOT_PERSISTED",
                 "saved analysis report is not readable from the result store",
             ) from exc
-        if not isinstance(stored, AnalysisReportDataResult) or stored != report:
+        if (
+            not isinstance(saved, AnalysisReportDataResult)
+            or not isinstance(stored, AnalysisReportDataResult)
+            or stored != saved
+            or not self._same_report_content(stored, report)
+        ):
             self._reject(
                 "REPORT_STORE_MISMATCH",
                 "re-read analysis report differs from the saved content",
@@ -242,6 +251,9 @@ class AnalysisReportAssembler:
     @staticmethod
     def _report_identity(
         *,
+        tenant_id: str,
+        user_id: str,
+        run_id: str,
         plan_id: str,
         request_id: str,
         status: AnalysisExecutionStatus,
@@ -267,12 +279,25 @@ class AnalysisReportAssembler:
             "evidence_ids": list(evidence_ids),
         }
         result_id = canonical_fingerprint(
-            domain="analysis-report-result-id:1.0", value=content
+            domain="analysis-report-result-id:1.1",
+            value={
+                "tenant_id": tenant_id,
+                "user_id": user_id,
+                "run_id": run_id,
+                "report": content,
+            },
         )
         result_fingerprint = canonical_fingerprint(
             domain="analysis-report:1.0", value=content
         )
         return result_id, result_fingerprint
+
+    @staticmethod
+    def _same_report_content(
+        left: AnalysisReportDataResult, right: AnalysisReportDataResult
+    ) -> bool:
+        excluded = {"created_at", "payload_expires_at"}
+        return left.model_dump(exclude=excluded) == right.model_dump(exclude=excluded)
 
     @classmethod
     def _revalidate_execution(
@@ -444,6 +469,26 @@ class AnalysisReportAssembler:
                     "CHILD_RESULT_STORE_MISMATCH",
                     "stored child result differs from the execution evidence",
                 )
+            for evidence_id in data_result.evidence_ids:
+                try:
+                    evidence = await self._result_store.get_evidence_for_run(
+                        user_id=auth_context.principal.user_id,
+                        run_id=auth_context.run_id,
+                        evidence_id=evidence_id,
+                    )
+                except ResourceNotFound as exc:
+                    raise AnalysisReportAssemblyError(
+                        "CHILD_EVIDENCE_NOT_STORED",
+                        "child evidence is not readable from the trusted result store",
+                    ) from exc
+                if (
+                    evidence.result_id != data_result.result_id
+                    or evidence.result_fingerprint != data_result.result_fingerprint
+                ):
+                    self._reject(
+                        "CHILD_EVIDENCE_MISMATCH",
+                        "child evidence does not match its stored result",
+                    )
             try:
                 return AnalysisChildResultRef(
                     result_id=data_result.result_id,
@@ -481,8 +526,9 @@ class AnalysisReportAssembler:
         result_id: str,
     ) -> DataResult:
         try:
-            return await self._result_store.get_result(
+            return await self._result_store.get_result_for_run(
                 user_id=auth_context.principal.user_id,
+                run_id=auth_context.run_id,
                 result_id=result_id,
             )
         except ResourceNotFound as exc:
