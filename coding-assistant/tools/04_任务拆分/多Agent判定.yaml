@@ -1,38 +1,60 @@
 mode: worktree
-parent_task: P1-grounded-answer-and-semantic-entry
+parent_task: P1-analysis-plan-end-to-end
 batch: 1
 tasks:
-  - id: P1-G
-    name: p1-answer-grounding
+  - id: P1-PS-R
+    name: p1-plan-store-review
+    executor: reviewer
+    file_ranges:
+      - ../p1-plan-store/**
+    dependencies: []
+  - id: P1-AR-R
+    name: p1-analysis-gateway-review
+    executor: reviewer
+    file_ranges:
+      - ../p1-analysis-gateway/**
+    dependencies: []
+  - id: P1-LF-R
+    name: p1-live-fixes-review
+    executor: reviewer
+    file_ranges:
+      - ../p1-integration/**
+    dependencies: []
+  - id: P1-INT
+    name: p1-analysis-integration
     executor: codex-module-dev
     file_ranges:
-      - src/full_view_agent/application/answer_grounding.py
-      - src/full_view_agent/application/harness.py
-      - src/full_view_agent/application/context_builder.py
-      - src/full_view_agent/evaluation/contracts.py
-      - src/full_view_agent/evaluation/runner.py
-      - tests/test_harness.py
-      - tests/test_context_builder.py
-      - tests/test_eval_runner.py
-    dependencies: []
-  - id: P1-S
-    name: p1-semantic-entry
+      - src/full_view_agent/**
+      - tests/**
+      - scripts/migrations/**
+    dependencies: [P1-PS-R, P1-AR-R, P1-LF-R]
+  - id: P1-LG
+    name: p1-analysis-langgraph-wiring
     executor: claude-code-module-dev
     file_ranges:
-      - src/full_view_agent/semantic/**
-      - src/full_view_agent/application/semantic_wiring.py
-      - tests/test_semantic_*.py
-    dependencies: []
+      - src/full_view_agent/infrastructure/**analysis**
+      - tests/**analysis**
+    dependencies: [P1-INT]
+  - id: P1-API
+    name: p1-analysis-api
+    executor: codex-module-dev
+    file_ranges:
+      - src/full_view_agent/api/app.py
+      - src/full_view_agent/application/**analysis**
+      - tests/test_analysis_api.py
+    dependencies: [P1-INT]
   - id: P1-R
-    name: p1-integration-review
+    name: p1-final-review
     executor: reviewer
     file_ranges: []
-    dependencies: [P1-G, P1-S]
+    dependencies: [P1-LG, P1-API]
 verification:
   - uv run ruff check .
   - uv run pyright
   - uv run pytest -q
+  - uv run python -m compileall -q src
 constraints:
-  - P1-G and P1-S file ranges are mutually exclusive
-  - reviewer is read-only and runs only after both builders complete
-  - no frontend, database, credentials, deployment bypass, or eval run artifacts
+  - batch 1 reviewers are read-only and run concurrently
+  - P1-LG and P1-API start only after P1-INT is green
+  - Claude Code and Codex use separate worktrees with explicit file boundaries
+  - no frontend, credentials, deployment bypass, template edits, or eval run artifacts
