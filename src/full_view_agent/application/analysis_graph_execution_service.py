@@ -710,6 +710,7 @@ class AnalysisGraphExecutionService:
             if ledger.status == "persisted":
                 if (
                     checkpoint.status != ledger.result_status
+                    or checkpoint.reason_code != ledger.reason_code
                     or checkpoint.result_id != ledger.result_id
                     or checkpoint.evidence_ids != ledger.evidence_ids
                 ):

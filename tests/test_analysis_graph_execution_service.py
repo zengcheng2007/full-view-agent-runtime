@@ -183,6 +183,37 @@ async def test_finalize_rejects_checkpoints_without_step_attestations() -> None:
 
 
 @pytest.mark.asyncio
+async def test_finalize_rejects_forged_persisted_reason_code() -> None:
+    _graph, execution, _port, _store, _events, _bindings, plan, auth = await _runtime()
+    await execution.prepare(
+        analysis_run_id=auth.run_id,
+        plan_id=plan.plan_id,
+        request_id=plan.request_id,
+        auth_context=auth,
+    )
+    completed = [
+        await execution.execute_step(
+            analysis_run_id=auth.run_id,
+            plan_id=plan.plan_id,
+            request_id=plan.request_id,
+            step_id=step.step_id,
+            auth_context=auth,
+        )
+        for step in plan.steps
+    ]
+    completed[0] = completed[0].model_copy(update={"reason_code": "FORGED_REASON"})
+
+    with pytest.raises(RunStateConflict, match="durable step attestation"):
+        await execution.finalize(
+            analysis_run_id=auth.run_id,
+            plan_id=plan.plan_id,
+            request_id=plan.request_id,
+            completed=tuple(completed),
+            auth_context=auth,
+        )
+
+
+@pytest.mark.asyncio
 async def test_reduce_persists_timeout_attestations_before_finalize() -> None:
     _graph, execution, _port, _store, _events, _bindings, plan, auth = await _runtime()
     await execution.prepare(
