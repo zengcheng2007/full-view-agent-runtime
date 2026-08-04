@@ -225,7 +225,10 @@ async def test_starting_a_queued_run_moves_it_to_running() -> None:
 
 
 @pytest.mark.asyncio
-async def test_reauthentication_ledger_is_idempotent_across_crash_retries() -> None:
+@pytest.mark.parametrize("terminal_status", ["completed", "failed"])
+async def test_reauthentication_ledger_is_idempotent_across_crash_retries(
+    terminal_status: str,
+) -> None:
     service = SessionRunService(InMemoryAgentStore())
     session = await service.create_session(user_id="user-01", title="断点恢复")
     queued = await service.create_run(
@@ -260,11 +263,19 @@ async def test_reauthentication_ledger_is_idempotent_across_crash_retries() -> N
     assert resumed.status == "running"
     assert resumed.state_version == pending.run_state_version + 1
 
-    completed = await service.complete_run(
-        user_id="user-01",
-        run_id=queued.run_id,
-        outcome="success",
-        completion_reason_code="goal_completed",
+    terminal = (
+        await service.complete_run(
+            user_id="user-01",
+            run_id=queued.run_id,
+            outcome="success",
+            completion_reason_code="goal_completed",
+        )
+        if terminal_status == "completed"
+        else await service.fail_run(
+            user_id="user-01",
+            run_id=queued.run_id,
+            completion_reason_code="analysis_failed",
+        )
     )
     replayed_after_completion = await service.resume_from_input(
         user_id="user-01",
@@ -272,7 +283,7 @@ async def test_reauthentication_ledger_is_idempotent_across_crash_retries() -> N
         input_request_id=pending.input_request_id,
         run_state_version=pending.run_state_version,
     )
-    assert replayed_after_completion == completed
+    assert replayed_after_completion == terminal
 
 
 @pytest.mark.asyncio

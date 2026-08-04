@@ -2,6 +2,7 @@
 
 import asyncio
 from datetime import UTC, datetime, timedelta
+from typing import Literal
 
 import httpx
 import pytest
@@ -59,10 +60,16 @@ class _RecordingOrchestrator:
 
 
 class _ReauthenticationOrchestrator:
-    def __init__(self, *, reauth_on_first_resume: bool = False) -> None:
+    def __init__(
+        self,
+        *,
+        reauth_on_first_resume: bool = False,
+        terminal_status: Literal["completed", "failed"] = "completed",
+    ) -> None:
         self.runtime: RuntimeContainer | None = None
         self.resume_calls = 0
         self.reauth_on_first_resume = reauth_on_first_resume
+        self.terminal_status = terminal_status
 
     async def run(
         self,
@@ -107,9 +114,17 @@ class _ReauthenticationOrchestrator:
             analysis_run_id=analysis_run_id,
             plan_id=plan_id,
             request_id=request_id,
-            status="completed",
-            reason_code="all_steps_completed",
-            report_result_id="res_report_after_reauth",
+            status=self.terminal_status,
+            reason_code=(
+                "all_steps_completed"
+                if self.terminal_status == "completed"
+                else "analysis_failed"
+            ),
+            report_result_id=(
+                "res_report_after_reauth"
+                if self.terminal_status == "completed"
+                else None
+            ),
         )
 
 
@@ -606,3 +621,51 @@ async def test_second_analysis_reauthentication_exposes_fresh_pending_refs() -> 
     assert second_resume.status_code == 202
     assert second_resume.json()["data"]["status"] == "completed"
     assert orchestrator.resume_calls == 2
+
+
+@pytest.mark.asyncio
+async def test_failed_terminal_analysis_resume_replays_after_lost_response() -> None:
+    orchestrator = _ReauthenticationOrchestrator(terminal_status="failed")
+    runtime = _runtime(orchestrator=orchestrator)  # type: ignore[arg-type]
+    orchestrator.runtime = runtime
+    app = create_app(runtime)
+    token = "execution-failed-replay"
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=app), base_url="http://test"
+    ) as client:
+        run = await _create_run(client, token)
+        plan = await _create_plan(client, token, str(run["run_id"]))
+        execution = await client.post(
+            f"/agent-api/v1/runs/{run['run_id']}/analysis-plans/{plan['plan_id']}/executions",
+            headers={"geoToken": token},
+            json={"request_id": plan["request_id"]},
+        )
+        assert execution.status_code == 409
+        events = await runtime.events.list_events(run_id=str(run["run_id"]))  # type: ignore[union-attr]
+        pending = events[1].data
+        payload = {
+            "input_request_id": pending["input_request_id"],
+            "client_instance_id": "client-failed-replay",
+            "run_state_version": pending["run_state_version"],
+            "response": {"type": "reauthenticated"},
+            "analysis_plan_id": pending["analysis_plan_id"],
+            "analysis_request_id": pending["analysis_request_id"],
+        }
+
+        first = await client.post(
+            f"/agent-api/v1/runs/{run['run_id']}/inputs",
+            headers={"geoToken": token, "Idempotency-Key": "failed-first"},
+            json=payload,
+        )
+        replay = await client.post(
+            f"/agent-api/v1/runs/{run['run_id']}/inputs",
+            headers={"geoToken": token, "Idempotency-Key": "failed-replay"},
+            json=payload,
+        )
+
+    assert first.status_code == 202
+    assert first.json()["data"]["status"] == "failed"
+    assert replay.status_code == 202
+    assert replay.json()["data"]["status"] == "failed"
+    terminal_events = await runtime.events.list_events(run_id=str(run["run_id"]))  # type: ignore[union-attr]
+    assert [event.type for event in terminal_events].count("run.failed") == 1

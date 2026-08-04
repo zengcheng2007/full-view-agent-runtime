@@ -826,7 +826,7 @@ class PostgresAgentPersistence:
             pending = PendingInputRequest.model_validate_json(row[0]) if row else None
             now = datetime.now(UTC)
             if (
-                run.status in {"running", "completed"}
+                run.status in {"running", "completed", "failed"}
                 and run.waiting_for is None
                 and pending is not None
                 and pending.kind == "reauth"

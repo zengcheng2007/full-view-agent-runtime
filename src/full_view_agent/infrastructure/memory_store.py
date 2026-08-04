@@ -558,7 +558,7 @@ class InMemoryAgentStore:
             pending = self.input_requests.get(run_id)
             now = datetime.now(UTC)
             if (
-                run.status in {"running", "completed"}
+                run.status in {"running", "completed", "failed"}
                 and run.waiting_for is None
                 and pending is not None
                 and pending.kind == "reauth"

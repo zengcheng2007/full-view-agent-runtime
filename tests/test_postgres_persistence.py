@@ -179,7 +179,10 @@ async def test_postgres_persists_the_run_input_message_atomically() -> None:
 
 
 @pytest.mark.asyncio
-async def test_postgres_reauthentication_retry_is_idempotent_after_restart() -> None:
+@pytest.mark.parametrize("terminal_status", ["completed", "failed"])
+async def test_postgres_reauthentication_retry_is_idempotent_after_restart(
+    terminal_status: str,
+) -> None:
     schema = f"fva_test_{uuid4().hex[:12]}"
     store = PostgresAgentPersistence(dsn=postgres_test_dsn(), schema=schema)
     await store.initialize()
@@ -221,11 +224,19 @@ async def test_postgres_reauthentication_retry_is_idempotent_after_restart() -> 
         assert resumed.status == "running"
         assert resumed.state_version == pending.run_state_version + 1
 
-        completed = await service.complete_run(
-            user_id="user-01",
-            run_id=queued.run_id,
-            outcome="success",
-            completion_reason_code="goal_completed",
+        terminal = (
+            await service.complete_run(
+                user_id="user-01",
+                run_id=queued.run_id,
+                outcome="success",
+                completion_reason_code="goal_completed",
+            )
+            if terminal_status == "completed"
+            else await service.fail_run(
+                user_id="user-01",
+                run_id=queued.run_id,
+                completion_reason_code="analysis_failed",
+            )
         )
         replayed_after_completion = await restarted.resume_from_input(
             user_id="user-01",
@@ -233,7 +244,7 @@ async def test_postgres_reauthentication_retry_is_idempotent_after_restart() -> 
             input_request_id=pending.input_request_id,
             run_state_version=pending.run_state_version,
         )
-        assert replayed_after_completion == completed
+        assert replayed_after_completion == terminal
     finally:
         await store.drop_schema()
 
