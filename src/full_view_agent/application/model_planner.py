@@ -1,3 +1,4 @@
+import logging
 from dataclasses import replace
 from typing import Protocol
 
@@ -21,6 +22,8 @@ from full_view_agent.application.model_provider import (
     ModelToolDefinition,
 )
 from full_view_agent.domain.models import AuthContext
+
+logger = logging.getLogger(__name__)
 
 
 class ContextBuilder(Protocol):
@@ -127,9 +130,9 @@ class ModelPlanner:
                 set(call.arguments).intersection(server_arguments)
             )
             if attempted_server_fields:
-                raise ModelContractError(
-                    "model attempted to set server-owned tool arguments: "
-                    + ", ".join(attempted_server_fields)
+                logger.warning(
+                    "ignoring model-supplied server-owned tool arguments: %s",
+                    ", ".join(attempted_server_fields),
                 )
             return ToolAction(
                 tool_id=call.tool_id,

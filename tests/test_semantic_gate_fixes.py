@@ -2,7 +2,6 @@
 
 import pytest
 
-from full_view_agent.application.errors import ModelContractError
 from full_view_agent.application.harness import HarnessState, ToolAction
 from full_view_agent.application.model_planner import ModelPlanner
 from full_view_agent.application.model_provider import (
@@ -116,7 +115,7 @@ async def test_model_planner_injects_server_arguments_before_checkpoint() -> Non
 
 
 @pytest.mark.asyncio
-async def test_model_cannot_override_server_owned_catalog_version() -> None:
+async def test_model_server_owned_catalog_value_is_ignored_and_replaced() -> None:
     catalog = SemanticCatalog.default()
     advertised_tool = ModelToolDefinition(
         tool_id=SEMANTIC_QUERY_TOOL_ID,
@@ -150,13 +149,16 @@ async def test_model_cannot_override_server_owned_catalog_version() -> None:
                 usage=ModelUsage(total_tokens=10),
             )
 
-    with pytest.raises(ModelContractError, match="server-owned"):
-        await ModelPlanner(
-            provider=_Provider(),
-            context_builder=_ContextBuilder(),
-            user_id="user-01",
-            auth_context=population_auth_context(),
-        ).decide(HarnessState())
+    action = await ModelPlanner(
+        provider=_Provider(),
+        context_builder=_ContextBuilder(),
+        user_id="user-01",
+        auth_context=population_auth_context(),
+    ).decide(HarnessState())
+
+    assert isinstance(action, ToolAction)
+    assert action.arguments["catalog_version"] == catalog.catalog_version
+    assert action.arguments["catalog_fingerprint"] == catalog.execution_fingerprint
 
 
 def test_presenter_marks_catalog_required_filters_as_mandatory() -> None:
