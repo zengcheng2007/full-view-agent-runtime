@@ -492,6 +492,16 @@ def test_presenter_keeps_next_area_absent_when_production_gate_is_closed() -> No
     assert "next_area" not in presentation.description
 
 
+def test_presenter_forbids_broader_query_when_requested_dimension_is_unsupported() -> None:
+    presentation = SemanticToolPresenter(catalog=SemanticCatalog.default()).present(
+        auth_context=_subject_auth("population")
+    )
+
+    assert presentation is not None
+    assert "不得改用更宽口径查询替代" in presentation.description
+    assert "明确说明当前能力边界" in presentation.description
+
+
 def test_presenter_result_grains_follow_catalog_without_internal_field_leak() -> None:
     base = SemanticCatalog.default(housing_next_area_enabled=True)
     housing = base.require_subject("housing")
