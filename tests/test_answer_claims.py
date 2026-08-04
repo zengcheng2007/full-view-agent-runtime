@@ -71,6 +71,39 @@ async def test_structured_claim_accepts_exact_row_value_and_renders_server_fact(
     assert assessment.safe_summary == "住宅出租的出租房数量为884套。"
 
 
+@pytest.mark.asyncio
+async def test_structured_claim_preserves_unsupported_constraint_as_server_text() -> None:
+    structured = StructuredFinish(
+        kind="claims",
+        summary="这里可能包含模型自由文本，不能直接返回。",
+        limitations=["unsupported_requested_constraint"],
+        claims=[claim()],
+    )
+
+    assessment = await DeterministicCompletionValidator().assess(
+        HarnessState(tool_results=(successful_housing_result(),)),
+        FinishAction(summary=structured.summary, structured_finish=structured),
+    )
+
+    assert assessment.status == "accept"
+    assert assessment.safe_summary == (
+        "当前能力不支持用户要求的全部筛选条件；以下结果采用已支持的更宽口径，"
+        "不等同于原问题的精确结果。\n住宅出租的出租房数量为884套。"
+    )
+
+
+def test_structured_limitation_rejects_uncontrolled_model_text() -> None:
+    with pytest.raises(ValidationError):
+        StructuredFinish.model_validate(
+            {
+                "kind": "claims",
+                "summary": "summary",
+                "limitations": ["model_supplied_warning"],
+                "claims": [claim().model_dump(mode="json")],
+            }
+        )
+
+
 def metric_result(
     *,
     result_id: str,
