@@ -48,7 +48,7 @@ def test_export_contracts_writes_openapi_and_versioned_json_schemas(tmp_path) ->
         "application/json"
     ]["schema"]
     assert request_schema["$ref"].endswith("/AnalysisRequest")
-    for status_code in ("401", "404", "409", "422", "503"):
+    for status_code in ("400", "401", "404", "409", "422", "503"):
         error_schema = analysis_operation["responses"][status_code]["content"][
             "application/json"
         ]["schema"]

@@ -239,6 +239,38 @@ async def test_analysis_plan_rejects_same_user_from_another_tenant() -> None:
 
 
 @pytest.mark.asyncio
+async def test_analysis_plan_replay_rechecks_current_tenant_before_cache_hit() -> None:
+    identity = _MutableIdentityAdapter()
+    runtime = RuntimeContainer(
+        identity_port=identity,
+        credentials=InMemoryCredentialBroker(),
+    )
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=create_app(runtime)),
+        base_url="http://test",
+    ) as client:
+        run_id = await _create_run(client, "tenant-replay")
+        headers = {
+            "geoToken": "tenant-replay",
+            "Idempotency-Key": "tenant-replay-plan",
+        }
+        first = await client.post(
+            f"/agent-api/v1/runs/{run_id}/analysis-plans",
+            headers=headers,
+            json=_analysis_request(),
+        )
+        identity.tenant_id = "tenant-b"
+        replay = await client.post(
+            f"/agent-api/v1/runs/{run_id}/analysis-plans",
+            headers=headers,
+            json=_analysis_request(),
+        )
+
+    assert first.status_code == 201
+    assert replay.status_code == 404
+
+
+@pytest.mark.asyncio
 async def test_analysis_plan_uses_current_revoked_permissions() -> None:
     identity = _MutableIdentityAdapter()
     runtime = RuntimeContainer(
@@ -264,6 +296,39 @@ async def test_analysis_plan_uses_current_revoked_permissions() -> None:
     assert response.status_code == 201
     assert response.json()["data"]["steps"] == []
     assert response.json()["data"]["omissions"][0]["reason_code"] == "NOT_ENTITLED"
+
+
+@pytest.mark.asyncio
+async def test_analysis_plan_replay_cannot_return_plan_after_permission_revocation() -> None:
+    identity = _MutableIdentityAdapter()
+    runtime = RuntimeContainer(
+        identity_port=identity,
+        credentials=InMemoryCredentialBroker(),
+    )
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=create_app(runtime)),
+        base_url="http://test",
+    ) as client:
+        run_id = await _create_run(client, "revoked-replay")
+        headers = {
+            "geoToken": "revoked-replay",
+            "Idempotency-Key": "revoked-replay-plan",
+        }
+        first = await client.post(
+            f"/agent-api/v1/runs/{run_id}/analysis-plans",
+            headers=headers,
+            json=_analysis_request(),
+        )
+        identity.authorized = False
+        replay = await client.post(
+            f"/agent-api/v1/runs/{run_id}/analysis-plans",
+            headers=headers,
+            json=_analysis_request(),
+        )
+
+    assert first.status_code == 201
+    assert replay.status_code == 409
+    assert replay.json()["error"]["code"] == "idempotency_conflict"
 
 
 @pytest.mark.asyncio

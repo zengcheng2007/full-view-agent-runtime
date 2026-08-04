@@ -1024,6 +1024,7 @@ def create_app(runtime: RuntimeContainer | None = None) -> FastAPI:
         "/agent-api/v1/runs/{run_id}/analysis-plans",
         status_code=201,
         responses={
+            400: {"model": ErrorResponse},
             401: {"model": ErrorResponse},
             404: {"model": ErrorResponse},
             409: {"model": ErrorResponse},
@@ -1037,30 +1038,34 @@ def create_app(runtime: RuntimeContainer | None = None) -> FastAPI:
         user: Annotated[CurrentUser, Depends(require_geotoken)],
         idempotency_key: Annotated[str, Header(alias="Idempotency-Key", min_length=1)],
     ) -> AnalysisPlanResponse:
+        # Current identity and authorization are security preconditions, not
+        # part of the cacheable operation. A replay must never bypass tenant
+        # ownership checks or return a plan after permissions were revoked.
+        run = await app.state.runtime.store.get_run(
+            user_id=user.user_id,
+            run_id=run_id,
+        )
+        previous_context = await app.state.runtime.auth_contexts.get(
+            user_id=user.user_id,
+            run_id=run_id,
+        )
+        if (
+            previous_context.principal.user_id != user.identity.principal.user_id
+            or previous_context.principal.tenant_id
+            != user.identity.principal.tenant_id
+        ):
+            raise ResourceNotFound("run was not found for the current identity")
+        auth_context = await app.state.runtime.admission.admit(
+            identity=user.identity,
+            raw_token=user.raw_token,
+            session_id=run.session_id,
+            run_id=run_id,
+        )
+        await app.state.runtime.credentials.revoke(
+            credential_ref=previous_context.credential_ref,
+        )
+
         async def operation() -> AnalysisPlan:
-            run = await app.state.runtime.store.get_run(
-                user_id=user.user_id,
-                run_id=run_id,
-            )
-            previous_context = await app.state.runtime.auth_contexts.get(
-                user_id=user.user_id,
-                run_id=run_id,
-            )
-            if (
-                previous_context.principal.user_id != user.identity.principal.user_id
-                or previous_context.principal.tenant_id
-                != user.identity.principal.tenant_id
-            ):
-                raise ResourceNotFound("run was not found for the current identity")
-            auth_context = await app.state.runtime.admission.admit(
-                identity=user.identity,
-                raw_token=user.raw_token,
-                session_id=run.session_id,
-                run_id=run_id,
-            )
-            await app.state.runtime.credentials.revoke(
-                credential_ref=previous_context.credential_ref,
-            )
             return await app.state.runtime.analysis_planning.create_plan(
                 request=body,
                 auth_context=auth_context,
@@ -1073,7 +1078,19 @@ def create_app(runtime: RuntimeContainer | None = None) -> FastAPI:
             key=idempotency_key,
             request_fingerprint=request_fingerprint(
                 domain=scope,
-                payload=body.model_dump(mode="json"),
+                payload={
+                    "request": body.model_dump(mode="json"),
+                    # Stable policy view only: never include credential refs,
+                    # tokens, auth-context IDs or timestamps.
+                    "authorization": {
+                        "principal": auth_context.principal.model_dump(mode="json"),
+                        "application": auth_context.application.model_dump(mode="json"),
+                        "entitlements": sorted(auth_context.entitlements),
+                        "data_scopes": auth_context.data_scopes.model_dump(mode="json"),
+                        "purpose": auth_context.purpose,
+                        "policy_version": auth_context.policy_version,
+                    },
+                },
             ),
             operation=operation,
         )
