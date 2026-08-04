@@ -231,6 +231,9 @@ class ToolObservationService:
             if tool_result.semantic_lineage is not None
             else action.tool_id
         )
+        # 命令目标以 run 的发起客户端为唯一权威：能力声明只决定是否发命令，
+        # 不参与目标绑定（持久层会以 origin_client_instance_id 复核）。
+        target_client_instance_id = run.origin_client_instance_id
         commands: list[FrontendCommand] = []
         if "panel.show_table" in client.supported_commands:
             commands.append(
@@ -244,7 +247,7 @@ class ToolObservationService:
                         },
                     ),
                     run_id=run.run_id,
-                    target_client_instance_id=client.client_instance_id,
+                    target_client_instance_id=target_client_instance_id,
                     type="panel.show_table",
                     issued_at=now,
                     expires_at=now + timedelta(minutes=5),
@@ -271,7 +274,7 @@ class ToolObservationService:
                         },
                     ),
                     run_id=run.run_id,
-                    target_client_instance_id=client.client_instance_id,
+                    target_client_instance_id=target_client_instance_id,
                     type="map.render_choropleth",
                     target="map_panel",
                     issued_at=now,

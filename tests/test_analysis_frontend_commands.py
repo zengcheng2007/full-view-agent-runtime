@@ -330,6 +330,23 @@ async def test_analysis_replay_and_recovery_do_not_republish_or_mutate_commands(
 
 
 @pytest.mark.asyncio
+async def test_analysis_commands_bind_origin_client_when_capabilities_diverge() -> None:
+    graph, _execution, store, _events, plan, auth, _order = await _runtime(
+        capabilities=_capabilities(
+            ("panel.show_table", "map.render_choropleth"),
+            client_instance_id="cli-stale-capability",
+        )
+    )
+
+    outcome = await graph.run(**_graph_kwargs(plan, auth))
+
+    assert outcome.status == "completed"
+    assert store.frontend_commands, "commands must still be issued for the origin client"
+    for command in store.frontend_commands.values():
+        assert command.target_client_instance_id == ORIGIN_CLIENT
+
+
+@pytest.mark.asyncio
 async def test_analysis_observation_replay_rejects_forged_command_payload() -> None:
     _graph, execution, store, _events, plan, auth, _order = await _runtime(
         capabilities=_capabilities(("panel.show_table", "map.render_choropleth"))
