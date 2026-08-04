@@ -61,7 +61,7 @@ def test_run_create_request_rejects_unknown_fields() -> None:
                 },
                 "client": {
                     "client_instance_id": "cli-01",
-                    "frontend_command_schema_versions": ["1.0"],
+                    "frontend_command_schema_versions": ["1.1"],
                     "supported_commands": ["panel.show_table"],
                 },
                 "mode": "agent",
@@ -80,7 +80,7 @@ def test_workflow_mode_requires_registered_workflow_reference() -> None:
                 },
                 "client": {
                     "client_instance_id": "cli-01",
-                    "frontend_command_schema_versions": ["1.0"],
+                    "frontend_command_schema_versions": ["1.1"],
                     "supported_commands": [],
                 },
                 "mode": "workflow",

@@ -73,7 +73,7 @@ async def _create_run(client: httpx.AsyncClient, token: str) -> str:
             },
             "client": {
                 "client_instance_id": f"client-{token}",
-                "frontend_command_schema_versions": ["1.0"],
+                "frontend_command_schema_versions": ["1.1"],
                 "supported_commands": ["panel.show_table"],
             },
             "mode": "analysis",

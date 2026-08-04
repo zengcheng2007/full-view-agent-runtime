@@ -71,7 +71,7 @@ class _OrderedEvents(InMemoryEventBroker):
 
 def _capabilities(
     supported_commands: tuple[str, ...],
-    schema_versions: tuple[str, ...] = ("1.0",),
+    schema_versions: tuple[str, ...] = ("1.1",),
     *,
     client_instance_id: str = ORIGIN_CLIENT,
 ) -> ClientCapabilities:
@@ -231,6 +231,8 @@ async def test_analysis_commands_follow_capabilities_and_area_grouping() -> None
     assert [c.type for c in commands_by_subject["housing"]] == ["panel.show_table"]
     assert [c.type for c in commands_by_subject["event"]] == ["panel.show_table"]
     for command in store.frontend_commands.values():
+        # 声明 schema 1.1 的客户端正常收到命令，且命令实体固定 schema 1.1。
+        assert command.schema_version == "1.1"
         assert command.run_id == auth.run_id
         assert command.target_client_instance_id == ORIGIN_CLIENT
         assert command.preconditions.session_id == auth.session_id
@@ -268,13 +270,17 @@ async def test_analysis_commands_follow_capabilities_and_area_grouping() -> None
         None,
         _capabilities((), ()),
         _capabilities(("panel.show_table", "map.render_choropleth"), ()),
-        _capabilities((), ("1.0",)),
+        _capabilities((), ("1.1",)),
+        # 反例：仅声明旧版 schema 1.0 的客户端不得收到 schema 1.1 命令，
+        # 即使其声明了全部命令能力（命令实体 schema_version 固定为 1.1）。
+        _capabilities(("panel.show_table", "map.render_choropleth"), ("1.0",)),
     ],
     ids=[
         "no-capabilities",
         "no-schema-no-commands",
-        "commands-without-schema-1.0",
+        "commands-without-schema-1.1",
         "schema-without-commands",
+        "schema-1.0-only-gets-no-commands",
     ],
 )
 async def test_analysis_without_declared_capability_persists_without_commands(

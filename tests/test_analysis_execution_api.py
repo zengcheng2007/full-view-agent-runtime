@@ -419,7 +419,7 @@ async def _create_run(
             },
             "client": {
                 "client_instance_id": f"client-{token}",
-                "frontend_command_schema_versions": ["1.0"],
+                "frontend_command_schema_versions": ["1.1"],
                 "supported_commands": list(supported_commands),
             },
             "mode": mode,

@@ -247,7 +247,7 @@ def run_request(*, message_id: str, client_instance_id: str) -> RunCreateRequest
             },
             "client": {
                 "client_instance_id": client_instance_id,
-                "frontend_command_schema_versions": ["1.0"],
+                "frontend_command_schema_versions": ["1.1"],
                 "supported_commands": ["panel.show_table"],
             },
             "mode": "agent",
@@ -546,7 +546,7 @@ async def test_create_run_executes_mock_tool_and_reaches_success() -> None:
                 },
                 "client": {
                     "client_instance_id": "cli-api-01",
-                    "frontend_command_schema_versions": ["1.0"],
+                    "frontend_command_schema_versions": ["1.1"],
                     "supported_commands": ["panel.show_table"],
                 },
                 "mode": "agent",
@@ -592,7 +592,7 @@ async def test_frontend_command_receipt_is_idempotent_and_bound_to_target_client
                 },
                 "client": {
                     "client_instance_id": "cli-command-01",
-                    "frontend_command_schema_versions": ["1.0"],
+                    "frontend_command_schema_versions": ["1.1"],
                     "supported_commands": ["panel.show_table"],
                 },
                 "mode": "agent",
@@ -967,7 +967,7 @@ async def test_sse_endpoint_returns_run_events_without_token_in_payload() -> Non
                 },
                 "client": {
                     "client_instance_id": "cli-sse-01",
-                    "frontend_command_schema_versions": ["1.0"],
+                    "frontend_command_schema_versions": ["1.1"],
                     "supported_commands": ["panel.show_table"],
                 },
                 "mode": "agent",

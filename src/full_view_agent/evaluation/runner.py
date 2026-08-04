@@ -444,7 +444,7 @@ def _run_request(
             },
             "client": {
                 "client_instance_id": "eval-runner",
-                "frontend_command_schema_versions": ["1.0"],
+                "frontend_command_schema_versions": ["1.1"],
                 "supported_commands": ["panel.show_table"],
             },
             "mode": "agent",

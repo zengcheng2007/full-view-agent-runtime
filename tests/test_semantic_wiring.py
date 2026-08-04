@@ -174,7 +174,7 @@ def _map_enabled_request(message_id: str = "web-semantic-01") -> RunCreateReques
             },
             "client": {
                 "client_instance_id": "cli-semantic",
-                "frontend_command_schema_versions": ["1.0"],
+                "frontend_command_schema_versions": ["1.1"],
                 "supported_commands": ["panel.show_table", "map.render_choropleth"],
             },
             "mode": "agent",

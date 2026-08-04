@@ -222,7 +222,7 @@ class ToolObservationService:
         client = run.client_capabilities
         if not isinstance(data_result, TableDataResult) or client is None:
             return ()
-        if "1.0" not in client.frontend_command_schema_versions:
+        if "1.1" not in client.frontend_command_schema_versions:
             return ()
         now = data_result.created_at
         area_codes = action_area_codes(action)
