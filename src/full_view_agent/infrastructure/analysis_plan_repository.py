@@ -292,6 +292,9 @@ class PostgresAnalysisPlanRepository:
             f"ON {prefix}analysis_plans(tenant_id, user_id, run_id, plan_id)",
             f"CREATE INDEX IF NOT EXISTS idx_fva_analysis_plans_request "
             f"ON {prefix}analysis_plans(tenant_id, user_id, run_id, request_id)",
+            f"CREATE INDEX IF NOT EXISTS idx_fva_analysis_plans_latest "
+            f"ON {prefix}analysis_plans"
+            "(tenant_id, user_id, run_id, created_at DESC, namespace DESC)",
         )
 
 

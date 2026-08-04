@@ -84,6 +84,22 @@ def test_forward_migration_uses_portable_text_storage() -> None:
     assert "JSONB" not in migration.upper()
 
 
+def test_plan_discovery_migration_adds_owner_run_latest_index() -> None:
+    migration_path = (
+        Path(__file__).parents[1]
+        / "scripts/migrations/V007_analysis_plan_discovery.sql"
+    )
+    migration = migration_path.read_text(encoding="utf-8")
+
+    assert "idx_fva_analysis_plans_latest" in migration
+    assert "tenant_id" in migration
+    assert "user_id" in migration
+    assert "run_id" in migration
+    assert "created_at DESC" in migration
+    assert "namespace DESC" in migration
+    assert "JSONB" not in migration.upper()
+
+
 @pytest.mark.asyncio
 async def test_in_memory_save_is_idempotent_and_returns_revalidated_copy() -> None:
     repository = InMemoryAnalysisPlanRepository()
