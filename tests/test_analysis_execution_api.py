@@ -82,6 +82,14 @@ def _runtime(
     )
 
 
+def test_analysis_orchestrator_is_composed_when_enabled(monkeypatch) -> None:
+    monkeypatch.setenv("FULL_VIEW_ANALYSIS_EXECUTION_ENABLED", "true")
+
+    runtime = _runtime(orchestrator=None)
+
+    assert runtime.analysis_orchestrator is not None
+
+
 async def _create_run(client: httpx.AsyncClient, token: str) -> dict[str, object]:
     session = await client.post(
         "/agent-api/v1/sessions",

@@ -53,7 +53,10 @@ from full_view_agent.application.errors import (
 )
 from full_view_agent.application.model_planner import ModelPlannerFactory
 from full_view_agent.application.model_provider import ModelProvider
-from full_view_agent.application.orchestrator_factory import create_orchestrator
+from full_view_agent.application.orchestrator_factory import (
+    create_analysis_orchestrator,
+    create_orchestrator,
+)
 from full_view_agent.application.ports import (
     AgentStore,
     AnalysisOrchestratorPort,
@@ -555,6 +558,33 @@ class RuntimeContainer:
             planner_factory=planner_factory,
             semantic_stack=self.semantic_stack,
         )
+        analysis_enabled = os.getenv(
+            "FULL_VIEW_ANALYSIS_EXECUTION_ENABLED",
+            "true" if runtime_profile == "production" else "false",
+        ).strip().lower()
+        if analysis_enabled not in {"true", "false"}:
+            raise RuntimeError(
+                "FULL_VIEW_ANALYSIS_EXECUTION_ENABLED must be true or false"
+            )
+        if self.analysis_orchestrator is None and analysis_enabled == "true":
+            self.analysis_orchestrator = create_analysis_orchestrator(
+                service=self.service,
+                store=self.store,
+                events=self.events,
+                planner=self.analysis_planner,
+                plan_repository=self.analysis_plan_repository,
+                semantic_stack=self.semantic_stack,
+                tool_registry=self.tool_registry,
+                evidence_source_system=(
+                    "geo-qxst"
+                    if isinstance(self.governance_adapter, HttpGovernanceAdapter)
+                    else "in_memory_fixture"
+                ),
+                database_url=database_url,
+                postgres_schema=os.getenv(
+                    "FULL_VIEW_POSTGRES_SCHEMA", "full_view_agent"
+                ),
+            )
 
     def schedule_run(self, *, user_id: str, run_id: str) -> None:
         """Delegate scheduling to the OrchestrationPort."""

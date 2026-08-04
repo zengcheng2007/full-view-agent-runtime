@@ -30,7 +30,12 @@ class PostgresAnalysisRunLeaseManager:
 
     @asynccontextmanager
     async def lease(self, *, analysis_run_id: str) -> AsyncIterator[None]:
-        connection = await psycopg.AsyncConnection.connect(self._dsn)
+        # Session advisory locks do not need a transaction. Autocommit avoids
+        # holding an idle transaction that can deadlock LangGraph's concurrent
+        # checkpoint-index setup in another connection.
+        connection = await psycopg.AsyncConnection.connect(
+            self._dsn, autocommit=True
+        )
         lock_key = f"full-view-analysis-run:{analysis_run_id}"
         try:
             await connection.execute(
