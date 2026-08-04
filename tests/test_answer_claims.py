@@ -104,6 +104,26 @@ def test_structured_limitation_rejects_uncontrolled_model_text() -> None:
         )
 
 
+@pytest.mark.asyncio
+async def test_capability_limitation_after_query_returns_only_server_boundary() -> None:
+    structured = StructuredFinish(
+        kind="capability",
+        summary="模型自由文本包含128人，但不得泄漏为能力答复。",
+        limitations=["unsupported_requested_constraint"],
+    )
+
+    assessment = await DeterministicCompletionValidator().assess(
+        HarnessState(tool_results=(successful_housing_result(),)),
+        FinishAction(summary=structured.summary, structured_finish=structured),
+    )
+
+    assert assessment.status == "accept"
+    assert assessment.safe_summary == (
+        "当前能力不支持用户要求的全部筛选条件，无法按原条件精确查询。"
+    )
+    assert "128" not in assessment.safe_summary
+
+
 def metric_result(
     *,
     result_id: str,

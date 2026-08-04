@@ -125,7 +125,8 @@ class SemanticToolPresenter:
             "不得生成目录未声明的指标、维度、筛选字段、操作符或输出形态；"
             "当前所有主题均不支持 order_by 与 time_range。用户要求目录未声明的"
             "指标、维度或筛选时，不得改用更宽口径查询替代；应以 capability 完成"
-            "并明确说明当前能力边界。",
+            "并携带 limitations=['unsupported_requested_constraint']，由服务端明确"
+            "说明当前能力边界。",
             f"当前语义目录（catalog_version={catalog_version}，"
             f"spec_version={spec_version}），本次授权可用主题：",
         ]

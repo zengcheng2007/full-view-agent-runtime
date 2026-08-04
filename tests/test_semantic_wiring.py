@@ -500,6 +500,7 @@ def test_presenter_forbids_broader_query_when_requested_dimension_is_unsupported
     assert presentation is not None
     assert "不得改用更宽口径查询替代" in presentation.description
     assert "明确说明当前能力边界" in presentation.description
+    assert "limitations=['unsupported_requested_constraint']" in presentation.description
 
 
 def test_presenter_result_grains_follow_catalog_without_internal_field_leak() -> None:

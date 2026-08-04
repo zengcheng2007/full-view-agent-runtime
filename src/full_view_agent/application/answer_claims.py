@@ -13,6 +13,9 @@ FINISH_TOOL_ID = "full_view.finish_answer"
 FINISH_TOOL_NAME = "full_view__finish_answer"
 REFERENCE_ONLY_SUMMARY = "查询已完成，详细结果请查看数据面板。"
 CAPABILITY_SUMMARY = "我可以协助使用当前已授权的治理查询能力。"
+UNSUPPORTED_CONSTRAINT_SUMMARY = (
+    "当前能力不支持用户要求的全部筛选条件，无法按原条件精确查询。"
+)
 CLARIFICATION_SUMMARY = "请补充查询所需的区域、对象或统计口径。"
 DENIAL_SUMMARY = "当前查询因权限限制无法完成。"
 FAILURE_SUMMARY = "本次查询执行失败，未生成业务结论。"
@@ -68,8 +71,8 @@ class StructuredFinish(ContractModel):
             raise ValueError("claims finish requires at least one claim")
         if self.kind != "claims" and self.claims:
             raise ValueError("only claims finish may contain claims")
-        if self.kind != "claims" and self.limitations:
-            raise ValueError("only claims finish may contain result limitations")
+        if self.kind not in {"claims", "capability"} and self.limitations:
+            raise ValueError("only claims or capability finish may contain limitations")
         if len(self.limitations) != len(set(self.limitations)):
             raise ValueError("result limitations must be unique")
         ids = [claim.claim_id for claim in self.claims]
@@ -82,8 +85,9 @@ FINISH_TOOL_DESCRIPTION = (
     "完成本轮回答。引用查询事实时必须使用 claims，并明确绑定 Result、行、字段、"
     "运算和值；只展示数据面板时使用 reference_only；能力说明、参数澄清、权限拒绝"
     "和执行失败必须分别使用 capability、clarification、denial、failure。若在用户"
-    "要求的筛选条件不受支持时仍返回更宽口径结果，claims 必须携带 limitations "
-    "unsupported_requested_constraint；不得把更宽口径结果表述成原问题的精确结果。"
+    "要求的筛选条件不受支持时：若不返回数据，应使用 capability 并携带 limitations "
+    "unsupported_requested_constraint；若仍返回更宽口径结果，claims 也必须携带该"
+    "limitations；不得把更宽口径结果表述成原问题的精确结果。"
 )
 FINISH_TOOL_INPUT_SCHEMA: dict[str, object] = StructuredFinish.model_json_schema()
 
@@ -110,6 +114,14 @@ def assess_structured_finish(
         if not available and not has_reference:
             return ClaimAssessment(False, "reference_result_not_found")
         return ClaimAssessment(True, "reference_only", REFERENCE_ONLY_SUMMARY)
+    if finish.kind == "capability" and finish.limitations == [
+        "unsupported_requested_constraint"
+    ]:
+        return ClaimAssessment(
+            True,
+            "unsupported_requested_constraint",
+            UNSUPPORTED_CONSTRAINT_SUMMARY,
+        )
     if finish.kind != "claims":
         return ClaimAssessment(False, "structured_finish_kind_not_allowed")
 
