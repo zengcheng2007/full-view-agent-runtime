@@ -1,4 +1,5 @@
 import os
+from contextlib import asynccontextmanager
 from typing import TypedDict
 from uuid import uuid4
 
@@ -24,6 +25,51 @@ def postgres_test_dsn() -> str:
 
 def increment(state: CounterState) -> CounterState:
     return {"value": state["value"] + 1}
+
+
+@pytest.mark.asyncio
+async def test_initialize_closes_connection_when_advisory_unlock_fails(
+    monkeypatch,
+) -> None:
+    class _Cursor:
+        async def fetchone(self):
+            return (True,)
+
+    class _Connection:
+        closed = False
+
+        async def execute(self, query, _params=None):
+            if "pg_advisory_unlock" in str(query):
+                raise RuntimeError("unlock failed")
+            return _Cursor()
+
+        async def close(self):
+            self.closed = True
+
+    class _Saver:
+        async def setup(self):
+            return None
+
+    connection = _Connection()
+
+    async def connect(*_args, **_kwargs):
+        return connection
+
+    @asynccontextmanager
+    async def open_saver():
+        yield _Saver()
+
+    monkeypatch.setattr(psycopg.AsyncConnection, "connect", connect)
+    manager = LangGraphPostgresCheckpointManager(
+        dsn="postgresql://unused",
+        schema="fva_unlock_failure",
+    )
+    monkeypatch.setattr(manager, "_open_saver", open_saver)
+
+    with pytest.raises(RuntimeError, match="unlock failed"):
+        await manager.initialize()
+
+    assert connection.closed is True
 
 
 @pytest.mark.asyncio
