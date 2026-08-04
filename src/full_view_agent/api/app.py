@@ -662,7 +662,7 @@ async def _complete_analysis_run(
         "expired",
     }:
         content: list[TextContent | ResultReferenceContent] = [
-            TextContent(type="text", text=outcome.reason_code)
+            TextContent(type="text", text=_analysis_outcome_text(outcome))
         ]
         evidence_ids: list[str] = []
         if outcome.report_result_id is not None:
@@ -720,6 +720,14 @@ async def _complete_analysis_run(
         },
         idempotency_key=f"analysis:{run.run_id}:terminal",
     )
+
+
+def _analysis_outcome_text(outcome: AnalysisRunOutcome) -> str:
+    if outcome.status == "completed":
+        return "区域研判已完成，详细结果请查看研判报告。"
+    if outcome.status == "partial":
+        return "区域研判已完成，但部分主题未取得结果；详情请查看研判报告。"
+    return "区域研判执行失败，未生成可用报告。"
 
 
 async def _publish_analysis_reauthentication(

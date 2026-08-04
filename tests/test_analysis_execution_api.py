@@ -182,6 +182,7 @@ async def test_public_analysis_run_is_exclusive_and_reaches_terminal(monkeypatch
         user_id=identity.principal.user_id, session_id=str(run["session_id"])
     )
     assert [message.role for message in messages] == ["user", "assistant"]
+    assert messages[-1].content[0].text == "区域研判已完成，详细结果请查看研判报告。"  # type: ignore[union-attr]
 
 
 async def _create_run(
