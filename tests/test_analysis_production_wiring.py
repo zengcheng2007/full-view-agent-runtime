@@ -1,6 +1,7 @@
 """Real PostgreSQL execution through the production analysis composition root."""
 
 import asyncio
+import json
 import os
 from base64 import urlsafe_b64encode
 from uuid import uuid4
@@ -71,6 +72,53 @@ async def test_queued_plan_is_discoverable_after_runtime_restart(monkeypatch) ->
         assert replayed_plan == plan
         assert discovered.status_code == 200
         assert discovered.json()["data"] == plan
+
+        async with await psycopg.AsyncConnection.connect(dsn) as connection:
+            row = await (
+                await connection.execute(
+                    sql.SQL(
+                        "SELECT result_json FROM {}.idempotency_records "
+                        "WHERE result_type = 'analysis_plan'"
+                    ).format(sql.Identifier(schema))
+                )
+            ).fetchone()
+            assert row is not None
+            tampered = json.loads(row[0])
+            tampered["request_id"] = "analysis-request-tampered"
+            await connection.execute(
+                sql.SQL(
+                    "UPDATE {}.idempotency_records SET result_json = %s "
+                    "WHERE result_type = 'analysis_plan'"
+                ).format(sql.Identifier(schema)),
+                (json.dumps(tampered),),
+            )
+
+        async with httpx.AsyncClient(
+            transport=httpx.ASGITransport(app=restarted_app), base_url="http://test"
+        ) as client:
+            tampered_replay = await client.post(
+                f"/agent-api/v1/runs/{run['run_id']}/analysis-plans",
+                headers={"geoToken": token, "Idempotency-Key": f"plan-{token}"},
+                json={
+                    "request_id": "analysis-request-exec-01",
+                    "goals": ["housing"],
+                    "scope_ref": {
+                        "kind": "area",
+                        "scope": {"area_code": "330106"},
+                    },
+                    "budget": {
+                        "max_parallel": 2,
+                        "max_tool_calls": 4,
+                        "total_timeout_ms": 30_000,
+                    },
+                },
+            )
+
+        assert tampered_replay.status_code == 503
+        assert (
+            tampered_replay.json()["error"]["code"]
+            == "analysis_planning_unavailable"
+        )
     finally:
         async with await psycopg.AsyncConnection.connect(dsn) as connection:
             await connection.execute(

@@ -14,6 +14,7 @@ from cryptography.exceptions import InvalidTag
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 from pydantic import SecretStr, TypeAdapter
 
+from full_view_agent.application.analysis_plan_repository import validate_plan_for_save
 from full_view_agent.application.errors import (
     CommandClientMismatch,
     CredentialUnavailable,
@@ -1577,11 +1578,12 @@ def _encode_idempotent_result(result: object) -> tuple[str, str]:
 
 
 def _decode_idempotent_result(result_type: str, result_json: str) -> object:
+    if result_type == "analysis_plan":
+        return validate_plan_for_save(AnalysisPlan.model_validate_json(result_json))
     models = {
         "agent_session": AgentSession,
         "agent_run": AgentRun,
         "steer": Steer,
-        "analysis_plan": AnalysisPlan,
     }
     model = models.get(result_type)
     if model is None:

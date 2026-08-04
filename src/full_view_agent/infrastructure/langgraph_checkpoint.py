@@ -100,12 +100,14 @@ class LangGraphPostgresCheckpointManager:
                     await saver.setup()
                 self._initialized = True
             finally:
-                if acquired and not connection.closed:
-                    await connection.execute(
-                        "SELECT pg_advisory_unlock(hashtextextended(%s, 0))",
-                        (lock_key,),
-                    )
-                await connection.close()
+                try:
+                    if acquired and not connection.closed:
+                        await connection.execute(
+                            "SELECT pg_advisory_unlock(hashtextextended(%s, 0))",
+                            (lock_key,),
+                        )
+                finally:
+                    await connection.close()
 
     @asynccontextmanager
     async def saver(self) -> AsyncIterator[AsyncPostgresSaver]:

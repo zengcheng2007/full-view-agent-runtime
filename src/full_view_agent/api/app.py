@@ -18,7 +18,10 @@ from fastapi.security import APIKeyHeader
 from pydantic import Field, SecretStr, model_validator
 
 from full_view_agent.application.analysis_graph import AnalysisRunOutcome
-from full_view_agent.application.analysis_plan_repository import AnalysisPlanRepository
+from full_view_agent.application.analysis_plan_repository import (
+    AnalysisPlanRepository,
+    AnalysisPlanStoreRejected,
+)
 from full_view_agent.application.analysis_planner import AnalysisPlanner
 from full_view_agent.application.analysis_run_binding import AnalysisRunBindingStore
 from full_view_agent.application.analysis_service import AnalysisPlanningService
@@ -1403,28 +1406,54 @@ def create_app(runtime: RuntimeContainer | None = None) -> FastAPI:
             )
 
         scope = f"runs:{run_id}:analysis-plans:create"
-        plan, replayed = await app.state.runtime.idempotency.execute(
-            user_id=user.user_id,
-            scope=scope,
-            key=idempotency_key,
-            request_fingerprint=request_fingerprint(
-                domain=scope,
-                payload={
-                    "request": body.model_dump(mode="json"),
-                    # Stable policy view only: never include credential refs,
-                    # tokens, auth-context IDs or timestamps.
-                    "authorization": {
-                        "principal": auth_context.principal.model_dump(mode="json"),
-                        "application": auth_context.application.model_dump(mode="json"),
-                        "entitlements": sorted(auth_context.entitlements),
-                        "data_scopes": auth_context.data_scopes.model_dump(mode="json"),
-                        "purpose": auth_context.purpose,
-                        "policy_version": auth_context.policy_version,
+        try:
+            plan, replayed = await app.state.runtime.idempotency.execute(
+                user_id=user.user_id,
+                scope=scope,
+                key=idempotency_key,
+                request_fingerprint=request_fingerprint(
+                    domain=scope,
+                    payload={
+                        "request": body.model_dump(mode="json"),
+                        # Stable policy view only: never include credential refs,
+                        # tokens, auth-context IDs or timestamps.
+                        "authorization": {
+                            "principal": auth_context.principal.model_dump(mode="json"),
+                            "application": auth_context.application.model_dump(mode="json"),
+                            "entitlements": sorted(auth_context.entitlements),
+                            "data_scopes": auth_context.data_scopes.model_dump(mode="json"),
+                            "purpose": auth_context.purpose,
+                            "policy_version": auth_context.policy_version,
+                        },
                     },
-                },
-            ),
-            operation=operation,
-        )
+                ),
+                operation=operation,
+            )
+            if replayed:
+                authoritative = (
+                    await app.state.runtime.analysis_plan_repository.get(
+                        tenant_id=auth_context.principal.tenant_id,
+                        user_id=user.user_id,
+                        run_id=run_id,
+                        plan_id=plan.plan_id,
+                    )
+                )
+                if authoritative is None or authoritative != plan:
+                    raise AnalysisPlanStoreRejected(
+                        "PLAN_REPLAY_MISMATCH",
+                        "cached plan does not match the server-side authority",
+                    )
+                plan = authoritative
+        except AnalysisPlanStoreRejected as exc:
+            raise AnalysisPlanningUnavailable(
+                "server-side analysis plan authority rejected the stored plan"
+            ) from exc
+        except ApplicationError:
+            raise
+        except Exception as exc:
+            raise AnalysisPlanningUnavailable(
+                "server-side analysis plan authority is unavailable"
+            ) from exc
         return AnalysisPlanResponse(
             data=plan,
             meta=ResponseMeta(
@@ -1464,11 +1493,20 @@ def create_app(runtime: RuntimeContainer | None = None) -> FastAPI:
             != user.identity.principal.tenant_id
         ):
             raise ResourceNotFound("run was not found for the current identity")
-        plan = await app.state.runtime.analysis_plan_repository.get_latest_for_run(
-            tenant_id=auth_context.principal.tenant_id,
-            user_id=user.user_id,
-            run_id=run_id,
-        )
+        try:
+            plan = await app.state.runtime.analysis_plan_repository.get_latest_for_run(
+                tenant_id=auth_context.principal.tenant_id,
+                user_id=user.user_id,
+                run_id=run_id,
+            )
+        except AnalysisPlanStoreRejected as exc:
+            raise AnalysisPlanningUnavailable(
+                "server-side analysis plan authority rejected the stored plan"
+            ) from exc
+        except Exception as exc:
+            raise AnalysisPlanningUnavailable(
+                "server-side analysis plan authority is unavailable"
+            ) from exc
         if plan is None:
             raise ResourceNotFound("analysis plan was not found for this run")
         return AnalysisPlanResponse(

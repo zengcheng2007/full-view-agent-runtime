@@ -1,6 +1,8 @@
 """HTTP contract for explicit server-side analysis plan execution."""
 
 import asyncio
+import json
+from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from typing import Literal
 
@@ -15,6 +17,9 @@ from full_view_agent.domain.models import (
     AuthContext,
     LegacyIdentitySnapshot,
     Principal,
+)
+from full_view_agent.infrastructure.analysis_plan_repository import (
+    InMemoryAnalysisPlanRepository,
 )
 from full_view_agent.infrastructure.credential_broker import InMemoryCredentialBroker
 from full_view_agent.infrastructure.legacy_identity import HashedLegacyIdentityAdapter
@@ -260,6 +265,135 @@ async def test_queued_analysis_plan_can_be_rediscovered_after_response_loss() ->
 
     assert discovered.status_code == 200
     assert discovered.json()["data"] == plan
+
+
+@pytest.mark.asyncio
+async def test_current_analysis_plan_is_hidden_from_another_owner() -> None:
+    runtime = _runtime(orchestrator=_RecordingOrchestrator())
+    app = create_app(runtime)
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=app), base_url="http://test"
+    ) as client:
+        run = await _create_run(client, "analysis-plan-owner")
+        await _create_plan(client, "analysis-plan-owner", str(run["run_id"]))
+        response = await client.get(
+            f"/agent-api/v1/runs/{run['run_id']}/analysis-plans/current",
+            headers={"geoToken": "analysis-plan-other-owner"},
+        )
+
+    assert response.status_code == 404
+
+
+@pytest.mark.asyncio
+async def test_current_analysis_plan_is_hidden_after_tenant_switch() -> None:
+    identity = _MutableIdentityAdapter()
+    runtime = RuntimeContainer(
+        identity_port=identity,
+        credentials=InMemoryCredentialBroker(),
+        analysis_orchestrator=_RecordingOrchestrator(),
+    )
+    app = create_app(runtime)
+    token = "analysis-plan-tenant-switch"
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=app), base_url="http://test"
+    ) as client:
+        run = await _create_run(client, token)
+        await _create_plan(client, token, str(run["run_id"]))
+        identity.tenant_id = "tenant-b"
+        response = await client.get(
+            f"/agent-api/v1/runs/{run['run_id']}/analysis-plans/current",
+            headers={"geoToken": token},
+        )
+
+    assert response.status_code == 404
+
+
+@pytest.mark.asyncio
+async def test_current_analysis_plan_is_unavailable_after_run_leaves_queue() -> None:
+    runtime = _runtime(orchestrator=_RecordingOrchestrator())
+    app = create_app(runtime)
+    token = "analysis-plan-running"
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=app), base_url="http://test"
+    ) as client:
+        run = await _create_run(client, token)
+        await _create_plan(client, token, str(run["run_id"]))
+        identity = await runtime.identity_port.resolve(SecretStr(token))
+        await runtime.service.start_run(
+            user_id=identity.principal.user_id,
+            run_id=str(run["run_id"]),
+        )
+        response = await client.get(
+            f"/agent-api/v1/runs/{run['run_id']}/analysis-plans/current",
+            headers={"geoToken": token},
+        )
+
+    assert response.status_code == 409
+
+
+@pytest.mark.asyncio
+async def test_current_analysis_plan_fails_closed_for_corrupt_authority_record() -> None:
+    runtime = _runtime(orchestrator=_RecordingOrchestrator())
+    assert isinstance(
+        runtime.analysis_plan_repository, InMemoryAnalysisPlanRepository
+    )
+    app = create_app(runtime)
+    token = "analysis-plan-corrupt"
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=app), base_url="http://test"
+    ) as client:
+        run = await _create_run(client, token)
+        await _create_plan(client, token, str(run["run_id"]))
+        namespace, record = next(iter(runtime.analysis_plan_repository._records.items()))
+        payload = json.loads(record.plan_json)
+        payload["request_id"] = "analysis-request-tampered"
+        runtime.analysis_plan_repository._records[namespace] = replace(
+            record,
+            plan_json=json.dumps(payload),
+        )
+        response = await client.get(
+            f"/agent-api/v1/runs/{run['run_id']}/analysis-plans/current",
+            headers={"geoToken": token},
+        )
+
+    assert response.status_code == 503
+    assert response.json()["error"]["code"] == "analysis_planning_unavailable"
+
+
+@pytest.mark.asyncio
+async def test_analysis_plan_replay_requires_matching_authority() -> None:
+    runtime = _runtime(orchestrator=_RecordingOrchestrator())
+    assert isinstance(
+        runtime.analysis_plan_repository, InMemoryAnalysisPlanRepository
+    )
+    app = create_app(runtime)
+    token = "analysis-plan-missing-authority"
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=app), base_url="http://test"
+    ) as client:
+        run = await _create_run(client, token)
+        await _create_plan(client, token, str(run["run_id"]))
+        runtime.analysis_plan_repository._records.clear()
+        replay = await client.post(
+            f"/agent-api/v1/runs/{run['run_id']}/analysis-plans",
+            headers={"geoToken": token, "Idempotency-Key": f"plan-{token}"},
+            json={
+                "request_id": "analysis-request-exec-01",
+                "goals": ["housing"],
+                "scope_ref": {
+                    "kind": "area",
+                    "scope": {"area_code": "330106"},
+                },
+                "budget": {
+                    "max_parallel": 2,
+                    "max_tool_calls": 4,
+                    "total_timeout_ms": 30_000,
+                },
+            },
+        )
+
+    assert replay.status_code == 503
+    assert replay.json()["error"]["code"] == "analysis_planning_unavailable"
 
 
 async def _create_run(
