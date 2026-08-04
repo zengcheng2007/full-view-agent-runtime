@@ -17,6 +17,9 @@ from fastapi.responses import JSONResponse, StreamingResponse
 from fastapi.security import APIKeyHeader
 from pydantic import Field, SecretStr, model_validator
 
+from full_view_agent.application.analysis_plan_repository import AnalysisPlanRepository
+from full_view_agent.application.analysis_planner import AnalysisPlanner
+from full_view_agent.application.analysis_service import AnalysisPlanningService
 from full_view_agent.application.auth_context_refresh import RunAuthContextRefresher
 from full_view_agent.application.capability_service import ToolAdapter
 from full_view_agent.application.context_builder import AgentContextBuilder
@@ -26,6 +29,8 @@ from full_view_agent.application.deployment_capabilities import (
     parse_housing_next_area_enabled,
 )
 from full_view_agent.application.errors import (
+    AnalysisPlanningUnavailable,
+    AnalysisRequestRejected,
     ApplicationError,
     AuthenticationFailed,
     CommandClientMismatch,
@@ -66,6 +71,7 @@ from full_view_agent.application.tool_registry import (
     ToolRegistry,
 )
 from full_view_agent.application.workflow_registry import WorkflowRegistry
+from full_view_agent.domain.analysis_plan import AnalysisPlan, AnalysisRequest
 from full_view_agent.domain.models import (
     AgentMessage,
     AgentRun,
@@ -84,6 +90,10 @@ from full_view_agent.domain.models import (
     RunInputBody,
     Steer,
     TableDataResult,
+)
+from full_view_agent.infrastructure.analysis_plan_repository import (
+    InMemoryAnalysisPlanRepository,
+    PostgresAnalysisPlanRepository,
 )
 from full_view_agent.infrastructure.auth_context_store import (
     InMemoryRunAuthContextStore,
@@ -154,6 +164,11 @@ class SessionResponse(ContractModel):
 
 class RunResponse(ContractModel):
     data: AgentRun
+    meta: ResponseMeta
+
+
+class AnalysisPlanResponse(ContractModel):
+    data: AnalysisPlan
     meta: ResponseMeta
 
 
@@ -281,6 +296,7 @@ class RuntimeContainer:
     governance_adapter: ToolAdapter | None = None
     tool_registry: ToolRegistry | None = None
     model_provider: ModelProvider | None = None
+    analysis_plan_repository: AnalysisPlanRepository | None = None
 
     def __post_init__(self) -> None:
         runtime_profile = os.getenv("FULL_VIEW_RUNTIME_PROFILE", "development").lower()
@@ -457,6 +473,19 @@ class RuntimeContainer:
             adapter=self.governance_adapter,
             auth_context_refresher=self.auth_context_refresher,
             denial_ledger=self.denial_ledger,
+        )
+        self.analysis_plan_repository = self.analysis_plan_repository or (
+            PostgresAnalysisPlanRepository(
+                dsn=database_url,
+                schema=os.getenv("FULL_VIEW_POSTGRES_SCHEMA", "full_view_agent"),
+            )
+            if database_url
+            else InMemoryAnalysisPlanRepository()
+        )
+        self.analysis_planner = AnalysisPlanner(self.semantic_stack.catalog)
+        self.analysis_planning = AnalysisPlanningService(
+            planner=self.analysis_planner,
+            repository=self.analysis_plan_repository,
         )
         planner_factory = (
             ModelPlannerFactory(
@@ -655,7 +684,12 @@ def create_app(runtime: RuntimeContainer | None = None) -> FastAPI:
         elif isinstance(exc, IdentityProviderUnavailable):
             status_code = 503
             retryable = True
-        elif isinstance(exc, (WorkflowNotAvailable, InvalidCursor)):
+        elif isinstance(exc, AnalysisPlanningUnavailable):
+            status_code = 503
+        elif isinstance(
+            exc,
+            (AnalysisRequestRejected, WorkflowNotAvailable, InvalidCursor),
+        ):
             status_code = 422
         return error_response(
             status_code=status_code,
@@ -965,6 +999,46 @@ def create_app(runtime: RuntimeContainer | None = None) -> FastAPI:
         return RunResponse(
             data=run,
             meta=ResponseMeta(request_id=new_id("req")),
+        )
+
+    @app.post("/agent-api/v1/runs/{run_id}/analysis-plans", status_code=201)
+    async def create_analysis_plan(
+        run_id: str,
+        body: AnalysisRequest,
+        user: Annotated[CurrentUser, Depends(require_geotoken)],
+        idempotency_key: Annotated[str, Header(alias="Idempotency-Key", min_length=1)],
+    ) -> AnalysisPlanResponse:
+        async def operation() -> AnalysisPlan:
+            await app.state.runtime.store.get_run(
+                user_id=user.user_id,
+                run_id=run_id,
+            )
+            auth_context = await app.state.runtime.auth_contexts.get(
+                user_id=user.user_id,
+                run_id=run_id,
+            )
+            return await app.state.runtime.analysis_planning.create_plan(
+                request=body,
+                auth_context=auth_context,
+            )
+
+        scope = f"runs:{run_id}:analysis-plans:create"
+        plan, replayed = await app.state.runtime.idempotency.execute(
+            user_id=user.user_id,
+            scope=scope,
+            key=idempotency_key,
+            request_fingerprint=request_fingerprint(
+                domain=scope,
+                payload=body.model_dump(mode="json"),
+            ),
+            operation=operation,
+        )
+        return AnalysisPlanResponse(
+            data=plan,
+            meta=ResponseMeta(
+                request_id=new_id("req"),
+                idempotency_replayed=replayed,
+            ),
         )
 
     @app.post("/agent-api/v1/runs/{run_id}/cancel", status_code=202)

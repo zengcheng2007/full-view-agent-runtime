@@ -42,6 +42,14 @@ class WorkflowNotAvailable(ApplicationError):
     code = "workflow_not_available"
 
 
+class AnalysisRequestRejected(ApplicationError):
+    code = "analysis_request_rejected"
+
+
+class AnalysisPlanningUnavailable(ApplicationError):
+    code = "analysis_planning_unavailable"
+
+
 class CredentialUnavailable(ResourceNotFound):
     code = "credential_unavailable"
 
