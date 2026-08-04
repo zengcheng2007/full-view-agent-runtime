@@ -25,6 +25,7 @@ from full_view_agent.application.ports import (
 )
 from full_view_agent.application.semantic_wiring import SemanticCapabilityStack
 from full_view_agent.application.session_run_service import SessionRunService
+from full_view_agent.application.tool_observation_service import ToolObservationService
 from full_view_agent.application.tool_registry import ToolRegistry
 
 
@@ -70,6 +71,12 @@ def create_orchestrator(
             denial_ledger=denial_ledger,
         )
         harness = None
+    observation_service = ToolObservationService(
+        store=store,
+        events=events,
+        registry=tool_registry,
+        evidence_source_system=evidence_source_system,
+    )
     if mode == "native":
         return NativeOrchestrator(
             service=service,
@@ -81,6 +88,7 @@ def create_orchestrator(
             registry=tool_registry,
             planner_factory=planner_factory,
             evidence_source_system=evidence_source_system,
+            observation_service=observation_service,
         )
     if mode == "langgraph":
         from full_view_agent.infrastructure.checkpoint_mapping_store import (
@@ -121,6 +129,7 @@ def create_orchestrator(
             registry=tool_registry,
             planner_factory=planner_factory,
             evidence_source_system=evidence_source_system,
+            observation_service=observation_service,
             checkpoint_manager=checkpoint_manager,
             checkpoint_mappings=checkpoint_mappings,
         )

@@ -2,6 +2,7 @@
 
 import pytest
 
+from full_view_agent.application import orchestrator_factory
 from full_view_agent.application.capability_service import CapabilityService
 from full_view_agent.application.harness import DefaultToolCallFingerprinter
 from full_view_agent.application.native_orchestrator import NativeOrchestrator
@@ -128,6 +129,24 @@ def test_memory_adapter_default_evidence_source(
     monkeypatch.delenv("FULL_VIEW_ORCHESTRATOR", raising=False)
     orch = create_orchestrator(**_kwargs())
     assert orch._evidence_source_system == "in_memory_fixture"  # noqa: SLF001  # type: ignore[attr-defined]
+
+
+@pytest.mark.parametrize("mode", ["native", "langgraph"])
+def test_factory_injects_one_shared_tool_observation_service(
+    monkeypatch: pytest.MonkeyPatch,
+    mode: str,
+) -> None:
+    marker = object()
+    monkeypatch.setenv("FULL_VIEW_ORCHESTRATOR", mode)
+    monkeypatch.setattr(
+        orchestrator_factory,
+        "ToolObservationService",
+        lambda **_kwargs: marker,
+    )
+
+    orch = create_orchestrator(**_kwargs())
+
+    assert orch._observation_service is marker  # noqa: SLF001
 
 
 # ---------------------------------------------------------------------------

@@ -7,7 +7,6 @@ passes acceptance and becomes the default.
 
 import asyncio
 import logging
-from datetime import UTC, datetime, timedelta
 from typing import Protocol
 
 from full_view_agent.application.capability_service import (
@@ -24,7 +23,6 @@ from full_view_agent.application.errors import (
     ReauthenticationRequired,
     ResourceNotFound,
 )
-from full_view_agent.application.fingerprints import canonical_fingerprint
 from full_view_agent.application.harness import (
     AgentHarness,
     DeterministicCompletionValidator,
@@ -36,19 +34,17 @@ from full_view_agent.application.harness import (
 from full_view_agent.application.policy import MinimalPolicyAdapter
 from full_view_agent.application.ports import AgentStore, EventPublisher, OrchestrationPort
 from full_view_agent.application.session_run_service import SessionRunService, new_id
+from full_view_agent.application.tool_observation_service import (
+    ToolObservationPort,
+    ToolObservationService,
+    action_area_codes,
+)
 from full_view_agent.application.tool_registry import ToolRegistry
 from full_view_agent.domain.models import (
     AgentMessage,
     AuthContext,
-    DataResult,
-    Evidence,
-    FrontendCommand,
-    FrontendCommandPreconditions,
-    MapRenderChoroplethPayload,
-    PanelShowTablePayload,
     ResultReferenceContent,
     Steer,
-    TableDataResult,
     TextContent,
     ToolResult,
 )
@@ -114,6 +110,7 @@ class NativeOrchestrator(OrchestrationPort):
         registry: ToolRegistry | None = None,
         planner_factory: RunPlannerFactory | None = None,
         evidence_source_system: str = "in_memory_fixture",
+        observation_service: ToolObservationPort | None = None,
     ) -> None:
         self._service = service
         self._store = store
@@ -139,6 +136,12 @@ class NativeOrchestrator(OrchestrationPort):
         self._registry = registry or ToolRegistry.default()
         self._planner_factory = planner_factory
         self._evidence_source_system = evidence_source_system
+        self._observation_service = observation_service or ToolObservationService(
+            store=store,
+            events=events,
+            registry=self._registry,
+            evidence_source_system=evidence_source_system,
+        )
         self._run_tasks: dict[str, asyncio.Task[None]] = {}
         self._task_failures: list[str] = []
 
@@ -371,7 +374,7 @@ class NativeOrchestrator(OrchestrationPort):
         for observed_result in tool_results:
             if observed_result.status not in {"success", "partial"}:
                 continue
-            data_result, evidence = await self._persist_tool_observation(
+            observation = await self._observation_service.persist(
                 user_id=user_id,
                 run=running,
                 action=tool_actions[observed_result.tool_call_id],
@@ -380,18 +383,11 @@ class NativeOrchestrator(OrchestrationPort):
             result_references.append(
                 ResultReferenceContent(
                     type="result_reference",
-                    result_id=data_result.result_id,
+                    result_id=observation.data_result.result_id,
                     label=observed_result.summary,
                 )
             )
-            evidence_ids.append(evidence.evidence_id)
-            await self._request_frontend_commands(
-                user_id=user_id,
-                run=running,
-                action=tool_actions[observed_result.tool_call_id],
-                tool_result=observed_result,
-                data_result=data_result,
-            )
+            evidence_ids.append(observation.evidence.evidence_id)
         await self._complete_success(
             user_id=user_id,
             run=running,
@@ -480,184 +476,6 @@ class NativeOrchestrator(OrchestrationPort):
                 result_ids.extend(valid_results)
                 evidence_ids.extend(valid_evidence)
         return tuple(dict.fromkeys(result_ids)), tuple(dict.fromkeys(evidence_ids))
-
-    async def _persist_tool_observation(
-        self,
-        *,
-        user_id: str,
-        run,
-        action: ToolAction,
-        tool_result: ToolResult,
-    ) -> tuple[DataResult, Evidence]:
-        data_result = tool_result.data_result
-        if data_result is None:
-            raise RuntimeError("successful tool produced no data result")
-        evidence_id = new_id("evd")
-        data_result = data_result.model_copy(update={"evidence_ids": [evidence_id]})
-        await self._store.save_result(
-            user_id=user_id,
-            run_id=run.run_id,
-            result=data_result,
-        )
-        now = datetime.now(UTC)
-        policy_fingerprint = (
-            tool_result.policy.policy_fingerprint
-            if tool_result.policy is not None
-            else canonical_fingerprint(
-                domain="evidence-policy:unavailable",
-                value={"run_id": run.run_id, "tool_call_id": tool_result.tool_call_id},
-            )
-        )
-        query_fingerprint = (
-            tool_result.policy.request_fingerprint
-            if tool_result.policy is not None
-            else canonical_fingerprint(
-                domain="evidence-query:unavailable",
-                value={"tool_id": tool_result.tool_id, "result_id": data_result.result_id},
-            )
-        )
-        manifest = self._registry.get_manifest(tool_result.tool_id)
-        # S1-A：语义入口执行时，Evidence 的语义登记版本、指标口径与
-        # 有效区域来自结果血缘（解析时固化的 spec/plan 版本指纹所对应的
-        # 目录与主题），规范 Tool 字段仍由生产 manifest 提供。
-        lineage = tool_result.semantic_lineage
-        evidence = Evidence.model_validate(
-            {
-                "evidence_id": evidence_id,
-                "result_id": data_result.result_id,
-                "result_fingerprint": data_result.result_fingerprint,
-                "source_system": self._evidence_source_system,
-                "dataset_id": manifest.dataset_id,
-                "dataset_snapshot_version": None,
-                "semantic_registry_version": (
-                    lineage.catalog_version if lineage is not None else None
-                ),
-                "metric_definitions": (
-                    [
-                        definition.model_dump(mode="json")
-                        for definition in lineage.metric_definitions
-                    ]
-                    if lineage is not None
-                    else []
-                ),
-                "effective_area_codes": (
-                    _action_area_codes(action)
-                    or ([lineage.area_code] if lineage is not None else [])
-                ),
-                "time_range": None,
-                "as_of": None,
-                "retrieved_at": now,
-                "query_fingerprint": query_fingerprint,
-                "policy_fingerprint": policy_fingerprint,
-                "tool": {
-                    "tool_id": tool_result.tool_id,
-                    "tool_version": tool_result.tool_version,
-                },
-                "freshness": {
-                    "status": "unknown",
-                    "expected_update_cycle": None,
-                },
-            }
-        )
-        await self._store.save_evidence(
-            user_id=user_id,
-            run_id=run.run_id,
-            evidence=evidence,
-        )
-        await self._publish(run, "result.available", {"result_id": data_result.result_id})
-        await self._publish(
-            run,
-            "evidence.available",
-            {"evidence_id": evidence_id, "result_id": data_result.result_id},
-        )
-        return data_result, evidence
-
-    async def _request_frontend_commands(
-        self,
-        *,
-        user_id: str,
-        run,
-        action: ToolAction,
-        tool_result: ToolResult,
-        data_result: DataResult,
-    ) -> None:
-        client = run.client_capabilities
-        if not isinstance(data_result, TableDataResult) or client is None:
-            return
-        if "1.0" not in client.frontend_command_schema_versions:
-            return
-        now = datetime.now(UTC)
-        area_codes = _action_area_codes(action)
-        # S1-A：semantic_query 的前端命令按血缘中的规范 Tool 判定，
-        # 与直接调用规范 Tool 的行为完全一致（含地图分级设色）。
-        canonical_tool_id = (
-            tool_result.semantic_lineage.canonical_tool_id
-            if tool_result.semantic_lineage is not None
-            else action.tool_id
-        )
-        commands: list[FrontendCommand] = []
-        if "panel.show_table" in client.supported_commands:
-            commands.append(
-                FrontendCommand(
-                    command_id=new_id("cmd"),
-                    run_id=run.run_id,
-                    target_client_instance_id=client.client_instance_id,
-                    type="panel.show_table",
-                    issued_at=now,
-                    expires_at=now + timedelta(minutes=5),
-                    preconditions=FrontendCommandPreconditions(
-                        session_id=run.session_id,
-                        area_code=area_codes[0] if area_codes else None,
-                        required_client_capability="panel.show_table@1.0",
-                    ),
-                    payload=PanelShowTablePayload(result_id=data_result.result_id),
-                )
-            )
-        if (
-            canonical_tool_id == "governance.query_population_metrics"
-            and "map.render_choropleth" in client.supported_commands
-        ):
-            commands.append(
-                FrontendCommand(
-                    command_id=new_id("cmd"),
-                    run_id=run.run_id,
-                    target_client_instance_id=client.client_instance_id,
-                    type="map.render_choropleth",
-                    target="map_panel",
-                    issued_at=now,
-                    expires_at=now + timedelta(minutes=5),
-                    preconditions=FrontendCommandPreconditions(
-                        session_id=run.session_id,
-                        area_code=area_codes[0] if area_codes else None,
-                        required_client_capability="map.render_choropleth@1.0",
-                    ),
-                    payload=MapRenderChoroplethPayload(result_id=data_result.result_id),
-                )
-            )
-        for command in commands:
-            await self._save_and_publish_frontend_command(
-                user_id=user_id,
-                run=run,
-                command=command,
-            )
-
-    async def _save_and_publish_frontend_command(
-        self,
-        *,
-        user_id: str,
-        run,
-        command: FrontendCommand,
-    ) -> None:
-        await self._store.save_frontend_command(
-            user_id=user_id,
-            run_id=run.run_id,
-            command=command,
-        )
-        await self._publish(
-            run,
-            "frontend.command.requested",
-            {"command": command.model_dump(mode="json")},
-        )
 
     async def _complete_success(
         self,
@@ -838,19 +656,7 @@ class NativeOrchestrator(OrchestrationPort):
 
 
 def _action_area_codes(action: ToolAction) -> list[str]:
-    # 规范 Tool 参数结构为 {"query": {"scope": ...}}；S1-A 语义入口
-    # 的原始动作为 {"spec": {"scope": ...}}，两者都能提取声明区域。
-    for key in ("query", "spec"):
-        container = action.arguments.get(key)
-        if not isinstance(container, dict):
-            continue
-        scope = container.get("scope")
-        if not isinstance(scope, dict):
-            continue
-        area_code = scope.get("area_code")
-        if isinstance(area_code, str) and area_code:
-            return [area_code]
-    return []
+    return action_area_codes(action)
 
 
 class MockRunExecutor(NativeOrchestrator):
