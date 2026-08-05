@@ -17,6 +17,14 @@ from fastapi.responses import JSONResponse, StreamingResponse
 from fastapi.security import APIKeyHeader
 from pydantic import Field, SecretStr, model_validator
 
+from full_view_agent.api._api_deps import (
+    CurrentUser,
+    ResponseMeta,
+    UnauthenticatedError,
+    geo_token_header,
+    require_geotoken,
+)
+
 from full_view_agent.application.analysis_graph import AnalysisRunOutcome
 from full_view_agent.application.analysis_plan_repository import (
     AnalysisPlanRepository,
@@ -136,19 +144,20 @@ from full_view_agent.infrastructure.openai_compatible_model import (
 )
 from full_view_agent.infrastructure.postgres_persistence import PostgresAgentPersistence
 from full_view_agent.infrastructure.redis_event_notifier import RedisEventNotifier
+from full_view_agent.infrastructure.capability_repository import (
+    InMemoryCapabilityRepository,
+    InMemoryModelConfigRepository,
+)
+from full_view_agent.application.capability_management_service import (
+    CapabilityManagementService,
+)
+from full_view_agent.application.model_config_service import (
+    ModelConfigService,
+    InMemoryModelConfigKeyStore,
+)
+from full_view_agent.api.capability_routes import create_capability_router
 
 logger = logging.getLogger(__name__)
-
-
-class UnauthenticatedError(Exception):
-    pass
-
-
-@dataclass(frozen=True, repr=False)
-class CurrentUser:
-    user_id: str
-    identity: LegacyIdentitySnapshot
-    raw_token: SecretStr
 
 
 class SessionCreateBody(ContractModel):
@@ -169,12 +178,6 @@ class SessionUpdateBody(ContractModel):
 class SteerCreateBody(ContractModel):
     client_instance_id: str = Field(min_length=1, max_length=128)
     content: str = Field(min_length=1, max_length=10_000)
-
-
-class ResponseMeta(ContractModel):
-    request_id: str
-    trace_id: str = Field(default_factory=lambda: new_id("trc"))
-    idempotency_replayed: bool | None = None
 
 
 class ErrorDetail(ContractModel):
@@ -275,13 +278,6 @@ class EventStreamResponse(StreamingResponse):
     media_type = "text/event-stream"
 
 
-geo_token_header = APIKeyHeader(
-    name="geoToken",
-    scheme_name="GeoToken",
-    auto_error=False,
-)
-
-
 def default_identity_port() -> LegacyIdentityPort:
     return HttpLegacyIdentityAdapter(
         base_url=os.getenv("FULL_VIEW_LEGACY_GATEWAY_URL", "http://127.0.0.1:9666")
@@ -355,6 +351,14 @@ class RuntimeContainer:
     # unset and the execution endpoint fails closed with 503 (never falls
     # back to the legacy AnalysisPlanExecutor).
     analysis_orchestrator: AnalysisOrchestratorPort | None = None
+    # P2: Capability Center services
+    capability_repository: object = field(default=None, init=False)
+    capability_management_service: CapabilityManagementService | None = field(
+        default=None, init=False
+    )
+    model_config_service: ModelConfigService | None = field(
+        default=None, init=False
+    )
 
     def __post_init__(self) -> None:
         runtime_profile = os.getenv("FULL_VIEW_RUNTIME_PROFILE", "development").lower()
@@ -622,6 +626,17 @@ class RuntimeContainer:
                 ),
                 binding_store=self.analysis_binding_store,
             )
+        # P2: Initialize Capability Center services
+        self.capability_repository = InMemoryCapabilityRepository()
+        self.capability_management_service = CapabilityManagementService(
+            repository=self.capability_repository,
+        )
+        model_config_repo = InMemoryModelConfigRepository()
+        model_config_key_store = InMemoryModelConfigKeyStore()
+        self.model_config_service = ModelConfigService(
+            repository=model_config_repo,
+            key_store=model_config_key_store,
+        )
 
     def schedule_run(self, *, user_id: str, run_id: str) -> None:
         """Delegate scheduling to the OrchestrationPort."""
@@ -682,28 +697,6 @@ class RuntimeContainer:
                     extra={"run_id": run.run_id},
                 )
         return recovered_count
-
-
-async def require_geotoken(
-    request: Request,
-    geo_token: Annotated[str | None, Depends(geo_token_header)],
-    authorization: Annotated[str | None, Header()] = None,
-) -> CurrentUser:
-    if any(key.casefold() == "geotoken" for key in request.query_params):
-        raise InvalidAuthenticationTransport("geoToken must not be sent in the URL")
-    if geo_token and authorization and authorization.casefold().startswith("bearer "):
-        raise InvalidAuthenticationTransport(
-            "geoToken and Bearer authentication cannot be used together"
-        )
-    if not geo_token:
-        raise UnauthenticatedError
-    raw_token = SecretStr(geo_token)
-    identity = await request.app.state.runtime.identity_port.resolve(raw_token)
-    return CurrentUser(
-        user_id=identity.principal.user_id,
-        identity=identity,
-        raw_token=raw_token,
-    )
 
 
 def request_fingerprint(*, domain: str, payload: dict[str, object]) -> str:
@@ -901,6 +894,14 @@ def create_app(runtime: RuntimeContainer | None = None) -> FastAPI:
         lifespan=lifespan,
     )
     app.state.runtime = runtime
+
+    # P2: Mount Capability Center routes
+    if runtime.capability_management_service and runtime.model_config_service:
+        capability_router = create_capability_router(
+            management_service=runtime.capability_management_service,
+            model_config_service=runtime.model_config_service,
+        )
+        app.include_router(capability_router)
 
     def error_response(
         *,
