@@ -516,7 +516,7 @@ async def test_eval_runner_records_live_provider_steps_and_version_metadata() ->
     assert trace.passed is True
     assert trace.model_provider == "openai_compatible"
     assert trace.model_name == "qwen-live-test"
-    assert trace.prompt_version == "full-view-governance-readonly-v14"
+    assert trace.prompt_version == "full-view-governance-readonly-v15"
     assert [step.type for step in trace.model_steps] == ["tool_call", "finish"]
     finish_step = trace.model_steps[-1]
     assert isinstance(finish_step, EvalFinishStep)

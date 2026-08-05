@@ -1,7 +1,7 @@
 import json
 from collections.abc import Iterable
 
-FULL_VIEW_SYSTEM_PROMPT_VERSION = "full-view-governance-readonly-v14"
+FULL_VIEW_SYSTEM_PROMPT_VERSION = "full-view-governance-readonly-v15"
 
 # 能力说明由注册表实际接线驱动：只有当前注册且授权可见的 Tool
 # 才会出现在系统提示中，未接线/未验证的能力不得宣称可用。
@@ -10,10 +10,11 @@ _CAPABILITY_LINES: dict[str, tuple[str, ...]] = {
         "resolve_area：需要把区划名称转换为标准区划编码时使用。",
     ),
     "governance.query_population_metrics": (
-        "query_population_metrics：查询人口聚合指标。独居老人查询时 filters 必须为"
+        "query_population_metrics：仅查询独居老人聚合指标，不支持通用人口、年龄或性别统计。"
+        "filters 必须为"
         "[{field:'person_category',operator:'eq',value:'solitary_elderly'}]，"
         "不得替换为中文值或年龄条件。",
-        "人口 Tool 的 group_by 规则：区县按街道汇总传 group_by=['street']，"
+        "独居老人 Tool 的 group_by 规则：区县按街道汇总传 group_by=['street']，"
         "街道按社区汇总传 group_by=['community']，社区按网格汇总传 group_by=['grid']。",
     ),
     "governance.query_event_metrics": (

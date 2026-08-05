@@ -40,6 +40,17 @@ from full_view_agent.domain.models import (
     TableDataResult,
 )
 
+# Canonical Tools with a verified production HTTP dispatch branch. The Registry
+# controls exposure; the capability consistency Gate requires an exact match.
+PRODUCTION_HTTP_ADAPTER_TOOL_IDS = frozenset(
+    {
+        "governance.resolve_area",
+        "governance.query_population_metrics",
+        "governance.query_housing_metrics",
+        "governance.query_event_metrics",
+    }
+)
+
 
 class InMemoryGovernanceAdapter:
     def __init__(self) -> None:

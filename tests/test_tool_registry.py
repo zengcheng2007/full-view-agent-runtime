@@ -16,7 +16,7 @@ def test_registry_separates_internal_manifest_from_model_descriptor() -> None:
     assert manifest.required_permissions == [
         "governance.population.aggregate.read"
     ]
-    assert descriptor.name == "查询人口指标"
+    assert descriptor.name == "查询独居老人指标"
     assert "adapter_ref" not in descriptor.model_dump(mode="json")
     assert "required_permissions" not in descriptor.model_dump(mode="json")
 

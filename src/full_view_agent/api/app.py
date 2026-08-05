@@ -26,6 +26,9 @@ from full_view_agent.application.analysis_planner import AnalysisPlanner
 from full_view_agent.application.analysis_run_binding import AnalysisRunBindingStore
 from full_view_agent.application.analysis_service import AnalysisPlanningService
 from full_view_agent.application.auth_context_refresh import RunAuthContextRefresher
+from full_view_agent.application.capability_consistency import (
+    validate_production_http_capabilities,
+)
 from full_view_agent.application.capability_service import ToolAdapter
 from full_view_agent.application.context_builder import AgentContextBuilder
 from full_view_agent.application.cursor_codec import SignedCursorCodec
@@ -529,6 +532,11 @@ class RuntimeContainer:
             auth_context_refresher=self.auth_context_refresher,
             denial_ledger=self.denial_ledger,
         )
+        if isinstance(self.governance_adapter, HttpGovernanceAdapter):
+            validate_production_http_capabilities(
+                registry=self.tool_registry,
+                catalog=self.semantic_stack.catalog,
+            )
         self.analysis_plan_repository = self.analysis_plan_repository or (
             PostgresAnalysisPlanRepository(
                 dsn=database_url,

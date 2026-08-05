@@ -149,10 +149,10 @@ class ToolRegistry:
                 ),
                 _descriptor(
                     tool_id="governance.query_population_metrics",
-                    name="查询人口指标",
+                    name="查询独居老人指标",
                     description=(
-                        "查询当前授权区域的人口聚合指标，不返回个人明细。"
-                        "独居老人查询时 filters 必须为"
+                        "仅查询当前授权区域的独居老人聚合指标，不返回个人明细，"
+                        "不支持通用人口、年龄或性别统计。filters 必须为"
                         " [{field: person_category, operator: eq, value: "
                         "solitary_elderly}]；group_by 必须是区域的直接下一级，"
                         "区县传 [street]、街道传 [community]、社区传 [grid]。"
