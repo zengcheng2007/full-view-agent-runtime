@@ -53,11 +53,14 @@ class ModelPlanner:
         user_id: str,
         auth_context: AuthContext,
         max_total_tokens: int = 32_000,
+        max_output_tokens: int = 32_000,
         initial_total_tokens: int = 0,
         allow_legacy_finish: bool = False,
     ) -> None:
         if max_total_tokens <= 0:
             raise ValueError("max_total_tokens must be positive")
+        if max_output_tokens <= 0:
+            raise ValueError("max_output_tokens must be positive")
         if initial_total_tokens < 0:
             raise ValueError("initial_total_tokens must be non-negative")
         self._provider = provider
@@ -65,6 +68,7 @@ class ModelPlanner:
         self._user_id = user_id
         self._auth_context = auth_context
         self._max_total_tokens = max_total_tokens
+        self._max_output_tokens = max_output_tokens
         self._total_tokens = initial_total_tokens
         self._allow_legacy_finish = allow_legacy_finish
 
@@ -107,6 +111,7 @@ class ModelPlanner:
             max_output_tokens=min(
                 request.max_output_tokens or remaining_tokens,
                 remaining_tokens,
+                self._max_output_tokens,
             ),
         )
         response = await self._provider.complete(request)
@@ -163,8 +168,14 @@ class ModelPlanner:
                     )
                 return AnalysisIntentAction(intent=intent)
             server_arguments = advertised.server_arguments
+            server_prefixes = {
+                f"{name.split('_', maxsplit=1)[0]}_" for name in server_arguments
+            }
             attempted_server_fields = sorted(
-                set(call.arguments).intersection(server_arguments)
+                name
+                for name in call.arguments
+                if name in server_arguments
+                or any(name.startswith(prefix) for prefix in server_prefixes)
             )
             if attempted_server_fields:
                 logger.warning(
@@ -173,7 +184,14 @@ class ModelPlanner:
                 )
             return ToolAction(
                 tool_id=call.tool_id,
-                arguments={**call.arguments, **server_arguments},
+                arguments={
+                    **{
+                        name: value
+                        for name, value in call.arguments.items()
+                        if name not in attempted_server_fields
+                    },
+                    **server_arguments,
+                },
             )
 
         summary = response.content.strip() if response.content is not None else ""
@@ -291,12 +309,14 @@ class ModelPlannerFactory:
         provider: ModelProvider,
         context_builder: AgentContextBuilder,
         max_total_tokens: int = 32_000,
+        max_output_tokens: int = 32_000,
         initial_total_tokens: int = 0,
         allow_legacy_finish: bool = False,
     ) -> None:
         self._provider = provider
         self._context_builder = context_builder
         self._max_total_tokens = max_total_tokens
+        self._max_output_tokens = max_output_tokens
         self._initial_total_tokens = initial_total_tokens
         self._allow_legacy_finish = allow_legacy_finish
 
@@ -307,6 +327,7 @@ class ModelPlannerFactory:
             user_id=user_id,
             auth_context=auth_context,
             max_total_tokens=self._max_total_tokens,
+            max_output_tokens=self._max_output_tokens,
             initial_total_tokens=self._initial_total_tokens,
             allow_legacy_finish=self._allow_legacy_finish,
         )

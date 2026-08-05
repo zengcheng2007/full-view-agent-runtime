@@ -1,0 +1,225 @@
+{
+  "trace_version": "1.0",
+  "eval_run_id": "evl_d6e3ee1eb90acf103d00d2e86a",
+  "replayed_from_eval_run_id": null,
+  "case_id": "generic-population-specialization-blocked",
+  "started_at": "2026-08-05T07:32:43.366939Z",
+  "completed_at": "2026-08-05T07:32:43.389168Z",
+  "environment_kind": "static",
+  "evidence_source_system": "eval_fixture",
+  "runtime_version": "96acc2662b19-dirty",
+  "outbound_requests": [],
+  "model_provider": "openai_compatible",
+  "model_name": "glm-5.2",
+  "prompt_version": "unknown",
+  "model_requests": [],
+  "model_steps": [],
+  "total_tokens": 0,
+  "event_types": [
+    "run.started",
+    "assistant.message.completed",
+    "run.completed"
+  ],
+  "terminal_status": "completed",
+  "outcome": "success",
+  "completion_reason_code": "goal_completed",
+  "tool_ids": [],
+  "evidence_ids": [],
+  "grades": [
+    {
+      "name": "terminal_status",
+      "passed": true,
+      "expected": "completed",
+      "actual": "completed"
+    },
+    {
+      "name": "outcome",
+      "passed": true,
+      "expected": "success",
+      "actual": "success"
+    },
+    {
+      "name": "completion_reason_code",
+      "passed": true,
+      "expected": "goal_completed",
+      "actual": "goal_completed"
+    },
+    {
+      "name": "tool_ids",
+      "passed": true,
+      "expected": [],
+      "actual": []
+    },
+    {
+      "name": "required_tool_ids",
+      "passed": true,
+      "expected": [],
+      "actual": []
+    },
+    {
+      "name": "forbidden_tool_ids",
+      "passed": true,
+      "expected": [],
+      "actual": []
+    },
+    {
+      "name": "min_evidence_count",
+      "passed": true,
+      "expected": 0,
+      "actual": 0
+    },
+    {
+      "name": "tool_lifecycle_terminal_count",
+      "passed": true,
+      "expected": 0,
+      "actual": 0
+    },
+    {
+      "name": "required_event_types",
+      "passed": true,
+      "expected": [
+        "run.completed"
+      ],
+      "actual": [
+        "run.started",
+        "assistant.message.completed",
+        "run.completed"
+      ]
+    },
+    {
+      "name": "required_answer_substrings",
+      "passed": true,
+      "expected": [
+        "仅支持独居老人",
+        "不能把一般人口查询替换为独居老人数据"
+      ],
+      "actual": [
+        "仅支持独居老人",
+        "不能把一般人口查询替换为独居老人数据"
+      ]
+    },
+    {
+      "name": "required_answer_any_substrings",
+      "passed": true,
+      "expected": [],
+      "actual": []
+    },
+    {
+      "name": "forbidden_answer_substrings",
+      "passed": true,
+      "expected": [],
+      "actual": []
+    },
+    {
+      "name": "turn_count",
+      "passed": true,
+      "expected": 1,
+      "actual": 1
+    }
+  ],
+  "turns": [
+    {
+      "turn_index": 1,
+      "user_message": "西湖区人口按街道汇总，按人数从高到低排序",
+      "model_steps": [],
+      "event_types": [
+        "run.started",
+        "assistant.message.completed",
+        "run.completed"
+      ],
+      "terminal_status": "completed",
+      "outcome": "success",
+      "completion_reason_code": "goal_completed",
+      "tool_ids": [],
+      "evidence_ids": [],
+      "grades": [
+        {
+          "name": "terminal_status",
+          "passed": true,
+          "expected": "completed",
+          "actual": "completed"
+        },
+        {
+          "name": "outcome",
+          "passed": true,
+          "expected": "success",
+          "actual": "success"
+        },
+        {
+          "name": "completion_reason_code",
+          "passed": true,
+          "expected": "goal_completed",
+          "actual": "goal_completed"
+        },
+        {
+          "name": "tool_ids",
+          "passed": true,
+          "expected": [],
+          "actual": []
+        },
+        {
+          "name": "required_tool_ids",
+          "passed": true,
+          "expected": [],
+          "actual": []
+        },
+        {
+          "name": "forbidden_tool_ids",
+          "passed": true,
+          "expected": [],
+          "actual": []
+        },
+        {
+          "name": "min_evidence_count",
+          "passed": true,
+          "expected": 0,
+          "actual": 0
+        },
+        {
+          "name": "tool_lifecycle_terminal_count",
+          "passed": true,
+          "expected": 0,
+          "actual": 0
+        },
+        {
+          "name": "required_event_types",
+          "passed": true,
+          "expected": [
+            "run.completed"
+          ],
+          "actual": [
+            "run.started",
+            "assistant.message.completed",
+            "run.completed"
+          ]
+        },
+        {
+          "name": "required_answer_substrings",
+          "passed": true,
+          "expected": [
+            "仅支持独居老人",
+            "不能把一般人口查询替换为独居老人数据"
+          ],
+          "actual": [
+            "仅支持独居老人",
+            "不能把一般人口查询替换为独居老人数据"
+          ]
+        },
+        {
+          "name": "required_answer_any_substrings",
+          "passed": true,
+          "expected": [],
+          "actual": []
+        },
+        {
+          "name": "forbidden_answer_substrings",
+          "passed": true,
+          "expected": [],
+          "actual": []
+        }
+      ],
+      "passed": true
+    }
+  ],
+  "passed": true
+}

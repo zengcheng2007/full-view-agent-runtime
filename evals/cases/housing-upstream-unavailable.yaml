@@ -30,5 +30,5 @@ expected:
   completion_reason_code: upstream_unavailable
   tool_ids: [governance.resolve_area, governance.semantic_query]
   min_evidence_count: 0
-  max_evidence_count: 0
+  max_evidence_count: 1
   required_event_types: [tool.failed, run.failed]

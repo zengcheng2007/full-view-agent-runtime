@@ -587,3 +587,23 @@ async def test_model_planner_enforces_cumulative_token_budget() -> None:
         await planner.decide(HarnessState())
 
     assert getattr(provider.requests[0], "max_output_tokens", None) == 50
+
+
+@pytest.mark.asyncio
+async def test_model_planner_caps_single_request_output_independently_of_run_budget(
+) -> None:
+    provider = QueueModelProvider(
+        tool_response(tool_id="governance.query_population_metrics")
+    )
+    planner = ModelPlanner(
+        provider=provider,
+        context_builder=StaticContextBuilder(),
+        user_id="user-01",
+        auth_context=population_auth_context(),
+        max_total_tokens=2_147_483_647,
+        max_output_tokens=131_072,
+    )
+
+    await planner.decide(HarnessState())
+
+    assert provider.requests[0].max_output_tokens == 131_072

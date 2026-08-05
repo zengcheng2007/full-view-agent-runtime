@@ -22,7 +22,12 @@ from full_view_agent.application.capability_service import (
     CapabilityService,
     ToolAdapter,
 )
-from full_view_agent.application.errors import ReauthenticationRequired
+from full_view_agent.application.errors import (
+    BudgetExceeded,
+    ModelProviderTimeout,
+    ModelProviderUnavailable,
+    ReauthenticationRequired,
+)
 from full_view_agent.application.harness import (
     AgentHarness,
     DeterministicCompletionValidator,
@@ -228,6 +233,46 @@ class _SingleToolPlanner:
                 }
             },
         )
+
+
+class _TimeoutAfterSuccessfulToolPlanner(_SingleToolPlanner):
+    async def decide(self, state: HarnessState) -> ToolAction | FinishAction:
+        if state.tool_results:
+            raise ModelProviderTimeout("model request timed out")
+        return await super().decide(state)
+
+
+class _TokenBudgetAfterSuccessfulToolPlanner(_SingleToolPlanner):
+    async def decide(self, state: HarnessState) -> ToolAction | FinishAction:
+        if state.tool_results:
+            raise BudgetExceeded("model token budget exceeded")
+        return await super().decide(state)
+
+
+class _UnavailableAfterSuccessfulToolPlanner(_SingleToolPlanner):
+    async def decide(self, state: HarnessState) -> ToolAction | FinishAction:
+        if state.tool_results:
+            raise ModelProviderUnavailable("model provider is unavailable")
+        return await super().decide(state)
+
+
+class _TimeoutAfterMixedToolResultsPlanner(_SingleToolPlanner):
+    async def decide(self, state: HarnessState) -> ToolAction | FinishAction:
+        if len(state.tool_results) == 1:
+            return ToolAction(
+                tool_id="governance.query_population_metrics",
+                arguments={
+                    "query": {
+                        "metrics": ["unsupported_metric"],
+                        "scope": {"area_code": "330106"},
+                        "filters": [],
+                        "group_by": ["street"],
+                    }
+                },
+            )
+        if len(state.tool_results) > 1:
+            raise ModelProviderTimeout("model request timed out")
+        return await super().decide(state)
 
 
 class _StructuredSingleToolPlanner(_SingleToolPlanner):
@@ -527,6 +572,92 @@ async def test_langgraph_framework_limit_cannot_preempt_harness_completion() -> 
     assert "run.failed" not in event_types
     run = await store.get_run(user_id="u", run_id=run_id)
     assert run.status == "completed"
+
+
+@pytest.mark.asyncio
+async def test_final_model_timeout_preserves_results_as_partial_completion(
+    orch_factory: OrchFactory,
+) -> None:
+    orch, store, events = orch_factory(planner=_TimeoutAfterSuccessfulToolPlanner())
+    run_id = await _make_run(store)
+
+    await orch.execute(user_id="u", run_id=run_id)
+
+    run = await store.get_run(user_id="u", run_id=run_id)
+    messages = await store.list_messages(user_id="u", session_id=run.session_id)
+    event_types = [event.type for event in await events.list_events(run_id=run_id)]
+    assistant = messages[-1]
+
+    assert run.status == "completed"
+    assert run.outcome == "partial"
+    assert run.completion_reason_code == "model_timeout_with_results"
+    assert len(store.results) == 1
+    assert len(store.evidence) == 1
+    assert any(item.type == "result_reference" for item in assistant.content)
+    assert "result.available" in event_types
+    assert "run.completed" in event_types
+    assert "run.failed" not in event_types
+
+
+@pytest.mark.asyncio
+async def test_model_token_budget_preserves_results_as_partial_completion(
+    orch_factory: OrchFactory,
+) -> None:
+    orch, store, events = orch_factory(
+        planner=_TokenBudgetAfterSuccessfulToolPlanner()
+    )
+    run_id = await _make_run(store)
+
+    await orch.execute(user_id="u", run_id=run_id)
+
+    run = await store.get_run(user_id="u", run_id=run_id)
+    event_types = [event.type for event in await events.list_events(run_id=run_id)]
+    assert run.status == "completed"
+    assert run.outcome == "partial"
+    assert run.completion_reason_code == "model_token_budget_with_results"
+    assert len(store.results) == 1
+    assert "run.completed" in event_types
+    assert "run.failed" not in event_types
+
+
+@pytest.mark.asyncio
+async def test_model_provider_unavailable_preserves_results_as_partial_completion(
+    orch_factory: OrchFactory,
+) -> None:
+    orch, store, events = orch_factory(
+        planner=_UnavailableAfterSuccessfulToolPlanner()
+    )
+    run_id = await _make_run(store)
+
+    await orch.execute(user_id="u", run_id=run_id)
+
+    run = await store.get_run(user_id="u", run_id=run_id)
+    event_types = [event.type for event in await events.list_events(run_id=run_id)]
+    assert run.status == "completed"
+    assert run.outcome == "partial"
+    assert run.completion_reason_code == "model_provider_unavailable_with_results"
+    assert len(store.results) == 1
+    assert "run.completed" in event_types
+    assert "run.failed" not in event_types
+
+
+@pytest.mark.asyncio
+async def test_final_model_timeout_keeps_earlier_success_when_later_tool_failed(
+    orch_factory: OrchFactory,
+) -> None:
+    orch, store, events = orch_factory(planner=_TimeoutAfterMixedToolResultsPlanner())
+    run_id = await _make_run(store)
+
+    await orch.execute(user_id="u", run_id=run_id)
+
+    run = await store.get_run(user_id="u", run_id=run_id)
+    event_types = [event.type for event in await events.list_events(run_id=run_id)]
+    assert run.status == "completed"
+    assert run.outcome == "partial"
+    assert run.completion_reason_code == "model_timeout_with_results"
+    assert len(store.results) == 1
+    assert "run.completed" in event_types
+    assert "run.failed" not in event_types
 
 
 @pytest.fixture(params=[_native_factory, _langgraph_factory], ids=["native", "langgraph"])

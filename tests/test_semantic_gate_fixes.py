@@ -161,6 +161,54 @@ async def test_model_server_owned_catalog_value_is_ignored_and_replaced() -> Non
     assert action.arguments["catalog_fingerprint"] == catalog.execution_fingerprint
 
 
+@pytest.mark.asyncio
+async def test_model_hallucinated_catalog_field_is_removed_before_semantic_execution() -> None:
+    catalog = SemanticCatalog.default()
+    advertised_tool = ModelToolDefinition(
+        tool_id=SEMANTIC_QUERY_TOOL_ID,
+        description="semantic",
+        input_schema={"type": "object"},
+        server_arguments={
+            "catalog_version": catalog.catalog_version,
+            "catalog_fingerprint": catalog.execution_fingerprint,
+        },
+    )
+
+    class _ContextBuilder:
+        async def build(self, **_: object) -> ModelRequest:
+            return ModelRequest(messages=(), tools=(advertised_tool,))
+
+    class _Provider:
+        async def complete(self, request: ModelRequest) -> ModelResponse:
+            del request
+            return ModelResponse(
+                content=None,
+                tool_calls=(
+                    ModelToolCall(
+                        tool_id=SEMANTIC_QUERY_TOOL_ID,
+                        arguments={
+                            "spec": _semantic_arguments()["spec"],
+                            "catalog_fithmetic_fingerprint": "model-hallucination",
+                        },
+                    ),
+                ),
+                finish_reason="tool_calls",
+                usage=ModelUsage(total_tokens=10),
+            )
+
+    action = await ModelPlanner(
+        provider=_Provider(),
+        context_builder=_ContextBuilder(),
+        user_id="user-01",
+        auth_context=population_auth_context(),
+    ).decide(HarnessState())
+
+    assert isinstance(action, ToolAction)
+    assert "catalog_fithmetic_fingerprint" not in action.arguments
+    assert action.arguments["catalog_version"] == catalog.catalog_version
+    assert action.arguments["catalog_fingerprint"] == catalog.execution_fingerprint
+
+
 def test_presenter_marks_catalog_required_filters_as_mandatory() -> None:
     presentation = SemanticToolPresenter(catalog=SemanticCatalog.default()).present(
         auth_context=population_auth_context()

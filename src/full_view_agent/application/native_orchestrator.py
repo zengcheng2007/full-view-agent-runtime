@@ -35,6 +35,7 @@ from full_view_agent.application.policy import MinimalPolicyAdapter
 from full_view_agent.application.ports import AgentStore, EventPublisher, OrchestrationPort
 from full_view_agent.application.session_run_service import SessionRunService, new_id
 from full_view_agent.application.tool_observation_service import (
+    PersistedToolObservation,
     ToolObservationPort,
     ToolObservationService,
     action_area_codes,
@@ -204,6 +205,7 @@ class NativeOrchestrator(OrchestrationPort):
             )
         )
         tool_actions: dict[str, ToolAction] = {}
+        persisted_observations: dict[str, PersistedToolObservation] = {}
 
         async def before_tool_call(action: ToolAction, tool_call_id: str) -> None:
             tool_actions[tool_call_id] = action
@@ -222,6 +224,18 @@ class NativeOrchestrator(OrchestrationPort):
                 "tool.failed" if result.status == "failed" else "tool.completed",
                 {"tool_result": result.model_dump(mode="json")},
             )
+            if result.status in {"success", "partial"}:
+                action = tool_actions.get(result.tool_call_id)
+                if action is None:
+                    raise RuntimeError("completed tool call is missing its action")
+                persisted_observations[result.tool_call_id] = (
+                    await self._observation_service.persist(
+                        user_id=user_id,
+                        run=latest,
+                        action=action,
+                        tool_result=result,
+                    )
+                )
 
         try:
             planner = (
@@ -340,7 +354,7 @@ class NativeOrchestrator(OrchestrationPort):
             )
             return
         tool_result = tool_results[-1]
-        if tool_result.status == "failed":
+        if harness_result.outcome != "partial" and tool_result.status == "failed":
             error_code = tool_result.warnings[0] if tool_result.warnings else "tool_failed"
             failed = await self._service.fail_run(
                 user_id=user_id,
@@ -358,7 +372,7 @@ class NativeOrchestrator(OrchestrationPort):
                 },
             )
             return
-        if tool_result.status == "denied":
+        if harness_result.outcome != "partial" and tool_result.status == "denied":
             completed = await self._service.complete_run(
                 user_id=user_id,
                 run_id=run_id,
@@ -384,12 +398,14 @@ class NativeOrchestrator(OrchestrationPort):
         for observed_result in tool_results:
             if observed_result.status not in {"success", "partial"}:
                 continue
-            observation = await self._observation_service.persist(
-                user_id=user_id,
-                run=running,
-                action=tool_actions[observed_result.tool_call_id],
-                tool_result=observed_result,
-            )
+            observation = persisted_observations.get(observed_result.tool_call_id)
+            if observation is None:
+                observation = await self._observation_service.persist(
+                    user_id=user_id,
+                    run=running,
+                    action=tool_actions[observed_result.tool_call_id],
+                    tool_result=observed_result,
+                )
             result_references.append(
                 ResultReferenceContent(
                     type="result_reference",
@@ -405,6 +421,8 @@ class NativeOrchestrator(OrchestrationPort):
             result_references=result_references,
             evidence_ids=evidence_ids,
             warning_count=sum(len(result.warnings) for result in tool_results),
+            outcome=harness_result.outcome,
+            completion_reason_code=harness_result.completion_reason_code,
         )
 
     async def _run_harness(
@@ -496,6 +514,8 @@ class NativeOrchestrator(OrchestrationPort):
         result_references: list[ResultReferenceContent],
         evidence_ids: list[str],
         warning_count: int,
+        outcome: str = "success",
+        completion_reason_code: str = "goal_completed",
     ) -> None:
         content: list[TextContent | ResultReferenceContent] = [
             TextContent(type="text", text=summary),
@@ -522,8 +542,8 @@ class NativeOrchestrator(OrchestrationPort):
         completed = await self._service.complete_run(
             user_id=user_id,
             run_id=run.run_id,
-            outcome="success",
-            completion_reason_code="goal_completed",
+            outcome="partial" if outcome == "partial" else "success",
+            completion_reason_code=completion_reason_code,
         )
         await self._publish(
             completed,

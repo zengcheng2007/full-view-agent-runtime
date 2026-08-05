@@ -343,7 +343,50 @@ async def test_openai_compatible_provider_does_not_retry_stable_contract_errors(
 
 
 @pytest.mark.asyncio
-async def test_openai_compatible_provider_normalizes_timeout_without_retrying() -> None:
+async def test_openai_compatible_provider_retries_timeout_once_then_succeeds() -> None:
+    attempts = 0
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal attempts
+        attempts += 1
+        if attempts == 1:
+            raise httpx.ReadTimeout("model timed out", request=request)
+        return httpx.Response(
+            200,
+            json={
+                "choices": [
+                    {
+                        "finish_reason": "stop",
+                        "message": {"content": "分析已完成"},
+                    }
+                ],
+                "usage": {
+                    "prompt_tokens": 20,
+                    "completion_tokens": 5,
+                    "total_tokens": 25,
+                },
+            },
+        )
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        provider = OpenAICompatibleModelProvider(
+            base_url="http://model.test/v1",
+            model="qwen-test",
+            client=client,
+        )
+
+        response = await provider.complete(
+            ModelRequest(
+                messages=(ModelMessage(role="user", content="查询独居老人"),)
+            )
+        )
+
+    assert response.content == "分析已完成"
+    assert attempts == 2
+
+
+@pytest.mark.asyncio
+async def test_openai_compatible_provider_stops_after_second_timeout() -> None:
     attempts = 0
 
     def handler(request: httpx.Request) -> httpx.Response:
@@ -358,15 +401,138 @@ async def test_openai_compatible_provider_normalizes_timeout_without_retrying() 
             client=client,
         )
 
-        with pytest.raises(errors.ApplicationError) as exc_info:
+        with pytest.raises(errors.ModelProviderTimeout):
             await provider.complete(
                 ModelRequest(
                     messages=(ModelMessage(role="user", content="查询独居老人"),)
                 )
             )
 
-    assert exc_info.value.code == "model_timeout"
+    assert attempts == 2
+
+
+@pytest.mark.asyncio
+async def test_openai_compatible_provider_retries_transient_503_once() -> None:
+    attempts = 0
+
+    def handler(_request: httpx.Request) -> httpx.Response:
+        nonlocal attempts
+        attempts += 1
+        if attempts == 1:
+            return httpx.Response(503, text="service unavailable")
+        return httpx.Response(
+            200,
+            json={
+                "choices": [
+                    {"finish_reason": "stop", "message": {"content": "分析已完成"}}
+                ],
+                "usage": {
+                    "prompt_tokens": 20,
+                    "completion_tokens": 5,
+                    "total_tokens": 25,
+                },
+            },
+        )
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        provider = OpenAICompatibleModelProvider(
+            base_url="http://model.test/v1",
+            model="qwen-test",
+            client=client,
+        )
+
+        response = await provider.complete(ModelRequest(messages=()))
+
+    assert response.content == "分析已完成"
+    assert attempts == 2
+
+
+@pytest.mark.asyncio
+async def test_openai_compatible_provider_does_not_retry_bad_request() -> None:
+    attempts = 0
+
+    def handler(_request: httpx.Request) -> httpx.Response:
+        nonlocal attempts
+        attempts += 1
+        return httpx.Response(400, text="bad request")
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        provider = OpenAICompatibleModelProvider(
+            base_url="http://model.test/v1",
+            model="qwen-test",
+            client=client,
+        )
+
+        with pytest.raises(errors.ModelProviderUnavailable):
+            await provider.complete(ModelRequest(messages=()))
+
     assert attempts == 1
+
+
+@pytest.mark.asyncio
+async def test_openai_compatible_provider_logs_sanitized_upstream_rejection(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    transport = httpx.MockTransport(
+        lambda _request: httpx.Response(
+            400,
+            json={
+                "error": {
+                    "code": "invalid_parameter",
+                    "message": "parallel_tool_calls is not supported",
+                }
+            },
+        )
+    )
+    async with httpx.AsyncClient(transport=transport) as client:
+        provider = OpenAICompatibleModelProvider(
+            base_url="http://model.test/v1",
+            model="qwen-test",
+            api_key=SecretStr("must-not-appear"),
+            client=client,
+        )
+
+        with pytest.raises(errors.ModelProviderUnavailable):
+            await provider.complete(ModelRequest(messages=()))
+
+    assert "status=400" in caplog.text
+    assert "code=invalid_parameter" in caplog.text
+    assert "parallel_tool_calls is not supported" in caplog.text
+    assert "must-not-appear" not in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_openai_compatible_provider_retries_request_timeout_status() -> None:
+    attempts = 0
+
+    def handler(_request: httpx.Request) -> httpx.Response:
+        nonlocal attempts
+        attempts += 1
+        if attempts == 1:
+            return httpx.Response(408, text="request timeout")
+        return httpx.Response(
+            200,
+            json={
+                "choices": [
+                    {"finish_reason": "stop", "message": {"content": "完成"}}
+                ],
+                "usage": {
+                    "prompt_tokens": 1,
+                    "completion_tokens": 1,
+                    "total_tokens": 2,
+                },
+            },
+        )
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        response = await OpenAICompatibleModelProvider(
+            base_url="http://model.test/v1",
+            model="qwen-test",
+            client=client,
+        ).complete(ModelRequest(messages=()))
+
+    assert response.content == "完成"
+    assert attempts == 2
 
 
 @pytest.mark.asyncio

@@ -21,6 +21,8 @@ from full_view_agent.application.errors import (
     BudgetExceeded,
     LoopDetected,
     ModelContractError,
+    ModelProviderTimeout,
+    ModelProviderUnavailable,
 )
 from full_view_agent.application.fingerprints import canonical_fingerprint
 from full_view_agent.application.session_run_service import new_id
@@ -28,6 +30,16 @@ from full_view_agent.domain.analysis_intent import AnalysisIntentV1
 from full_view_agent.domain.models import AuthContext, ToolResult
 
 ANALYSIS_INTENT_TOOL_ID = "agent.request_regional_analysis"
+MODEL_TIMEOUT_WITH_RESULTS_SUMMARY = (
+    "查询工具已经执行完成，但模型生成综合说明超时。已保留可查看的验证结果。"
+)
+MODEL_TOKEN_BUDGET_WITH_RESULTS_SUMMARY = (
+    "查询工具已经执行完成，但模型本轮可用 Token 已耗尽。"
+    "已保留可查看的验证结果。"
+)
+MODEL_PROVIDER_UNAVAILABLE_WITH_RESULTS_SUMMARY = (
+    "查询工具已经执行完成，但模型服务暂时不可用。已保留可查看的验证结果。"
+)
 
 
 @dataclass(frozen=True)
@@ -68,6 +80,11 @@ class FinishAction:
     # capability-boundary explanation while model-authored text remains
     # replaced by the fixed safe template.
     server_authored: bool = False
+    degraded_reason_code: Literal[
+        "model_timeout_with_results",
+        "model_token_budget_with_results",
+        "model_provider_unavailable_with_results",
+    ] | None = None
 
 
 @dataclass(frozen=True)
@@ -108,6 +125,8 @@ class HarnessResult:
     # Historical Result cards are an explicit completion decision, never an
     # automatic side effect of merely having inherited grounding in context.
     use_inherited_references: bool = False
+    outcome: Literal["success", "partial"] = "success"
+    completion_reason_code: str = "goal_completed"
 
 
 @dataclass(frozen=True)
@@ -271,6 +290,35 @@ class DeterministicCompletionValidator:
         summary = action.summary.strip()
         if not summary:
             return CompletionAssessment(status="reject", reason_code="empty_summary")
+
+        success_results = [r for r in state.tool_results if r.status in ("success", "partial")]
+        denied_results = [r for r in state.tool_results if r.status == "denied"]
+        failed_results = [r for r in state.tool_results if r.status == "failed"]
+
+        if action.degraded_reason_code is not None:
+            expected_summary = {
+                "model_timeout_with_results": MODEL_TIMEOUT_WITH_RESULTS_SUMMARY,
+                "model_token_budget_with_results": (
+                    MODEL_TOKEN_BUDGET_WITH_RESULTS_SUMMARY
+                ),
+                "model_provider_unavailable_with_results": (
+                    MODEL_PROVIDER_UNAVAILABLE_WITH_RESULTS_SUMMARY
+                ),
+            }.get(action.degraded_reason_code)
+            accepted = bool(
+                action.server_authored
+                and expected_summary is not None
+                and summary == expected_summary
+                and success_results
+            )
+            return CompletionAssessment(
+                status="accept" if accepted else "reject",
+                reason_code=(
+                    "model_timeout_with_results"
+                    if accepted
+                    else "invalid_degraded_completion"
+                ),
+            )
         if action.structured_finish_error is not None:
             return CompletionAssessment(
                 status="revise",
@@ -280,10 +328,6 @@ class DeterministicCompletionValidator:
                     "行、字段、运算和值。"
                 ),
             )
-
-        success_results = [r for r in state.tool_results if r.status in ("success", "partial")]
-        denied_results = [r for r in state.tool_results if r.status == "denied"]
-        failed_results = [r for r in state.tool_results if r.status == "failed"]
 
         # Successful data does not authorize unsupported causal or
         # source-quality inferences.
@@ -529,7 +573,39 @@ class AgentHarness:
         self._guard_time(control.started_at)
         if control.state.model_turns >= self._limits.max_model_turns:
             raise BudgetExceeded("maximum model turns exceeded")
-        action = await planner.decide(control.state)
+        try:
+            action = await planner.decide(control.state)
+        except (ModelProviderTimeout, ModelProviderUnavailable, BudgetExceeded) as exc:
+            if isinstance(exc, BudgetExceeded) and str(exc) != (
+                "model token budget exceeded"
+            ):
+                raise
+            has_verified_result = any(
+                result.status in {"success", "partial"}
+                for result in control.state.tool_results
+            )
+            if not has_verified_result:
+                raise
+            token_budget_exhausted = isinstance(exc, BudgetExceeded)
+            provider_unavailable = isinstance(exc, ModelProviderUnavailable)
+            action = FinishAction(
+                summary=(
+                    MODEL_TOKEN_BUDGET_WITH_RESULTS_SUMMARY
+                    if token_budget_exhausted
+                    else MODEL_PROVIDER_UNAVAILABLE_WITH_RESULTS_SUMMARY
+                    if provider_unavailable
+                    else MODEL_TIMEOUT_WITH_RESULTS_SUMMARY
+                ),
+                legacy=True,
+                server_authored=True,
+                degraded_reason_code=(
+                    "model_token_budget_with_results"
+                    if token_budget_exhausted
+                    else "model_provider_unavailable_with_results"
+                    if provider_unavailable
+                    else "model_timeout_with_results"
+                ),
+            )
         if isinstance(action, AnalysisIntentAction):
             # The ordinary Harness has no trusted intent-compilation/execution
             # bridge yet. Reject before checkpoints, hooks, or adapters can
@@ -755,6 +831,12 @@ class AgentHarness:
                         use_inherited_references=(
                             action.structured_finish is not None
                             and action.structured_finish.kind == "reference_only"
+                        ),
+                        outcome=(
+                            "partial" if action.degraded_reason_code else "success"
+                        ),
+                        completion_reason_code=(
+                            action.degraded_reason_code or "goal_completed"
                         ),
                     )
                 continue

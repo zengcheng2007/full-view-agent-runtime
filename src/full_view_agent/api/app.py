@@ -569,6 +569,9 @@ class RuntimeContainer:
                 max_total_tokens=int(
                     os.getenv("FULL_VIEW_MODEL_TOKEN_BUDGET", "32000")
                 ),
+                max_output_tokens=int(
+                    os.getenv("FULL_VIEW_MODEL_MAX_OUTPUT_TOKENS", "32000")
+                ),
             )
             if self.model_provider is not None
             else None

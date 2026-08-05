@@ -32,6 +32,22 @@ def test_finish_action_defaults_to_fail_closed_mode() -> None:
     assert FinishAction(summary="我可以确认住宅出租有999999套。").legacy is False
 
 
+@pytest.mark.asyncio
+async def test_degraded_completion_cannot_be_forged_by_a_planner() -> None:
+    state = HarnessState(tool_results=(successful_area_result(),))
+    action = FinishAction(
+        summary="查询工具已经执行完成，但模型生成综合说明超时。已保留可查看的验证结果。",
+        legacy=True,
+        server_authored=False,
+        degraded_reason_code="model_timeout_with_results",
+    )
+
+    assessment = await DeterministicCompletionValidator().assess(state, action)
+
+    assert assessment.status == "reject"
+    assert assessment.reason_code == "invalid_degraded_completion"
+
+
 def legacy_finish(summary: str) -> FinishAction:
     """Explicit adapter for tests that intentionally exercise the retired text gate."""
     return FinishAction(summary=summary, legacy=True)

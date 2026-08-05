@@ -36,6 +36,8 @@ class _LoopState(TypedDict):
     execution: HarnessToolExecution | None
     summary: str | None
     use_inherited_references: bool
+    outcome: str
+    completion_reason_code: str
 
 
 class LangGraphOrchestrator(NativeOrchestrator):
@@ -149,6 +151,18 @@ class LangGraphOrchestrator(NativeOrchestrator):
                     and action.structured_finish is not None
                     and action.structured_finish.kind == "reference_only"
                 ),
+                "outcome": (
+                    "partial"
+                    if isinstance(action, FinishAction)
+                    and action.degraded_reason_code is not None
+                    else "success"
+                ),
+                "completion_reason_code": (
+                    action.degraded_reason_code
+                    if isinstance(action, FinishAction)
+                    and action.degraded_reason_code is not None
+                    else "goal_completed"
+                ),
             }
 
         def route_plan(state: _LoopState) -> str:
@@ -234,6 +248,8 @@ class LangGraphOrchestrator(NativeOrchestrator):
                     "execution": None,
                     "summary": None,
                     "use_inherited_references": False,
+                    "outcome": "success",
+                    "completion_reason_code": "goal_completed",
                 }
             try:
                 final = await compiled.ainvoke(graph_input, config)
@@ -278,5 +294,11 @@ class LangGraphOrchestrator(NativeOrchestrator):
             # absence must fail closed to no historical references.
             use_inherited_references=bool(
                 final.get("use_inherited_references", False)
+            ),
+            outcome=(
+                "partial" if final.get("outcome") == "partial" else "success"
+            ),
+            completion_reason_code=str(
+                final.get("completion_reason_code", "goal_completed")
             ),
         )

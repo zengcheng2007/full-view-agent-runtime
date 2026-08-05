@@ -1,7 +1,7 @@
 schema_version: "1.0"
 case_id: model-timeout
 description: 模型超时必须以标准错误码可靠终止
-user_message: 查询西湖区人口数量
+user_message: 查询西湖区独居老人数量
 auth:
   area_codes: ["330106"]
   datasets: [population]

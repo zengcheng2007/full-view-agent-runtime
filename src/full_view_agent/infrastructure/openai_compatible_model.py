@@ -20,6 +20,7 @@ from full_view_agent.application.model_provider import (
 logger = logging.getLogger(__name__)
 _MAX_CONTRACT_ATTEMPTS = 2
 _RETRYABLE_CONTRACT_REASONS = frozenset({"invalid_tool_arguments_json"})
+_RETRYABLE_HTTP_STATUS_CODES = frozenset({408, 429, 500, 502, 503, 504})
 
 
 class OpenAICompatibleModelProvider:
@@ -92,8 +93,32 @@ class OpenAICompatibleModelProvider:
                     )
                 response.raise_for_status()
             except httpx.TimeoutException as exc:
+                if attempt + 1 < _MAX_CONTRACT_ATTEMPTS:
+                    logger.warning("model request timed out; retrying once")
+                    continue
                 raise ModelProviderTimeout("model request timed out") from exc
+            except httpx.HTTPStatusError as exc:
+                error_code, error_message = _provider_error_summary(exc.response)
+                logger.warning(
+                    "model provider rejected request status=%s code=%s message=%s",
+                    exc.response.status_code,
+                    error_code,
+                    error_message,
+                )
+                if (
+                    exc.response.status_code in _RETRYABLE_HTTP_STATUS_CODES
+                    and attempt + 1 < _MAX_CONTRACT_ATTEMPTS
+                ):
+                    logger.warning(
+                        "model provider returned retryable status %s; retrying once",
+                        exc.response.status_code,
+                    )
+                    continue
+                raise ModelProviderUnavailable("model provider is unavailable") from exc
             except httpx.HTTPError as exc:
+                if attempt + 1 < _MAX_CONTRACT_ATTEMPTS:
+                    logger.warning("model provider connection failed; retrying once")
+                    continue
                 raise ModelProviderUnavailable("model provider is unavailable") from exc
             try:
                 return _parse_response(response, tool_names=tool_names)
@@ -188,6 +213,32 @@ def _contract_failure_reason(exc: ModelContractError) -> str:
     if isinstance(cause, ValueError):
         return "invalid_response_value"
     return "invalid_response_contract"
+
+
+def _provider_error_summary(response: httpx.Response) -> tuple[str, str]:
+    """Return bounded provider diagnostics without logging request data or headers."""
+    code = "unknown"
+    message = response.reason_phrase or "upstream request rejected"
+    try:
+        body = response.json()
+        error = body.get("error", body) if isinstance(body, dict) else body
+        if isinstance(error, dict):
+            raw_code = error.get("code") or error.get("type")
+            raw_message = error.get("message")
+            if raw_code is not None:
+                code = str(raw_code)
+            if raw_message is not None:
+                message = str(raw_message)
+        elif error is not None:
+            message = str(error)
+    except (json.JSONDecodeError, UnicodeDecodeError, ValueError):
+        if response.text:
+            message = response.text
+    return _bounded_log_value(code, 80), _bounded_log_value(message, 300)
+
+
+def _bounded_log_value(value: str, limit: int) -> str:
+    return " ".join(value.split())[:limit]
 
 
 def _serialize_message(message: ModelMessage) -> dict[str, object]:

@@ -572,7 +572,7 @@ async def test_eval_runner_grades_normalized_model_failure() -> None:
         {
             "case_id": "model-timeout",
             "description": "模型超时可靠收敛",
-            "user_message": "查询人口",
+            "user_message": "查询西湖区独居老人",
             "auth": {
                 "area_codes": ["330106"],
                 "datasets": ["population"],
@@ -730,9 +730,11 @@ async def test_housing_fault_gate_fails_once_before_business_adapter(
     assert trace.tool_ids.count("governance.semantic_query") == 1
     assert "governance.query_housing_metrics" not in trace.tool_ids
     assert trace.event_types.count("tool.failed") == 1
-    assert "result.available" not in trace.event_types
-    assert "evidence.available" not in trace.event_types
-    assert trace.evidence_ids == []
+    # The successful area-resolution observation is durable even though the
+    # later housing call fails; failed Tool output itself creates no Result.
+    assert trace.event_types.count("result.available") == 1
+    assert trace.event_types.count("evidence.available") == 1
+    assert len(trace.evidence_ids) == 1
     assert adapter.tool_ids == ["governance.resolve_area"]
 
 

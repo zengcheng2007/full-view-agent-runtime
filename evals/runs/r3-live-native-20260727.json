@@ -1,0 +1,237 @@
+{
+  "trace_version": "1.0",
+  "eval_run_id": "evl_e12e4d9b62a2c2053674ee20f1",
+  "replayed_from_eval_run_id": null,
+  "case_id": "open-housing-cuiyuan",
+  "started_at": "2026-07-26T16:13:55.812711Z",
+  "completed_at": "2026-07-26T16:14:08.833414Z",
+  "model_provider": "openai_compatible",
+  "model_name": "qwen3.7-max",
+  "prompt_version": "full-view-governance-readonly-v7",
+  "model_requests": [
+    {
+      "messages": [
+        {
+          "role": "system",
+          "content": "你是全量信息视图的只读治理分析智能体。只能使用本次提供的 Tool，不得提升权限或猜测未返回的数据。需要业务数据时必须调用可用 Tool，不得凭记忆直接回答。如果上下文明确提供“会话中已验证且仍可用的历史结果”，可以直接基于这些结果排序、筛选、解释或展示，无需重复调用 Tool；普通历史回答不属于已验证结果。Tool 返回后只能依据已验证观察作答；已有成功结果时不得重复相同调用。可用能力概述：(1) resolve_area：需要把区划名称转换为标准区划编码时使用。(2) query_population_metrics：查询人口聚合指标。独居老人查询时 filters 必须为[{field:'person_category',operator:'eq',value:'solitary_elderly'}]，不得替换为中文值或年龄条件。(3) query_housing_metrics：查询出租房按类型（住宅出租、商铺出租、公寓出租、群租房、工业出租）的区域自身汇总；当前不支持按下级区划分组。(4) query_event_metrics：查询指定区域自身的网格、社区、街道三个层级汇总办结率；当前不返回下级区划明细、事件总量或办结数，也不支持按阈值筛选。(5) get_object_profile：查询声明区域内楼栋的基础画像和位置；当前真实适配器只支持 building，调用时必须提供 scope。人口 Tool 的 group_by 规则：区县按街道汇总传 group_by=['street']，街道按社区汇总传 group_by=['community']，社区按网格汇总传 group_by=['grid']。Tool 返回 upstream_timeout、upstream_unavailable 或 upstream_contract_error 时，表示运行时已完成内部重试，不得重试相同 Tool；应说明失败并结束本次任务。区划解析 candidate_count=0 表示没有找到可查询的授权区划，不代表任何业务指标为零；不得把未查询、查询失败或无区划候选表述成数量为 0。无法完成时应明确说明缺少的权限、参数或能力。授权上下文：{\"area_scopes\": [{\"area_code\": \"330106\", \"include_descendants\": true}], \"datasets\": [\"administrative_area\", \"housing\"], \"entitlements\": [\"governance.area.read\", \"governance.housing.aggregate.read\"], \"org_id\": \"eval-org\", \"purpose\": \"interactive_analysis\", \"roles\": [\"governance_analyst\"], \"tenant_id\": \"eval-tenant\"}",
+          "tool_call_id": null
+        },
+        {
+          "role": "user",
+          "content": "翠苑那边租房的多不多？按类型给我分一下",
+          "tool_call_id": null
+        }
+      ],
+      "tool_ids": [
+        "governance.query_housing_metrics",
+        "governance.resolve_area"
+      ],
+      "prompt_version": "full-view-governance-readonly-v7"
+    },
+    {
+      "messages": [
+        {
+          "role": "system",
+          "content": "你是全量信息视图的只读治理分析智能体。只能使用本次提供的 Tool，不得提升权限或猜测未返回的数据。需要业务数据时必须调用可用 Tool，不得凭记忆直接回答。如果上下文明确提供“会话中已验证且仍可用的历史结果”，可以直接基于这些结果排序、筛选、解释或展示，无需重复调用 Tool；普通历史回答不属于已验证结果。Tool 返回后只能依据已验证观察作答；已有成功结果时不得重复相同调用。可用能力概述：(1) resolve_area：需要把区划名称转换为标准区划编码时使用。(2) query_population_metrics：查询人口聚合指标。独居老人查询时 filters 必须为[{field:'person_category',operator:'eq',value:'solitary_elderly'}]，不得替换为中文值或年龄条件。(3) query_housing_metrics：查询出租房按类型（住宅出租、商铺出租、公寓出租、群租房、工业出租）的区域自身汇总；当前不支持按下级区划分组。(4) query_event_metrics：查询指定区域自身的网格、社区、街道三个层级汇总办结率；当前不返回下级区划明细、事件总量或办结数，也不支持按阈值筛选。(5) get_object_profile：查询声明区域内楼栋的基础画像和位置；当前真实适配器只支持 building，调用时必须提供 scope。人口 Tool 的 group_by 规则：区县按街道汇总传 group_by=['street']，街道按社区汇总传 group_by=['community']，社区按网格汇总传 group_by=['grid']。Tool 返回 upstream_timeout、upstream_unavailable 或 upstream_contract_error 时，表示运行时已完成内部重试，不得重试相同 Tool；应说明失败并结束本次任务。区划解析 candidate_count=0 表示没有找到可查询的授权区划，不代表任何业务指标为零；不得把未查询、查询失败或无区划候选表述成数量为 0。无法完成时应明确说明缺少的权限、参数或能力。授权上下文：{\"area_scopes\": [{\"area_code\": \"330106\", \"include_descendants\": true}], \"datasets\": [\"administrative_area\", \"housing\"], \"entitlements\": [\"governance.area.read\", \"governance.housing.aggregate.read\"], \"org_id\": \"eval-org\", \"purpose\": \"interactive_analysis\", \"roles\": [\"governance_analyst\"], \"tenant_id\": \"eval-tenant\"}",
+          "tool_call_id": null
+        },
+        {
+          "role": "user",
+          "content": "翠苑那边租房的多不多？按类型给我分一下",
+          "tool_call_id": null
+        },
+        {
+          "role": "assistant",
+          "content": null,
+          "tool_call_id": null
+        },
+        {
+          "role": "tool",
+          "content": "{\"data_result\": {\"ambiguous\": false, \"candidate_count\": 1, \"candidates\": [{\"area_code\": \"330106001\", \"area_name\": \"翠苑街道\", \"level\": \"street\", \"parent_area_code\": \"330106\"}], \"kind\": \"area_candidates\", \"resolved_area_code\": \"330106001\", \"result_id\": \"res_9833e220169c1661d47cd11b69\"}, \"status\": \"success\", \"summary\": \"Tool 执行成功。\", \"tool_id\": \"governance.resolve_area\", \"warnings\": []}",
+          "tool_call_id": "tcl_77e5c22a069b9df76c98ebd4bd"
+        }
+      ],
+      "tool_ids": [
+        "governance.query_housing_metrics"
+      ],
+      "prompt_version": "full-view-governance-readonly-v7"
+    },
+    {
+      "messages": [
+        {
+          "role": "system",
+          "content": "你是全量信息视图的只读治理分析智能体。只能使用本次提供的 Tool，不得提升权限或猜测未返回的数据。需要业务数据时必须调用可用 Tool，不得凭记忆直接回答。如果上下文明确提供“会话中已验证且仍可用的历史结果”，可以直接基于这些结果排序、筛选、解释或展示，无需重复调用 Tool；普通历史回答不属于已验证结果。Tool 返回后只能依据已验证观察作答；已有成功结果时不得重复相同调用。可用能力概述：(1) resolve_area：需要把区划名称转换为标准区划编码时使用。(2) query_population_metrics：查询人口聚合指标。独居老人查询时 filters 必须为[{field:'person_category',operator:'eq',value:'solitary_elderly'}]，不得替换为中文值或年龄条件。(3) query_housing_metrics：查询出租房按类型（住宅出租、商铺出租、公寓出租、群租房、工业出租）的区域自身汇总；当前不支持按下级区划分组。(4) query_event_metrics：查询指定区域自身的网格、社区、街道三个层级汇总办结率；当前不返回下级区划明细、事件总量或办结数，也不支持按阈值筛选。(5) get_object_profile：查询声明区域内楼栋的基础画像和位置；当前真实适配器只支持 building，调用时必须提供 scope。人口 Tool 的 group_by 规则：区县按街道汇总传 group_by=['street']，街道按社区汇总传 group_by=['community']，社区按网格汇总传 group_by=['grid']。Tool 返回 upstream_timeout、upstream_unavailable 或 upstream_contract_error 时，表示运行时已完成内部重试，不得重试相同 Tool；应说明失败并结束本次任务。区划解析 candidate_count=0 表示没有找到可查询的授权区划，不代表任何业务指标为零；不得把未查询、查询失败或无区划候选表述成数量为 0。无法完成时应明确说明缺少的权限、参数或能力。授权上下文：{\"area_scopes\": [{\"area_code\": \"330106\", \"include_descendants\": true}], \"datasets\": [\"administrative_area\", \"housing\"], \"entitlements\": [\"governance.area.read\", \"governance.housing.aggregate.read\"], \"org_id\": \"eval-org\", \"purpose\": \"interactive_analysis\", \"roles\": [\"governance_analyst\"], \"tenant_id\": \"eval-tenant\"}",
+          "tool_call_id": null
+        },
+        {
+          "role": "user",
+          "content": "翠苑那边租房的多不多？按类型给我分一下",
+          "tool_call_id": null
+        },
+        {
+          "role": "assistant",
+          "content": null,
+          "tool_call_id": null
+        },
+        {
+          "role": "tool",
+          "content": "{\"data_result\": {\"ambiguous\": false, \"candidate_count\": 1, \"candidates\": [{\"area_code\": \"330106001\", \"area_name\": \"翠苑街道\", \"level\": \"street\", \"parent_area_code\": \"330106\"}], \"kind\": \"area_candidates\", \"resolved_area_code\": \"330106001\", \"result_id\": \"res_9833e220169c1661d47cd11b69\"}, \"status\": \"success\", \"summary\": \"Tool 执行成功。\", \"tool_id\": \"governance.resolve_area\", \"warnings\": []}",
+          "tool_call_id": "tcl_77e5c22a069b9df76c98ebd4bd"
+        },
+        {
+          "role": "assistant",
+          "content": null,
+          "tool_call_id": null
+        },
+        {
+          "role": "tool",
+          "content": "{\"data_result\": {\"kind\": \"table\", \"result_id\": \"res_c7eca4768c274d243f8b38d669\", \"row_count\": 5, \"sample_rows\": [{\"dwelling_count\": 3200, \"lease_type\": \"住宅出租\"}, {\"dwelling_count\": 850, \"lease_type\": \"商铺出租\"}, {\"dwelling_count\": 1200, \"lease_type\": \"公寓出租\"}, {\"dwelling_count\": 320, \"lease_type\": \"群租房\"}, {\"dwelling_count\": 180, \"lease_type\": \"工业出租\"}]}, \"status\": \"success\", \"summary\": \"Tool 执行成功。\", \"tool_id\": \"governance.query_housing_metrics\", \"warnings\": []}",
+          "tool_call_id": "tcl_e2bdabbfb12f6381f6cab1c006"
+        }
+      ],
+      "tool_ids": [],
+      "prompt_version": "full-view-governance-readonly-v7"
+    }
+  ],
+  "model_steps": [
+    {
+      "type": "tool_call",
+      "tool_id": "governance.resolve_area",
+      "arguments": {
+        "query": "翠苑",
+        "max_candidates": 5
+      },
+      "total_tokens": 1420
+    },
+    {
+      "type": "tool_call",
+      "tool_id": "governance.query_housing_metrics",
+      "arguments": {
+        "query": {
+          "scope": {
+            "area_code": "330106001",
+            "include_descendants": true
+          },
+          "limit": 200
+        }
+      },
+      "total_tokens": 1359
+    },
+    {
+      "type": "finish",
+      "content": "# 翠苑街道出租房数据分析\n\n## 总体概况\n\n翠苑街道出租房总量为 **5,750 间**，租赁市场较为活跃。\n\n## 按类型分布\n\n| 类型 | 数量（间） | 占比 |\n|------|----------:|-----:|\n| 🏠 住宅出租 | 3,200 | 55.7% |\n| 🏢 公寓出租 | 1,200 | 20.9% |\n| 🏪 商铺出租 | 850 | 14.8% |\n| 🏘️ 群租房 | 320 | 5.6% |\n| 🏭 工业出租 | 180 | 3.1% |\n\n## 分析结论\n\n- **住宅出租是绝对主力**，占比超过一半（55.7%），说明翠苑街道以居民自住型租赁为主\n- **公寓出租排名第二**（20.9%），与住宅合计占比达 76.6%，表明居住类租赁需求旺盛\n- **商铺出租**占 14.8%，反映出翠苑片区商业氛围较浓\n- **群租房和工业出租**占比较小，分别为 5.6% 和 3.1%，但仍需关注群租房的安全管理\n\n总体来看，翠苑街道租房数量较多，且以住宅和公寓为主的居住型租赁占据主导地位。",
+      "total_tokens": 1346
+    }
+  ],
+  "total_tokens": 4125,
+  "event_types": [
+    "run.started",
+    "tool.started",
+    "tool.completed",
+    "tool.started",
+    "tool.completed",
+    "result.available",
+    "evidence.available",
+    "result.available",
+    "evidence.available",
+    "frontend.command.requested",
+    "assistant.message.completed",
+    "run.completed"
+  ],
+  "terminal_status": "completed",
+  "outcome": "success",
+  "completion_reason_code": "goal_completed",
+  "tool_ids": [
+    "governance.resolve_area",
+    "governance.query_housing_metrics"
+  ],
+  "evidence_ids": [
+    "evd_1099e105dbd60327e23444a1a0",
+    "evd_c7deb7a14b3b736c2fbd2f326a"
+  ],
+  "grades": [
+    {
+      "name": "terminal_status",
+      "passed": true,
+      "expected": "completed",
+      "actual": "completed"
+    },
+    {
+      "name": "outcome",
+      "passed": true,
+      "expected": "success",
+      "actual": "success"
+    },
+    {
+      "name": "completion_reason_code",
+      "passed": true,
+      "expected": "goal_completed",
+      "actual": "goal_completed"
+    },
+    {
+      "name": "tool_ids",
+      "passed": true,
+      "expected": [],
+      "actual": [
+        "governance.resolve_area",
+        "governance.query_housing_metrics"
+      ]
+    },
+    {
+      "name": "min_evidence_count",
+      "passed": true,
+      "expected": 2,
+      "actual": 2
+    },
+    {
+      "name": "tool_lifecycle_terminal_count",
+      "passed": true,
+      "expected": 2,
+      "actual": 2
+    },
+    {
+      "name": "required_event_types",
+      "passed": true,
+      "expected": [
+        "tool.completed",
+        "result.available",
+        "evidence.available",
+        "run.completed"
+      ],
+      "actual": [
+        "run.started",
+        "tool.started",
+        "tool.completed",
+        "tool.started",
+        "tool.completed",
+        "result.available",
+        "evidence.available",
+        "result.available",
+        "evidence.available",
+        "frontend.command.requested",
+        "assistant.message.completed",
+        "run.completed"
+      ]
+    },
+    {
+      "name": "required_answer_substrings",
+      "passed": true,
+      "expected": [
+        "出租"
+      ],
+      "actual": [
+        "出租"
+      ]
+    },
+    {
+      "name": "forbidden_answer_substrings",
+      "passed": true,
+      "expected": [
+        "无法完成",
+        "没有可用工具"
+      ],
+      "actual": []
+    }
+  ],
+  "passed": true
+}
