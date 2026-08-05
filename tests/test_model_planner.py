@@ -165,13 +165,17 @@ async def test_model_planner_blocks_specialized_semantic_subject_without_explici
         auth_context=population_auth_context(),
     ).decide(HarnessState())
 
-    assert action == FinishAction(
-        summary=(
-            "当前接入的人口数据能力仅支持独居老人统计，不能把一般人口查询"
-            "替换为独居老人数据。请明确查询独居老人，或先接入总人口指标能力。"
-        ),
-        legacy=True,
+    assert action.summary == (
+        "当前接入的人口数据能力仅支持独居老人统计，不能把一般人口查询"
+        "替换为独居老人数据。请明确查询独居老人，或先接入总人口指标能力。"
     )
+    assert action.structured_finish is not None
+    assert action.structured_finish.kind == "capability"
+    assert action.structured_finish.limitations == [
+        "unsupported_requested_constraint"
+    ]
+    assert action.legacy is False
+    assert action.server_authored is True
 
 
 @pytest.mark.asyncio
@@ -233,6 +237,96 @@ async def test_model_planner_allows_specialized_semantic_subject_for_explicit_us
     assert isinstance(action, ToolAction)
     assert action.tool_id == "governance.semantic_query"
     assert action.arguments["catalog_version"] == "catalog-v1"
+
+
+@pytest.mark.asyncio
+async def test_model_planner_blocks_direct_specialized_tool_for_generic_population() -> None:
+    direct_tool = ModelToolDefinition(
+        tool_id="governance.query_population_metrics",
+        description="独居老人指标",
+        input_schema={"type": "object"},
+        required_intent_terms=("独居老人",),
+    )
+
+    class ContextBuilder:
+        async def build(self, **_kwargs) -> ModelRequest:
+            return ModelRequest(
+                messages=(ModelMessage(role="user", content="西湖区人口按街道汇总"),),
+                tools=(direct_tool,),
+            )
+
+    provider = QueueModelProvider(
+        ModelResponse(
+            content=None,
+            tool_calls=(
+                ModelToolCall(
+                    tool_id=direct_tool.tool_id,
+                    arguments={"query": {"scope": {"area_code": "330106"}}},
+                ),
+            ),
+            finish_reason="tool_calls",
+        )
+    )
+
+    action = await ModelPlanner(
+        provider=provider,
+        context_builder=ContextBuilder(),
+        user_id="user-01",
+        auth_context=population_auth_context(),
+    ).decide(HarnessState())
+
+    assert isinstance(action, FinishAction)
+    assert action.structured_finish is not None
+    assert action.structured_finish.limitations == [
+        "unsupported_requested_constraint"
+    ]
+
+
+@pytest.mark.asyncio
+async def test_model_planner_blocks_generic_population_analysis_intent() -> None:
+    analysis_tool = ModelToolDefinition(
+        tool_id="agent.request_regional_analysis",
+        description="区域研判",
+        input_schema={"type": "object"},
+        subject_intent_terms={"population": ("独居老人",)},
+    )
+
+    class ContextBuilder:
+        async def build(self, **_kwargs) -> ModelRequest:
+            return ModelRequest(
+                messages=(ModelMessage(role="user", content="研判西湖区人口分布"),),
+                tools=(analysis_tool,),
+            )
+
+    provider = QueueModelProvider(
+        ModelResponse(
+            content=None,
+            tool_calls=(
+                ModelToolCall(
+                    tool_id=analysis_tool.tool_id,
+                    arguments={
+                        "kind": "regional_analysis",
+                        "goals": ["population"],
+                        "scope": {"kind": "named_area", "area_query": "西湖区"},
+                    },
+                ),
+            ),
+            finish_reason="tool_calls",
+        )
+    )
+
+    action = await ModelPlanner(
+        provider=provider,
+        context_builder=ContextBuilder(),
+        user_id="user-01",
+        auth_context=population_auth_context(),
+    ).decide(HarnessState())
+
+    assert isinstance(action, FinishAction)
+    assert action.structured_finish is not None
+    assert action.structured_finish.limitations == [
+        "unsupported_requested_constraint"
+    ]
 
 
 @pytest.mark.asyncio

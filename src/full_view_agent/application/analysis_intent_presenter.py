@@ -24,6 +24,7 @@ class AnalysisIntentToolPresentation:
     description: str
     input_schema: dict[str, object]
     goals: tuple[AnalysisGoal, ...]
+    goal_intent_terms: dict[str, tuple[str, ...]]
 
 
 class AnalysisIntentToolPresenter:
@@ -59,6 +60,20 @@ class AnalysisIntentToolPresenter:
                 if goal == "overview" or goal in visible_subjects
             ),
         )
+        goal_intent_terms = {
+            subject.subject_id: subject.required_user_terms
+            for subject in view.subjects
+            if subject.subject_id in visible_subjects and subject.required_user_terms
+        }
+        overview_terms = tuple(
+            dict.fromkeys(
+                term
+                for terms in goal_intent_terms.values()
+                for term in terms
+            )
+        )
+        if overview_terms and "overview" in goals:
+            goal_intent_terms["overview"] = overview_terms
         schema = deepcopy(AnalysisIntentV1.model_json_schema(mode="validation"))
         properties = schema.get("properties")
         if not isinstance(properties, dict):
@@ -93,6 +108,7 @@ class AnalysisIntentToolPresenter:
             ),
             input_schema=schema,
             goals=goals,
+            goal_intent_terms=goal_intent_terms,
         )
 
     @staticmethod

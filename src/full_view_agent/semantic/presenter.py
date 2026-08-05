@@ -76,6 +76,17 @@ class SemanticToolPresenter:
             )
         )
 
+    @property
+    def canonical_tool_intent_terms(self) -> dict[str, tuple[str, ...]]:
+        """Server-only intent requirements for canonical fallback exposure."""
+        requirements: dict[str, tuple[str, ...]] = {}
+        for subject_id in self._catalog.bindable_subject_ids():
+            subject = self._catalog.subject(subject_id)
+            binding = self._catalog.binding(subject_id)
+            if subject is not None and binding is not None and subject.required_user_terms:
+                requirements[binding.capability_id] = subject.required_user_terms
+        return requirements
+
     def present(self, *, auth_context: AuthContext) -> SemanticToolPresentation | None:
         authorization = SubjectAuthorization.from_auth_context(auth_context)
         view = self._catalog.model_capability_view(authorization)

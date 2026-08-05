@@ -14,6 +14,7 @@ import pytest
 
 from full_view_agent.application.answer_claims import (
     FINISH_TOOL_ID,
+    UNSUPPORTED_CONSTRAINT_SUMMARY,
     AnswerClaim,
     StructuredFinish,
 )
@@ -280,6 +281,25 @@ class _UnsafeInheritedFollowupPlanner(_SingleToolPlanner):
         if state.inherited_result_ids:
             return FinishAction(
                 summary="北山街道有9999人。",
+                legacy=False,
+            )
+        return await super().decide(state)
+
+
+class _UnsupportedInheritedFollowupPlanner(_SingleToolPlanner):
+    async def decide(self, state: HarnessState) -> ToolAction | FinishAction:
+        if state.inherited_result_ids:
+            finish = StructuredFinish(
+                kind="capability",
+                summary=(
+                    "当前接入的人口能力仅支持独居老人统计，"
+                    "不能把一般人口查询替换为独居老人数据。"
+                ),
+                limitations=["unsupported_requested_constraint"],
+            )
+            return FinishAction(
+                summary=finish.summary,
+                structured_finish=finish,
                 legacy=False,
             )
         return await super().decide(state)
@@ -594,8 +614,50 @@ async def test_unstructured_inherited_followup_revises_once_then_stops_safely(
     assert answer.content[0].text == (
         "抱歉，当前回答仍包含无法由查询结果核验的内容，已停止生成结论。"
     )
+    assert [item.type for item in answer.content] == ["text"]
+    assert answer.evidence_ids == []
     types = [event.type for event in await events.list_events(run_id=second.run_id)]
     assert "run.failed" not in types
+
+
+@pytest.mark.asyncio
+async def test_unsupported_followup_does_not_borrow_historical_results(
+    orch_factory: OrchFactory,
+) -> None:
+    orch, store, events = orch_factory(planner=_UnsupportedInheritedFollowupPlanner())
+    service = SessionRunService(store)
+    session = await service.create_session(user_id="u", title="人口能力边界")
+    first = await service.create_run(
+        user_id="u",
+        session_id=session.session_id,
+        request=run_request("web-msg-population-first"),
+    )
+    await orch.execute(user_id="u", run_id=first.run_id)
+    second = await service.create_run(
+        user_id="u",
+        session_id=session.session_id,
+        request=run_request("web-msg-generic-population"),
+    )
+
+    await orch.execute(user_id="u", run_id=second.run_id)
+
+    run = await store.get_run(user_id="u", run_id=second.run_id)
+    assert run.status == "completed"
+    assert run.outcome == "success"
+    assert run.completion_reason_code == "goal_completed"
+    messages = await store.list_messages(user_id="u", session_id=session.session_id)
+    answer = next(
+        message
+        for message in messages
+        if message.role == "assistant" and message.run_id == second.run_id
+    )
+    assert answer.content[0].text == UNSUPPORTED_CONSTRAINT_SUMMARY
+    assert [item.type for item in answer.content] == ["text"]
+    assert answer.evidence_ids == []
+    event_types = [
+        event.type for event in await events.list_events(run_id=second.run_id)
+    ]
+    assert "tool.started" not in event_types
 
 
 @pytest.mark.asyncio

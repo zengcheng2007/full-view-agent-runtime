@@ -39,6 +39,9 @@ class SemanticToolPresenting(Protocol):
     @property
     def shadowed_tool_ids(self) -> tuple[str, ...]: ...
 
+    @property
+    def canonical_tool_intent_terms(self) -> dict[str, tuple[str, ...]]: ...
+
     def present(
         self, *, auth_context: AuthContext
     ) -> SemanticToolPresentation | None: ...
@@ -105,6 +108,11 @@ class AgentContextBuilder:
             frozenset(self._semantic_presenter.shadowed_tool_ids)
             if self._semantic_presenter is not None
             else frozenset()
+        )
+        canonical_tool_intent_terms = (
+            self._semantic_presenter.canonical_tool_intent_terms
+            if self._semantic_presenter is not None
+            else {}
         )
         terminal_tool_ids = {
             result.tool_id
@@ -266,6 +274,7 @@ class AgentContextBuilder:
                     tool_id=tool_id,
                     description=descriptor.description,
                     input_schema=self._registry.get_input_schema(tool_id),
+                    required_intent_terms=canonical_tool_intent_terms.get(tool_id, ()),
                 )
             )
         if (
@@ -287,6 +296,7 @@ class AgentContextBuilder:
                     tool_id=analysis_intent_presentation.tool_id,
                     description=analysis_intent_presentation.description,
                     input_schema=analysis_intent_presentation.input_schema,
+                    subject_intent_terms=analysis_intent_presentation.goal_intent_terms,
                 )
             )
         return ModelRequest(

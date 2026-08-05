@@ -35,6 +35,7 @@ class _LoopState(TypedDict):
     action: HarnessAction | None
     execution: HarnessToolExecution | None
     summary: str | None
+    use_inherited_references: bool
 
 
 class LangGraphOrchestrator(NativeOrchestrator):
@@ -142,6 +143,12 @@ class LangGraphOrchestrator(NativeOrchestrator):
                 "action": None,
                 "execution": None,
                 "summary": summary,
+                "use_inherited_references": bool(
+                    summary is not None
+                    and isinstance(action, FinishAction)
+                    and action.structured_finish is not None
+                    and action.structured_finish.kind == "reference_only"
+                ),
             }
 
         def route_plan(state: _LoopState) -> str:
@@ -226,6 +233,7 @@ class LangGraphOrchestrator(NativeOrchestrator):
                     "action": None,
                     "execution": None,
                     "summary": None,
+                    "use_inherited_references": False,
                 }
             try:
                 final = await compiled.ainvoke(graph_input, config)
@@ -263,4 +271,12 @@ class LangGraphOrchestrator(NativeOrchestrator):
         control = final["control"]
         if control is None:
             raise RuntimeError("LangGraph loop finalized without Harness state")
-        return HarnessResult(summary=summary, state=control.state)
+        return HarnessResult(
+            summary=summary,
+            state=control.state,
+            # Checkpoints written before this field existed remain readable;
+            # absence must fail closed to no historical references.
+            use_inherited_references=bool(
+                final.get("use_inherited_references", False)
+            ),
+        )

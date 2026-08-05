@@ -186,18 +186,27 @@ def _specialized_subject_intent_stop(
     request: ModelRequest,
 ) -> FinishAction | None:
     """Stop silent broad-to-specialized substitutions at the model boundary."""
-    if not advertised.subject_intent_terms:
+    if not advertised.subject_intent_terms and not advertised.required_intent_terms:
         return None
     arguments = getattr(call, "arguments", None)
     if not isinstance(arguments, dict):
         return None
+    required_terms = advertised.required_intent_terms
     spec = arguments.get("spec")
-    if not isinstance(spec, dict):
-        return None
-    subject = spec.get("subject")
-    if not isinstance(subject, str):
-        return None
-    required_terms = advertised.subject_intent_terms.get(subject, ())
+    if isinstance(spec, dict) and isinstance(spec.get("subject"), str):
+        required_terms = advertised.subject_intent_terms.get(
+            str(spec["subject"]), required_terms
+        )
+    goals = arguments.get("goals")
+    if isinstance(goals, list):
+        required_terms = tuple(
+            dict.fromkeys(
+                term
+                for goal in goals
+                if isinstance(goal, str)
+                for term in advertised.subject_intent_terms.get(goal, ())
+            )
+        ) or required_terms
     if not required_terms:
         return None
     latest_user_message = next(
@@ -210,13 +219,20 @@ def _specialized_subject_intent_stop(
     )
     if any(term in latest_user_message for term in required_terms):
         return None
-    if subject == "population" and required_terms == ("独居老人",):
-        return FinishAction(
+    if required_terms == ("独居老人",):
+        structured = StructuredFinish(
+            kind="capability",
             summary=(
                 "当前接入的人口数据能力仅支持独居老人统计，不能把一般人口查询"
                 "替换为独居老人数据。请明确查询独居老人，或先接入总人口指标能力。"
             ),
-            legacy=True,
+            limitations=["unsupported_requested_constraint"],
+        )
+        return FinishAction(
+            summary=structured.summary,
+            structured_finish=structured,
+            legacy=False,
+            server_authored=True,
         )
     return FinishAction(
         summary=(

@@ -313,6 +313,16 @@ class NativeOrchestrator(OrchestrationPort):
         )
         tool_results = list(harness_result.state.tool_results)
         if not tool_results:
+            inherited_result_ids = (
+                harness_result.state.inherited_result_ids
+                if harness_result.use_inherited_references
+                else ()
+            )
+            inherited_evidence_ids = (
+                harness_result.state.inherited_evidence_ids
+                if harness_result.use_inherited_references
+                else ()
+            )
             await self._complete_success(
                 user_id=user_id,
                 run=running,
@@ -323,9 +333,9 @@ class NativeOrchestrator(OrchestrationPort):
                         result_id=result_id,
                         label="沿用会话中已验证的结果",
                     )
-                    for result_id in harness_result.state.inherited_result_ids
+                    for result_id in inherited_result_ids
                 ],
-                evidence_ids=list(harness_result.state.inherited_evidence_ids),
+                evidence_ids=list(inherited_evidence_ids),
                 warning_count=0,
             )
             return

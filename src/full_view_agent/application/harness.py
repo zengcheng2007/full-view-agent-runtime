@@ -8,6 +8,7 @@ from full_view_agent.application.answer_claims import (
     CLARIFICATION_SUMMARY,
     DENIAL_SUMMARY,
     FAILURE_SUMMARY,
+    UNSUPPORTED_CONSTRAINT_SUMMARY,
     StructuredFinish,
     assess_structured_finish,
 )
@@ -63,6 +64,10 @@ class FinishAction:
     structured_finish: StructuredFinish | None = None
     structured_finish_error: str | None = None
     legacy: bool = False
+    # Only deterministic server logic may set this. It permits a more precise
+    # capability-boundary explanation while model-authored text remains
+    # replaced by the fixed safe template.
+    server_authored: bool = False
 
 
 @dataclass(frozen=True)
@@ -100,6 +105,9 @@ class HarnessState:
 class HarnessResult:
     summary: str
     state: HarnessState
+    # Historical Result cards are an explicit completion decision, never an
+    # automatic side effect of merely having inherited grounding in context.
+    use_inherited_references: bool = False
 
 
 @dataclass(frozen=True)
@@ -344,13 +352,29 @@ class DeterministicCompletionValidator:
                 "failure": FAILURE_SUMMARY,
             }.get(finish_kind)
             if finish_kind in {"capability", "clarification"}:
-                accepted = not state.tool_results and not has_inherited_reference
+                # Historical grounding belongs to earlier runs. It must not
+                # force an unrelated unsupported/clarification response to
+                # masquerade as a reference-only follow-up.
+                accepted = not state.tool_results
                 return CompletionAssessment(
                     status="accept" if accepted else "revise",
                     reason_code=(
                         finish_kind if accepted else f"structured_{finish_kind}_state_mismatch"
                     ),
-                    safe_summary=non_data_summary if accepted else None,
+                    safe_summary=(
+                        action.summary
+                        if accepted
+                        and finish_kind == "capability"
+                        and action.structured_finish.limitations
+                        == ["unsupported_requested_constraint"]
+                        and action.server_authored
+                        else UNSUPPORTED_CONSTRAINT_SUMMARY
+                        if accepted
+                        and finish_kind == "capability"
+                        and action.structured_finish.limitations
+                        == ["unsupported_requested_constraint"]
+                        else non_data_summary if accepted else None
+                    ),
                     feedback=(
                         None
                         if accepted
@@ -725,7 +749,14 @@ class AgentHarness:
                     control=control,
                 )
                 if summary is not None:
-                    return HarnessResult(summary=summary, state=control.state)
+                    return HarnessResult(
+                        summary=summary,
+                        state=control.state,
+                        use_inherited_references=(
+                            action.structured_finish is not None
+                            and action.structured_finish.kind == "reference_only"
+                        ),
+                    )
                 continue
             if not isinstance(action, ToolAction):
                 raise ModelContractError("unsupported Harness action")
