@@ -278,6 +278,7 @@ class AgentContextBuilder:
                     description=semantic_presentation.description,
                     input_schema=semantic_presentation.input_schema,
                     server_arguments=semantic_presentation.server_arguments,
+                    subject_intent_terms=semantic_presentation.subject_intent_terms,
                 )
             )
         if analysis_intent_presentation is not None:

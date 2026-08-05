@@ -1,7 +1,7 @@
 schema_version: "1.0"
 case_id: q21-xihu-overview-three-dimensions
 description: "Q21/S5: 只保留人口、房屋和事件三个维度（用户约束和Tool裁剪）"
-user_message: 只保留人口、房屋和事件三个维度。
+user_message: 只保留独居老人、房屋和事件三个维度。
 auth:
   area_codes: ["3301"]
   datasets: [administrative_area, population, housing, event, governance_objects]

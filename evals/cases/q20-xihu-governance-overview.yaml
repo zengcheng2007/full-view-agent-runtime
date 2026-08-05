@@ -1,7 +1,7 @@
 schema_version: "1.0"
 case_id: q20-xihu-governance-overview
 description: "Q20/S5: 给我一份西湖区治理要素总览（人房企事组合和摘要）"
-user_message: 给我一份西湖区治理要素总览。
+user_message: 给我一份西湖区治理要素总览，人口维度仅统计独居老人。
 auth:
   area_codes: ["3301"]
   datasets: [administrative_area, population, housing, event, governance_objects]

@@ -1,7 +1,7 @@
 schema_version: "1.0"
 case_id: s5-comprehensive-overview
 description: "S5: 西湖区治理要素综合概览（组合多Tool）"
-user_message: 给我一份西湖区治理要素综合概览，包括人口、出租房和事件办结率
+user_message: 给我一份西湖区治理要素综合概览，包括独居老人、出租房和事件办结率
 auth:
   area_codes: ["3301"]
   datasets: [administrative_area, population, housing, event]

@@ -1,7 +1,7 @@
 schema_version: "1.0"
 case_id: q22-xihu-overview-freshness
 description: "Q22/S5: 哪项数据更新时间最早（Evidence时效比较）"
-user_message: 哪项数据更新时间最早？
+user_message: 独居老人、出租房和事件三项数据中，哪项更新时间最早？
 auth:
   area_codes: ["3301"]
   datasets: [administrative_area, population, housing, event, governance_objects]

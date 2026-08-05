@@ -1,7 +1,7 @@
 schema_version: "1.0"
 case_id: q03-xihu-solitary-elderly-map
 description: "Q03/S1: 把独居老人街道汇总结果在地图上显示（继承结果引用、地图分色命令与回执）"
-user_message: 把刚才的结果在地图上显示。
+user_message: 把西湖区独居老人按街道汇总的结果在地图上显示。
 auth:
   area_codes: ["3301"]
   datasets: [administrative_area, population, housing, event, governance_objects]

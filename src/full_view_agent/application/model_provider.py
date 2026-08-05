@@ -20,6 +20,11 @@ class ModelToolDefinition:
     # Server-owned arguments are never sent to the model. ModelPlanner injects
     # them into the accepted ToolAction before it reaches a durable checkpoint.
     server_arguments: dict[str, object] = field(default_factory=dict)
+    # Some catalog subjects are narrower than their historical internal IDs.
+    # These server-side requirements prevent the model from silently replacing
+    # a broad user request with a specialized dataset (for example, general
+    # population -> solitary elderly). Providers do not serialize this field.
+    subject_intent_terms: dict[str, tuple[str, ...]] = field(default_factory=dict)
 
 
 @dataclass(frozen=True)

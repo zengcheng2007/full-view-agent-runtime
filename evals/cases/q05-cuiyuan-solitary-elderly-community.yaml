@@ -1,7 +1,7 @@
 schema_version: "1.0"
 case_id: q05-cuiyuan-solitary-elderly-community
 description: "Q05/S1: 改为查看翠苑街道，按社区汇总（区划切换、下一级分组、重新鉴权）"
-user_message: 改为查看翠苑街道，按社区汇总。
+user_message: 查看翠苑街道独居老人数量，按社区汇总。
 auth:
   area_codes: ["3301"]
   datasets: [administrative_area, population, housing, event, governance_objects]

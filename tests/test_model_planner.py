@@ -106,6 +106,136 @@ async def test_model_planner_returns_one_advertised_tool_action() -> None:
 
 
 @pytest.mark.asyncio
+async def test_model_planner_blocks_specialized_semantic_subject_without_explicit_user_intent(
+) -> None:
+    semantic_tool = ModelToolDefinition(
+        tool_id="governance.semantic_query",
+        description="受控语义查询",
+        input_schema={"type": "object"},
+        server_arguments={
+            "catalog_version": "catalog-v1",
+            "catalog_fingerprint": "sha256:catalog",
+        },
+        subject_intent_terms={"population": ("独居老人",)},
+    )
+
+    class ContextBuilder:
+        async def build(self, **_kwargs) -> ModelRequest:
+            return ModelRequest(
+                messages=(
+                    ModelMessage(
+                        role="user",
+                        content="西湖区人口按街道汇总，按人数从高到低排序",
+                    ),
+                ),
+                tools=(semantic_tool,),
+            )
+
+    provider = QueueModelProvider(
+        ModelResponse(
+            content=None,
+            tool_calls=(
+                ModelToolCall(
+                    tool_id="governance.semantic_query",
+                    arguments={
+                        "spec": {
+                            "subject": "population",
+                            "metrics": ["person_count"],
+                            "scope": {"area_code": "330106"},
+                            "group_by": ["street"],
+                            "filters": [
+                                {
+                                    "field": "person_category",
+                                    "operator": "eq",
+                                    "value": "solitary_elderly",
+                                }
+                            ],
+                        }
+                    },
+                ),
+            ),
+            finish_reason="tool_calls",
+        )
+    )
+
+    action = await ModelPlanner(
+        provider=provider,
+        context_builder=ContextBuilder(),
+        user_id="user-01",
+        auth_context=population_auth_context(),
+    ).decide(HarnessState())
+
+    assert action == FinishAction(
+        summary=(
+            "当前接入的人口数据能力仅支持独居老人统计，不能把一般人口查询"
+            "替换为独居老人数据。请明确查询独居老人，或先接入总人口指标能力。"
+        ),
+        legacy=True,
+    )
+
+
+@pytest.mark.asyncio
+async def test_model_planner_allows_specialized_semantic_subject_for_explicit_user_intent() -> None:
+    semantic_tool = ModelToolDefinition(
+        tool_id="governance.semantic_query",
+        description="受控语义查询",
+        input_schema={"type": "object"},
+        server_arguments={"catalog_version": "catalog-v1"},
+        subject_intent_terms={"population": ("独居老人",)},
+    )
+
+    class ContextBuilder:
+        async def build(self, **_kwargs) -> ModelRequest:
+            return ModelRequest(
+                messages=(
+                    ModelMessage(
+                        role="user",
+                        content="西湖区独居老人按街道汇总",
+                    ),
+                ),
+                tools=(semantic_tool,),
+            )
+
+    provider = QueueModelProvider(
+        ModelResponse(
+            content=None,
+            tool_calls=(
+                ModelToolCall(
+                    tool_id="governance.semantic_query",
+                    arguments={
+                        "spec": {
+                            "subject": "population",
+                            "metrics": ["person_count"],
+                            "scope": {"area_code": "330106"},
+                            "group_by": ["street"],
+                            "filters": [
+                                {
+                                    "field": "person_category",
+                                    "operator": "eq",
+                                    "value": "solitary_elderly",
+                                }
+                            ],
+                        }
+                    },
+                ),
+            ),
+            finish_reason="tool_calls",
+        )
+    )
+
+    action = await ModelPlanner(
+        provider=provider,
+        context_builder=ContextBuilder(),
+        user_id="user-01",
+        auth_context=population_auth_context(),
+    ).decide(HarnessState())
+
+    assert isinstance(action, ToolAction)
+    assert action.tool_id == "governance.semantic_query"
+    assert action.arguments["catalog_version"] == "catalog-v1"
+
+
+@pytest.mark.asyncio
 async def test_model_planner_intercepts_structured_finish_tool() -> None:
     provider = QueueModelProvider(
         ModelResponse(

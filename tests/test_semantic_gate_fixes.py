@@ -171,6 +171,17 @@ def test_presenter_marks_catalog_required_filters_as_mandatory() -> None:
     assert "查询必须携带" in presentation.description
 
 
+def test_presenter_identifies_population_binding_as_explicit_solitary_elderly_only() -> None:
+    presentation = SemanticToolPresenter(catalog=SemanticCatalog.default()).present(
+        auth_context=population_auth_context()
+    )
+
+    assert presentation is not None
+    assert "population（独居老人指标）" in presentation.description
+    assert "仅当用户明确询问独居老人时使用" in presentation.description
+    assert presentation.subject_intent_terms == {"population": ("独居老人",)}
+
+
 def test_resolver_rejects_stale_server_pinned_catalog_version() -> None:
     catalog = SemanticCatalog.default()
     resolver = SemanticActionResolver(

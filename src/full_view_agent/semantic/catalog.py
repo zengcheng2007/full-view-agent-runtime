@@ -148,6 +148,10 @@ class SubjectDefinition(ContractModel):
     max_group_by: int = Field(default=0, ge=0, le=2)
     filters: tuple[FilterDefinition, ...] = ()
     required_filters: tuple[RequiredFilter, ...] = ()
+    # When non-empty, the user must explicitly mention at least one term before
+    # this specialized subject may execute. This is an intent-integrity rule,
+    # not a hint for the model to infer a narrower population category.
+    required_user_terms: tuple[str, ...] = ()
     supports_order_by: bool = False
     supports_time_range: bool = False
     output_forms: tuple[OutputForm, ...] = ("table",)
@@ -203,6 +207,7 @@ class SubjectCapabilityView(ContractModel):
     group_by: tuple[GroupBySummary, ...]
     filters: tuple[FilterSummary, ...]
     required_filters: tuple[RequiredFilterSummary, ...] = ()
+    required_user_terms: tuple[str, ...] = ()
     output_forms: tuple[str, ...]
     result_shapes: tuple[ResultShapeSummary, ...]
 
@@ -216,7 +221,7 @@ class ModelCapabilityView(ContractModel):
 def _population() -> SubjectDefinition:
     return SubjectDefinition(
         subject_id="population",
-        display_name="人口指标",
+        display_name="独居老人指标",
         logical_dataset_id="population",
         required_entitlement="governance.population.aggregate.read",
         # 真实 Adapter 仅支持区县(6)/街道(9)/社区(12)三级 scope 的独居老人
@@ -249,6 +254,7 @@ def _population() -> SubjectDefinition:
                 value="solitary_elderly",
             ),
         ),
+        required_user_terms=("独居老人",),
         output_forms=("table", "choropleth"),
         result_shapes=(
             ResultShape(
@@ -561,6 +567,7 @@ class SemanticCatalog:
                             )
                             for required_filter in subject.required_filters
                         ),
+                        required_user_terms=subject.required_user_terms,
                         output_forms=tuple(subject.output_forms),
                         result_shapes=tuple(
                             ResultShapeSummary(

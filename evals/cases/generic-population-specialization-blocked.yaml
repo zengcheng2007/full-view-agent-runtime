@@ -1,0 +1,31 @@
+schema_version: "1.0"
+case_id: generic-population-specialization-blocked
+description: 普通人口请求不得被静默替换为独居老人专用数据
+user_message: 西湖区人口按街道汇总，按人数从高到低排序
+auth:
+  area_codes: ["330106"]
+  datasets: [population]
+  entitlements: [governance.population.aggregate.read]
+  field_policy_set: governance_analyst_v1
+model_steps:
+  - type: tool_call
+    tool_id: governance.semantic_query
+    arguments:
+      spec:
+        subject: population
+        metrics: [person_count]
+        scope: {area_code: "330106"}
+        filters:
+          - field: person_category
+            operator: eq
+            value: solitary_elderly
+        group_by: [street]
+    total_tokens: 120
+expected:
+  terminal_status: completed
+  outcome: success
+  completion_reason_code: goal_completed
+  tool_ids: []
+  min_evidence_count: 0
+  required_event_types: [run.completed]
+  required_answer_substrings: [仅支持独居老人, 不能把一般人口查询替换为独居老人数据]

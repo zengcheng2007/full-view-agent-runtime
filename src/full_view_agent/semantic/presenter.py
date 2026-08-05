@@ -37,6 +37,7 @@ class SemanticToolPresentation:
     description: str
     input_schema: dict[str, object]
     server_arguments: dict[str, object]
+    subject_intent_terms: dict[str, tuple[str, ...]]
     # Canonical capabilities represented by this model-facing semantic Tool.
     # They remain executable internally but must not be advertised in parallel,
     # otherwise the model can bypass Catalog validation or execute twice.
@@ -106,6 +107,11 @@ class SemanticToolPresenter:
                 "catalog_version": self._catalog.catalog_version,
                 "catalog_fingerprint": self._catalog.execution_fingerprint,
             },
+            subject_intent_terms={
+                subject.subject_id: subject.required_user_terms
+                for subject in bindable
+                if subject.required_user_terms
+            },
             shadowed_tool_ids=self.shadowed_tool_ids,
         )
 
@@ -164,6 +170,13 @@ class SemanticToolPresenter:
             if required_filters
             else ""
         )
+        required_intent_description = (
+            "仅当用户明确询问"
+            + "或".join(subject.required_user_terms)
+            + "时使用，不得把一般人口查询替换为该专用数据；"
+            if subject.required_user_terms
+            else ""
+        )
         return (
             f"- {subject.subject_id}（{subject.display_name}）："
             f"scope层级 {list(subject.scope_levels)}；"
@@ -171,6 +184,7 @@ class SemanticToolPresenter:
             f"group_by {group_by}；"
             f"filters {filters}；"
             f"{required_filter_description}"
+            f"{required_intent_description}"
             f"输出形态 {list(subject.output_forms)}；"
             f"结果粒度 {result_grains}。"
         )
