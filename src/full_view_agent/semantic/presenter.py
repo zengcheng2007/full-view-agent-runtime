@@ -38,6 +38,7 @@ class SemanticToolPresentation:
     input_schema: dict[str, object]
     server_arguments: dict[str, object]
     subject_intent_terms: dict[str, tuple[str, ...]]
+    subject_trigger_terms: dict[str, tuple[str, ...]]
     # Canonical capabilities represented by this model-facing semantic Tool.
     # They remain executable internally but must not be advertised in parallel,
     # otherwise the model can bypass Catalog validation or execute twice.
@@ -122,6 +123,11 @@ class SemanticToolPresenter:
                 subject.subject_id: subject.required_user_terms
                 for subject in bindable
                 if subject.required_user_terms
+            },
+            subject_trigger_terms={
+                subject.subject_id: subject.trigger_user_terms
+                for subject in bindable
+                if subject.required_user_terms and subject.trigger_user_terms
             },
             shadowed_tool_ids=self.shadowed_tool_ids,
         )

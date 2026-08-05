@@ -175,6 +175,8 @@ def _validate_population_surface(
         errors.append("population Catalog lacks mandatory solitary_elderly filter")
     if "独居老人" not in subject.required_user_terms:
         errors.append("population Catalog does not require explicit solitary-elderly intent")
+    if "人口" not in subject.trigger_user_terms:
+        errors.append("population Catalog cannot detect broad population requests")
 
 
 def _validate_housing_switch(

@@ -179,6 +179,43 @@ async def test_model_planner_blocks_specialized_semantic_subject_without_explici
 
 
 @pytest.mark.asyncio
+async def test_model_planner_blocks_known_broad_specialized_request_before_model_call() -> None:
+    semantic_tool = ModelToolDefinition(
+        tool_id="governance.semantic_query",
+        description="受控语义查询",
+        input_schema={"type": "object"},
+        subject_intent_terms={"population": ("独居老人",)},
+        subject_trigger_terms={"population": ("人口",)},
+    )
+
+    class ContextBuilder:
+        async def build(self, **_kwargs) -> ModelRequest:
+            return ModelRequest(
+                messages=(
+                    ModelMessage(
+                        role="user",
+                        content="西湖区人口按街道汇总，按人数从高到低排序",
+                    ),
+                ),
+                tools=(semantic_tool,),
+            )
+
+    provider = QueueModelProvider()
+    action = await ModelPlanner(
+        provider=provider,
+        context_builder=ContextBuilder(),
+        user_id="user-01",
+        auth_context=population_auth_context(),
+    ).decide(HarnessState())
+
+    assert action.server_authored is True
+    assert action.structured_finish is not None
+    assert action.structured_finish.kind == "capability"
+    assert "仅支持独居老人" in action.summary
+    assert provider.requests == []
+
+
+@pytest.mark.asyncio
 async def test_model_planner_allows_specialized_semantic_subject_for_explicit_user_intent() -> None:
     semantic_tool = ModelToolDefinition(
         tool_id="governance.semantic_query",
@@ -186,6 +223,7 @@ async def test_model_planner_allows_specialized_semantic_subject_for_explicit_us
         input_schema={"type": "object"},
         server_arguments={"catalog_version": "catalog-v1"},
         subject_intent_terms={"population": ("独居老人",)},
+        subject_trigger_terms={"population": ("人口",)},
     )
 
     class ContextBuilder:

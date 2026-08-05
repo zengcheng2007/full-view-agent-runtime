@@ -152,6 +152,10 @@ class SubjectDefinition(ContractModel):
     # this specialized subject may execute. This is an intent-integrity rule,
     # not a hint for the model to infer a narrower population category.
     required_user_terms: tuple[str, ...] = ()
+    # Broad words that identify a request for this subject. When a subject is
+    # narrower than its historical id, these terms let the server reject the
+    # broad request before asking the model to choose a Tool.
+    trigger_user_terms: tuple[str, ...] = ()
     supports_order_by: bool = False
     supports_time_range: bool = False
     output_forms: tuple[OutputForm, ...] = ("table",)
@@ -208,6 +212,7 @@ class SubjectCapabilityView(ContractModel):
     filters: tuple[FilterSummary, ...]
     required_filters: tuple[RequiredFilterSummary, ...] = ()
     required_user_terms: tuple[str, ...] = ()
+    trigger_user_terms: tuple[str, ...] = ()
     output_forms: tuple[str, ...]
     result_shapes: tuple[ResultShapeSummary, ...]
 
@@ -255,6 +260,7 @@ def _population() -> SubjectDefinition:
             ),
         ),
         required_user_terms=("独居老人",),
+        trigger_user_terms=("人口",),
         output_forms=("table", "choropleth"),
         result_shapes=(
             ResultShape(
@@ -568,6 +574,7 @@ class SemanticCatalog:
                             for required_filter in subject.required_filters
                         ),
                         required_user_terms=subject.required_user_terms,
+                        trigger_user_terms=subject.trigger_user_terms,
                         output_forms=tuple(subject.output_forms),
                         result_shapes=tuple(
                             ResultShapeSummary(

@@ -80,6 +80,9 @@ class ModelPlanner:
             auth_context=self._auth_context,
             state=state,
         )
+        intent_stop = _specialized_request_intent_stop(request)
+        if intent_stop is not None and not state.tool_results:
+            return intent_stop
         if any(tool.tool_id == FINISH_TOOL_ID for tool in request.tools):
             raise ModelContractError("reserved finish tool cannot be a business tool")
         if not request.tools and not state.tool_results:
@@ -241,6 +244,44 @@ def _specialized_subject_intent_stop(
         ),
         legacy=True,
     )
+
+
+def _specialized_request_intent_stop(request: ModelRequest) -> FinishAction | None:
+    """Reject a known broad request before model finish-type variability matters."""
+
+    latest_user_message = next(
+        (
+            message.content or ""
+            for message in reversed(request.messages)
+            if message.role == "user"
+        ),
+        "",
+    )
+    for tool in request.tools:
+        for subject, trigger_terms in tool.subject_trigger_terms.items():
+            required_terms = tool.subject_intent_terms.get(subject, ())
+            if not required_terms or not any(
+                term in latest_user_message for term in trigger_terms
+            ):
+                continue
+            if any(term in latest_user_message for term in required_terms):
+                continue
+            if subject == "population" and required_terms == ("独居老人",):
+                structured = StructuredFinish(
+                    kind="capability",
+                    summary=(
+                        "当前接入的人口数据能力仅支持独居老人统计，不能把一般人口查询"
+                        "替换为独居老人数据。请明确查询独居老人，或先接入总人口指标能力。"
+                    ),
+                    limitations=["unsupported_requested_constraint"],
+                )
+                return FinishAction(
+                    summary=structured.summary,
+                    structured_finish=structured,
+                    legacy=False,
+                    server_authored=True,
+                )
+    return None
 
 
 class ModelPlannerFactory:

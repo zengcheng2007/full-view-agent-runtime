@@ -25,6 +25,9 @@ class ModelToolDefinition:
     # a broad user request with a specialized dataset (for example, general
     # population -> solitary elderly). Providers do not serialize this field.
     subject_intent_terms: dict[str, tuple[str, ...]] = field(default_factory=dict)
+    # Broad subject words used only by the server to detect an attempted
+    # broad-to-specialized substitution before a model call is made.
+    subject_trigger_terms: dict[str, tuple[str, ...]] = field(default_factory=dict)
     # Canonical specialized Tools use this direct requirement when they are
     # exposed without a semantic facade (for example in reduced test/runtime
     # configurations). It is server metadata and is never sent to providers.
