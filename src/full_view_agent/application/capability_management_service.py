@@ -401,12 +401,22 @@ class CapabilityManagementService:
         timeout_ms: int = 8000,
         credential_ref: str | None = None,
     ) -> Connector:
+        # F4: Require non-empty path whitelist
+        if not allowed_path_prefixes:
+            raise ValueError(
+                "allowed_path_prefixes must be non-empty for security. "
+                "Connectors must specify which paths are allowed."
+            )
+
+        # F4: Validate base_url for SSRF protection
+        _validate_url_ssrf(base_url)
+
         connector = Connector(
             connector_id=connector_id,
             name=name,
             base_url=base_url,
             description=description,
-            allowed_path_prefixes=allowed_path_prefixes or [],
+            allowed_path_prefixes=allowed_path_prefixes,
             denied_hosts=denied_hosts or [],
             credential_ref=credential_ref,
             timeout_ms=timeout_ms,
@@ -420,11 +430,94 @@ class CapabilityManagementService:
         return await self._repo.list_connectors(active_only=active_only)
 
 
+def _validate_url_ssrf(url: str) -> None:
+    """F4: Validate URL to prevent SSRF attacks.
+
+    Rejects:
+    - Loopback addresses (127.0.0.0/8, ::1)
+    - Private networks (10.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16)
+    - Link-local (169.254.0.0/16, fe80::/10)
+    - Multicast (224.0.0.0/4, ff00::/8)
+    - Cloud metadata (169.254.169.254)
+    - localhost, .local, .internal domains
+    """
+    import ipaddress
+    import socket
+    from urllib.parse import urlparse
+
+    parsed = urlparse(url)
+    if not parsed.scheme or not parsed.netloc:
+        raise ValueError(f"Invalid URL: {url}")
+
+    # Reject non-HTTP(S) schemes
+    if parsed.scheme not in ("http", "https"):
+        raise ValueError(f"URL scheme must be http or https, got {parsed.scheme}")
+
+    hostname = parsed.hostname
+    if not hostname:
+        raise ValueError(f"URL must have a hostname: {url}")
+
+    # Reject localhost and internal domains
+    hostname_lower = hostname.lower()
+    if hostname_lower in ("localhost", "127.0.0.1", "::1"):
+        raise ValueError(f"Cannot use localhost or loopback: {hostname}")
+    if hostname_lower.endswith(".local") or hostname_lower.endswith(".internal"):
+        raise ValueError(f"Cannot use .local or .internal domains: {hostname}")
+
+    # Resolve hostname and check all IPs
+    try:
+        addrinfos = socket.getaddrinfo(hostname, None, socket.AF_UNSPEC, socket.SOCK_STREAM)
+    except socket.gaierror as e:
+        raise ValueError(f"Cannot resolve hostname {hostname}: {e}") from e
+
+    for addrinfo in addrinfos:
+        ip_str = addrinfo[4][0]
+        try:
+            ip = ipaddress.ip_address(ip_str)
+        except ValueError:
+            continue
+
+        # Reject private, loopback, link-local, multicast, reserved
+        if ip.is_private:
+            raise ValueError(f"URL resolves to private IP {ip_str}: {url}")
+        if ip.is_loopback:
+            raise ValueError(f"URL resolves to loopback IP {ip_str}: {url}")
+        if ip.is_link_local:
+            raise ValueError(f"URL resolves to link-local IP {ip_str}: {url}")
+        if ip.is_multicast:
+            raise ValueError(f"URL resolves to multicast IP {ip_str}: {url}")
+        if ip.is_reserved:
+            raise ValueError(f"URL resolves to reserved IP {ip_str}: {url}")
+        if ip.is_unspecified:
+            raise ValueError(f"URL resolves to unspecified IP {ip_str}: {url}")
+
+        # Specifically reject cloud metadata endpoint
+        if ip_str == "169.254.169.254":
+            raise ValueError(f"URL resolves to cloud metadata IP {ip_str}: {url}")
+
+
 def _path_allowed(connector: Connector, resource_path: str) -> bool:
-    """Check if resource_path is within connector's allowed prefixes."""
+    """F4: Check if resource_path is within connector's allowed prefixes.
+
+    Security requirements:
+    - Path whitelist must be non-empty (enforced at creation)
+    - Normalize paths to prevent ../ and // bypasses
+    - Exact prefix matching only
+    """
+    # Normalize the resource path
+    import posixpath
+    normalized_path = posixpath.normpath(resource_path)
+
+    # Reject paths with directory traversal attempts
+    if ".." in normalized_path or "//" in resource_path:
+        return False
+
+    # Must have at least one allowed prefix (enforced at creation, but double-check)
     if not connector.allowed_path_prefixes:
-        return True
+        return False
+
+    # Check if normalized path starts with any allowed prefix
     return any(
-        resource_path.startswith(prefix)
+        normalized_path.startswith(prefix.rstrip("/"))
         for prefix in connector.allowed_path_prefixes
     )

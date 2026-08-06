@@ -1,9 +1,0 @@
-INFO:     Loading environment from '.env'
-D:\01code\000qlxxst\全量信息视图智能体\agent-runtime\.venv\Lib\site-packages\langgraph\checkpoint\base\__init__.py:17: LangChainPendingDeprecationWarning: The default value of `allowed_objects` will change in a future version. Pass an explicit value (e.g., allowed_objects='messages' or allowed_objects='core') to suppress this warning.
-  from langgraph.checkpoint.serde.jsonplus import JsonPlusSerializer
-INFO:     Started server process [51608]
-INFO:     Waiting for application startup.
-INFO:     Application startup complete.
-INFO:     Uvicorn running on http://0.0.0.0:18081 (Press CTRL+C to quit)
-ignoring model-supplied server-owned tool arguments: catalog_fingerprint, catalog_version
-ignoring model-supplied server-owned tool arguments: catalog_fingerprint, catalog_version

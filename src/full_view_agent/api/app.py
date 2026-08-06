@@ -14,17 +14,15 @@ from typing import Annotated, Literal, cast
 from fastapi import Depends, FastAPI, Header, Query, Request
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse, StreamingResponse
-from fastapi.security import APIKeyHeader
 from pydantic import Field, SecretStr, model_validator
 
 from full_view_agent.api._api_deps import (
     CurrentUser,
     ResponseMeta,
     UnauthenticatedError,
-    geo_token_header,
     require_geotoken,
 )
-
+from full_view_agent.api.capability_routes import create_capability_router
 from full_view_agent.application.analysis_graph import AnalysisRunOutcome
 from full_view_agent.application.analysis_plan_repository import (
     AnalysisPlanRepository,
@@ -36,6 +34,9 @@ from full_view_agent.application.analysis_service import AnalysisPlanningService
 from full_view_agent.application.auth_context_refresh import RunAuthContextRefresher
 from full_view_agent.application.capability_consistency import (
     validate_production_http_capabilities,
+)
+from full_view_agent.application.capability_management_service import (
+    CapabilityManagementService,
 )
 from full_view_agent.application.capability_service import ToolAdapter
 from full_view_agent.application.context_builder import AgentContextBuilder
@@ -65,6 +66,11 @@ from full_view_agent.application.errors import (
     RunStateConflict,
     SessionActiveRunConflict,
     WorkflowNotAvailable,
+)
+from full_view_agent.application.model_config_service import (
+    EncryptedModelConfigKeyStore,
+    InMemoryModelConfigKeyStore,
+    ModelConfigService,
 )
 from full_view_agent.application.model_planner import ModelPlannerFactory
 from full_view_agent.application.model_provider import ModelProvider
@@ -104,7 +110,6 @@ from full_view_agent.domain.models import (
     FrontendCommandReceipt,
     HousingAreaGroupRow,
     HousingLeaseTypeRow,
-    LegacyIdentitySnapshot,
     PendingInputRequest,
     PopulationMetricRow,
     ResultMetadata,
@@ -126,6 +131,12 @@ from full_view_agent.infrastructure.analysis_run_binding_store import (
 from full_view_agent.infrastructure.auth_context_store import (
     InMemoryRunAuthContextStore,
 )
+from full_view_agent.infrastructure.capability_repository import (
+    InMemoryCapabilityRepository,
+    InMemoryModelConfigRepository,
+    PostgresCapabilityRepository,
+    PostgresModelConfigRepository,
+)
 from full_view_agent.infrastructure.credential_broker import (
     EncryptedSqliteCredentialBroker,
     UnconfiguredCredentialBroker,
@@ -144,18 +155,6 @@ from full_view_agent.infrastructure.openai_compatible_model import (
 )
 from full_view_agent.infrastructure.postgres_persistence import PostgresAgentPersistence
 from full_view_agent.infrastructure.redis_event_notifier import RedisEventNotifier
-from full_view_agent.infrastructure.capability_repository import (
-    InMemoryCapabilityRepository,
-    InMemoryModelConfigRepository,
-)
-from full_view_agent.application.capability_management_service import (
-    CapabilityManagementService,
-)
-from full_view_agent.application.model_config_service import (
-    ModelConfigService,
-    InMemoryModelConfigKeyStore,
-)
-from full_view_agent.api.capability_routes import create_capability_router
 
 logger = logging.getLogger(__name__)
 
@@ -507,26 +506,153 @@ class RuntimeContainer:
             )
         else:
             self.tool_registry = self.tool_registry or ToolRegistry.default()
-        if self.model_provider is None and model_provider_mode == "openai_compatible":
-            model_base_url = os.getenv("FULL_VIEW_MODEL_BASE_URL")
-            model_name = os.getenv("FULL_VIEW_MODEL_NAME")
-            if not model_base_url:
-                raise RuntimeError(
-                    "FULL_VIEW_MODEL_BASE_URL is required for openai_compatible"
-                )
-            if not model_name:
-                raise RuntimeError(
-                    "FULL_VIEW_MODEL_NAME is required for openai_compatible"
-                )
-            model_api_key = os.getenv("FULL_VIEW_MODEL_API_KEY")
-            self.model_provider = OpenAICompatibleModelProvider(
-                base_url=model_base_url,
-                model=model_name,
-                api_key=SecretStr(model_api_key) if model_api_key else None,
-                timeout_seconds=float(
-                    os.getenv("FULL_VIEW_MODEL_TIMEOUT_SECONDS", "60")
-                ),
+
+        # P2: Initialize Capability Center services EARLY so we can check for
+        # enabled model configs before creating model_provider
+        if database_url:
+            self.capability_repository = PostgresCapabilityRepository(
+                dsn=database_url,
+                schema=os.getenv("FULL_VIEW_POSTGRES_SCHEMA", "full_view_agent"),
             )
+            model_config_repo = PostgresModelConfigRepository(
+                dsn=database_url,
+                schema=os.getenv("FULL_VIEW_POSTGRES_SCHEMA", "full_view_agent"),
+            )
+            # Use encrypted key store for production persistence
+            credential_key = _configured_credential_key()
+            if credential_key:
+                model_config_key_store = EncryptedModelConfigKeyStore(
+                    encryption_key=credential_key
+                )
+            else:
+                # Fallback to in-memory for development without credential key
+                model_config_key_store = InMemoryModelConfigKeyStore()
+        else:
+            self.capability_repository = InMemoryCapabilityRepository()
+            model_config_repo = InMemoryModelConfigRepository()
+            model_config_key_store = InMemoryModelConfigKeyStore()
+
+        self.capability_management_service = CapabilityManagementService(
+            repository=self.capability_repository,
+        )
+        self.model_config_service = ModelConfigService(
+            repository=model_config_repo,
+            key_store=model_config_key_store,
+        )
+
+        # P2-1: Load published dynamic tools and merge into ToolRegistry
+        # This bridges the Capability Center CRUD with the execution path
+        if self.tool_registry is not None:
+            try:
+                import asyncio
+
+                from full_view_agent.application.dynamic_tool_bridge import (
+                    build_dynamic_tool_registry_entries,
+                    load_published_tools,
+                )
+
+                # Safely get or create an event loop for sync initialization
+                try:
+                    _dt_loop = asyncio.get_running_loop()
+                    # Already running - can't use run_until_complete
+                    _dt_loop = None
+                except RuntimeError:
+                    try:
+                        _dt_loop = asyncio.get_event_loop()
+                    except RuntimeError:
+                        _dt_loop = asyncio.new_event_loop()
+                        asyncio.set_event_loop(_dt_loop)
+
+                if _dt_loop is not None and not _dt_loop.is_running():
+                    # Load published tools from capability repository
+                    published_tools = _dt_loop.run_until_complete(
+                        load_published_tools(self.capability_repository)
+                    )
+
+                    if published_tools:
+                        # Convert to registry entries
+                        dynamic_manifests, dynamic_descriptors = (
+                            build_dynamic_tool_registry_entries(published_tools)
+                        )
+
+                        # Extract input schemas from tools
+                        dynamic_input_schemas = {
+                            tool.capability_id: tool.input_schema
+                            for tool in published_tools
+                            if tool.input_schema
+                        }
+
+                        # Merge into existing registry
+                        self.tool_registry = self.tool_registry.merge_dynamic(
+                            manifests=dynamic_manifests,
+                            descriptors=dynamic_descriptors,
+                            dynamic_input_schemas=dynamic_input_schemas,
+                        )
+                        logger.info(
+                            f"Merged {len(dynamic_manifests)} dynamic tools into ToolRegistry"
+                        )
+            except Exception as e:
+                logger.warning(
+                    f"Failed to load dynamic tools from capability repository: {e}. "
+                    "Continuing with static tools only."
+                )
+
+        if self.model_provider is None and model_provider_mode == "openai_compatible":
+            # Check if there's an enabled model config in the database
+            import asyncio
+            try:
+                loop = asyncio.get_event_loop()
+            except RuntimeError:
+                loop = asyncio.new_event_loop()
+                asyncio.set_event_loop(loop)
+
+            enabled_config = None
+            if database_url:
+                try:
+                    enabled_config = loop.run_until_complete(
+                        self.model_config_service.resolve_for_runtime()
+                    )
+                except Exception as e:
+                    logger.warning(
+                        f"Failed to resolve model config from database: {e}. "
+                        "Falling back to environment variables."
+                    )
+
+            if enabled_config:
+                # Use database config
+                logger.info(
+                    f"Using database model config: {enabled_config.name} "
+                    f"({enabled_config.model_name})"
+                )
+                self.model_provider = OpenAICompatibleModelProvider(
+                    base_url=enabled_config.api_base_url,
+                    model=enabled_config.model_name,
+                    api_key=SecretStr(enabled_config.api_key_secret),
+                    timeout_seconds=float(enabled_config.timeout_seconds),
+                )
+            else:
+                # Fallback to environment variables
+                model_base_url = os.getenv("FULL_VIEW_MODEL_BASE_URL")
+                model_name = os.getenv("FULL_VIEW_MODEL_NAME")
+                if not model_base_url:
+                    raise RuntimeError(
+                        "FULL_VIEW_MODEL_BASE_URL is required for openai_compatible "
+                        "when no enabled model config exists in database"
+                    )
+                if not model_name:
+                    raise RuntimeError(
+                        "FULL_VIEW_MODEL_NAME is required for openai_compatible "
+                        "when no enabled model config exists in database"
+                    )
+                model_api_key = os.getenv("FULL_VIEW_MODEL_API_KEY")
+                self.model_provider = OpenAICompatibleModelProvider(
+                    base_url=model_base_url,
+                    model=model_name,
+                    api_key=SecretStr(model_api_key) if model_api_key else None,
+                    timeout_seconds=float(
+                        os.getenv("FULL_VIEW_MODEL_TIMEOUT_SECONDS", "60")
+                    ),
+                )
         # S1-A：语义入口与既有能力栈共享一份接线（Catalog/Resolver/
         # Executor/Fingerprinter/Presenter），Native 与 LangGraph 走同一
         # Harness 包装，不改变任何既有 Tool 的行为。
@@ -626,17 +752,6 @@ class RuntimeContainer:
                 ),
                 binding_store=self.analysis_binding_store,
             )
-        # P2: Initialize Capability Center services
-        self.capability_repository = InMemoryCapabilityRepository()
-        self.capability_management_service = CapabilityManagementService(
-            repository=self.capability_repository,
-        )
-        model_config_repo = InMemoryModelConfigRepository()
-        model_config_key_store = InMemoryModelConfigKeyStore()
-        self.model_config_service = ModelConfigService(
-            repository=model_config_repo,
-            key_store=model_config_key_store,
-        )
 
     def schedule_run(self, *, user_id: str, run_id: str) -> None:
         """Delegate scheduling to the OrchestrationPort."""

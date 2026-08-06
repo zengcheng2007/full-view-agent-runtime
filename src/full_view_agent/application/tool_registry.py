@@ -34,12 +34,14 @@ class ToolRegistry:
         manifests: list[InternalToolManifest],
         descriptors: list[ModelToolDescriptor],
         housing_next_area_enabled: bool = True,
+        dynamic_input_schemas: dict[str, dict[str, object]] | None = None,
     ) -> None:
         self._manifests = {manifest.tool_id: manifest for manifest in manifests}
         self._descriptors = {
             descriptor.tool_id: descriptor for descriptor in descriptors
         }
         self._housing_next_area_enabled = housing_next_area_enabled
+        self._dynamic_input_schemas = dynamic_input_schemas or {}
 
     @classmethod
     def default(
@@ -234,6 +236,10 @@ class ToolRegistry:
 
     def get_input_schema(self, tool_id: str) -> dict[str, object]:
         self.get_manifest(tool_id)
+        # Check if this is a dynamic tool with a custom input schema
+        if tool_id in self._dynamic_input_schemas:
+            return self._dynamic_input_schemas[tool_id]
+        # Otherwise use the static input model
         schema = _INPUT_MODELS[tool_id].model_json_schema(mode="validation")
         if (
             tool_id == "governance.query_housing_metrics"
@@ -248,10 +254,54 @@ class ToolRegistry:
         unknown = tool_ids.difference(self._manifests)
         if unknown:
             raise ResourceNotFound("tool not found")
+        # Preserve dynamic input schemas for the subset
+        subset_dynamic_schemas = {
+            tool_id: schema
+            for tool_id, schema in self._dynamic_input_schemas.items()
+            if tool_id in tool_ids
+        }
         return ToolRegistry(
             manifests=[self._manifests[tool_id] for tool_id in sorted(tool_ids)],
             descriptors=[self._descriptors[tool_id] for tool_id in sorted(tool_ids)],
             housing_next_area_enabled=self._housing_next_area_enabled,
+            dynamic_input_schemas=subset_dynamic_schemas,
+        )
+
+    def merge_dynamic(
+        self,
+        *,
+        manifests: list[InternalToolManifest],
+        descriptors: list[ModelToolDescriptor],
+        dynamic_input_schemas: dict[str, dict[str, object]] | None = None,
+    ) -> "ToolRegistry":
+        """Create a new registry that merges static and dynamic tools.
+
+        Dynamic tools are added to the registry alongside static tools. If a
+        dynamic tool has the same tool_id as a static tool, the dynamic tool
+        takes precedence (allows overriding static tools).
+
+        Returns a new ToolRegistry; the original is not modified.
+        """
+        # Merge manifests (dynamic takes precedence on conflict)
+        merged_manifests = dict(self._manifests)
+        for manifest in manifests:
+            merged_manifests[manifest.tool_id] = manifest
+
+        # Merge descriptors (dynamic takes precedence on conflict)
+        merged_descriptors = dict(self._descriptors)
+        for descriptor in descriptors:
+            merged_descriptors[descriptor.tool_id] = descriptor
+
+        # Merge dynamic input schemas
+        merged_dynamic_schemas = dict(self._dynamic_input_schemas)
+        if dynamic_input_schemas:
+            merged_dynamic_schemas.update(dynamic_input_schemas)
+
+        return ToolRegistry(
+            manifests=list(merged_manifests.values()),
+            descriptors=list(merged_descriptors.values()),
+            housing_next_area_enabled=self._housing_next_area_enabled,
+            dynamic_input_schemas=merged_dynamic_schemas,
         )
 
 
