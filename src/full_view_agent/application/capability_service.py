@@ -2,6 +2,7 @@ import json
 from datetime import UTC, datetime
 from typing import Protocol
 
+import jsonschema
 from pydantic import BaseModel, ValidationError
 
 from full_view_agent.application.errors import (
@@ -35,6 +36,19 @@ class ToolAdapter(Protocol):
         *,
         manifest: InternalToolManifest,
         arguments: BaseModel,
+        policy_decision: PolicyDecision,
+        auth_context: AuthContext,
+    ) -> DataResult: ...
+
+
+class DynamicToolAdapter(Protocol):
+    """Adapter for executing dynamic tools via HTTP connectors."""
+
+    async def execute(
+        self,
+        *,
+        manifest: InternalToolManifest,
+        arguments: dict[str, object],
         policy_decision: PolicyDecision,
         auth_context: AuthContext,
     ) -> DataResult: ...
@@ -121,12 +135,14 @@ class CapabilityService:
         adapter: ToolAdapter,
         auth_context_refresher: AuthContextRefresher | None = None,
         denial_ledger: DenialLedger | None = None,
+        dynamic_tool_adapter: DynamicToolAdapter | None = None,
     ) -> None:
         self._registry = registry
         self._policy = policy
         self._adapter = adapter
         self._auth_context_refresher = auth_context_refresher
         self._denial_ledger = denial_ledger
+        self._dynamic_tool_adapter = dynamic_tool_adapter
 
     async def execute(
         self,
@@ -137,30 +153,60 @@ class CapabilityService:
         auth_context: AuthContext,
     ) -> ToolResult:
         manifest = self._registry.get_manifest(tool_id)
-        input_model = TOOL_INPUT_MODELS[tool_id]
-        try:
-            arguments = input_model.model_validate(
-                _normalize_typed_object_fields(input_model, raw_arguments)
-            )
-        except ValidationError as exc:
-            invalid_fields = sorted(
-                {
-                    ".".join(str(part) for part in error["loc"])
-                    for error in exc.errors(include_url=False, include_input=False)
-                }
-            )
-            return ToolResult(
+
+        # Determine if this is a static or dynamic tool
+        is_static_tool = tool_id in TOOL_INPUT_MODELS
+
+        if is_static_tool:
+            # Static tool path: use Pydantic model validation
+            input_model = TOOL_INPUT_MODELS[tool_id]
+            try:
+                arguments = input_model.model_validate(
+                    _normalize_typed_object_fields(input_model, raw_arguments)
+                )
+            except ValidationError as exc:
+                invalid_fields = sorted(
+                    {
+                        ".".join(str(part) for part in error["loc"])
+                        for error in exc.errors(include_url=False, include_input=False)
+                    }
+                )
+                return ToolResult(
+                    tool_call_id=tool_call_id,
+                    tool_id=manifest.tool_id,
+                    tool_version=manifest.tool_version,
+                    status="failed",
+                    summary=(
+                        "Tool 参数不符合 Schema，请修正后重试。"
+                        f"错误字段：{', '.join(invalid_fields) or 'unknown'}。"
+                        "JSON 对象字段必须直接传对象，不能传序列化后的字符串。"
+                    ),
+                    warnings=["TOOL_ARGUMENT_VALIDATION_FAILED"],
+                )
+            # Continue with static tool execution below
+            return await self._execute_static_tool(
                 tool_call_id=tool_call_id,
-                tool_id=manifest.tool_id,
-                tool_version=manifest.tool_version,
-                status="failed",
-                summary=(
-                    "Tool 参数不符合 Schema，请修正后重试。"
-                    f"错误字段：{', '.join(invalid_fields) or 'unknown'}。"
-                    "JSON 对象字段必须直接传对象，不能传序列化后的字符串。"
-                ),
-                warnings=["TOOL_ARGUMENT_VALIDATION_FAILED"],
+                manifest=manifest,
+                arguments=arguments,
+                auth_context=auth_context,
             )
+        else:
+            # Dynamic tool path: use JSON Schema validation
+            return await self._execute_dynamic_tool(
+                tool_call_id=tool_call_id,
+                manifest=manifest,
+                raw_arguments=raw_arguments,
+                auth_context=auth_context,
+            )
+
+    async def _execute_static_tool(
+        self,
+        *,
+        tool_call_id: str,
+        manifest: InternalToolManifest,
+        arguments: BaseModel,
+        auth_context: AuthContext,
+    ) -> ToolResult:
         if self._denial_ledger is not None and await self._denial_ledger.contains(
             manifest=manifest,
             arguments=arguments,
@@ -293,6 +339,212 @@ class CapabilityService:
             warnings=final_decision.reason_codes,
         )
 
+    async def _execute_dynamic_tool(
+        self,
+        *,
+        tool_call_id: str,
+        manifest: InternalToolManifest,
+        raw_arguments: dict[str, object],
+        auth_context: AuthContext,
+    ) -> ToolResult:
+        """Execute a dynamic tool via HTTP connector.
+
+        Dynamic tools use JSON Schema validation instead of Pydantic models,
+        and are executed via the DynamicToolAdapter (HttpConnectorExecutor).
+        """
+        if self._dynamic_tool_adapter is None:
+            return ToolResult(
+                tool_call_id=tool_call_id,
+                tool_id=manifest.tool_id,
+                tool_version=manifest.tool_version,
+                status="failed",
+                summary="Dynamic tool execution is not configured.",
+                warnings=["DYNAMIC_TOOL_ADAPTER_NOT_CONFIGURED"],
+            )
+
+        # Get the input schema from the registry
+        try:
+            input_schema = self._registry.get_input_schema(manifest.tool_id)
+        except Exception as exc:
+            return ToolResult(
+                tool_call_id=tool_call_id,
+                tool_id=manifest.tool_id,
+                tool_version=manifest.tool_version,
+                status="failed",
+                summary=f"Failed to retrieve input schema: {exc}",
+                warnings=["INPUT_SCHEMA_NOT_FOUND"],
+            )
+
+        # Validate arguments against JSON Schema
+        try:
+            jsonschema.validate(instance=raw_arguments, schema=input_schema)
+        except jsonschema.ValidationError as exc:
+            path_parts = [str(p) for p in exc.absolute_path] if exc.absolute_path else []
+            error_path = ".".join(path_parts) if path_parts else "root"
+            return ToolResult(
+                tool_call_id=tool_call_id,
+                tool_id=manifest.tool_id,
+                tool_version=manifest.tool_version,
+                status="failed",
+                summary=(
+                    f"Tool 参数不符合 Schema：{exc.message} (路径: {error_path})。"
+                ),
+                warnings=["TOOL_ARGUMENT_VALIDATION_FAILED"],
+            )
+
+        # Create a minimal BaseModel wrapper for policy evaluation
+        # Dynamic tools don't have typed Pydantic models, so we use a generic wrapper
+        class DynamicToolArguments(BaseModel):
+            data: dict[str, object]
+
+            class Config:
+                arbitrary_types_allowed = True
+
+        arguments_wrapper = DynamicToolArguments(data=raw_arguments)
+
+        # Check denial ledger
+        if self._denial_ledger is not None and await self._denial_ledger.contains(
+            manifest=manifest,
+            arguments=arguments_wrapper,
+            auth_context=auth_context,
+        ):
+            return ToolResult(
+                tool_call_id=tool_call_id,
+                tool_id=manifest.tool_id,
+                tool_version=manifest.tool_version,
+                status="denied",
+                summary="当前 Run 已拒绝等价的资源范围。",
+                warnings=["DENIAL_LEDGER_MATCH"],
+            )
+
+        # Evaluate policy
+        decision = self._policy.evaluate(
+            manifest=manifest,
+            auth_context=auth_context,
+            arguments=arguments_wrapper,
+        )
+        self._verify_policy_binding(
+            manifest=manifest,
+            arguments=arguments_wrapper,
+            auth_context=auth_context,
+            decision=decision,
+            result=None,
+        )
+
+        if decision.decision == "deny":
+            await self._record_denial(
+                manifest=manifest,
+                arguments=arguments_wrapper,
+                auth_context=auth_context,
+                decision=decision,
+            )
+            return ToolResult(
+                tool_call_id=tool_call_id,
+                tool_id=manifest.tool_id,
+                tool_version=manifest.tool_version,
+                status="denied",
+                summary=decision.user_message,
+                policy=tool_result_policy(decision),
+                warnings=decision.reason_codes,
+            )
+
+        # Execute via dynamic tool adapter
+        try:
+            data_result = await self._dynamic_tool_adapter.execute(
+                manifest=manifest,
+                arguments=raw_arguments,
+                policy_decision=decision,
+                auth_context=auth_context,
+            )
+        except (
+            SemanticValidationError,
+            UpstreamContractError,
+            UpstreamTimeout,
+            UpstreamUnavailable,
+        ) as exc:
+            if isinstance(exc, SemanticValidationError):
+                summary = f"当前业务能力暂不支持该查询组合：{exc}。"
+            else:
+                summary = "现有业务服务暂时不可用。"
+            return ToolResult(
+                tool_call_id=tool_call_id,
+                tool_id=manifest.tool_id,
+                tool_version=manifest.tool_version,
+                status="failed",
+                summary=summary,
+                warnings=[exc.code],
+            )
+
+        # Apply result limits (max_result_rows)
+        final_result = _apply_result_row_limit(data_result, manifest.limits.max_result_rows)
+
+        # Post-result policy for sensitive data
+        post_decision: PolicyDecision | None = None
+        requires_post_policy = (
+            "sensitive" in manifest.data_classifications
+            or decision.expires_at <= datetime.now(UTC)
+        )
+        if requires_post_policy:
+            if self._auth_context_refresher is None:
+                raise PolicyBindingMismatch(
+                    "sensitive result requires a refreshed auth context"
+                )
+            refreshed_context = await self._auth_context_refresher.refresh(auth_context)
+            refreshed_scope = self._policy.evaluate(
+                manifest=manifest,
+                auth_context=refreshed_context,
+                arguments=arguments_wrapper,
+            )
+            self._verify_policy_binding(
+                manifest=manifest,
+                arguments=arguments_wrapper,
+                auth_context=refreshed_context,
+                decision=refreshed_scope,
+                result=None,
+            )
+            final_result = _apply_result_scope(final_result, refreshed_scope)
+            post_decision = self._policy.evaluate_post_result(
+                manifest=manifest,
+                auth_context=refreshed_context,
+                arguments=arguments_wrapper,
+                result=final_result,
+            )
+            self._verify_policy_binding(
+                manifest=manifest,
+                arguments=arguments_wrapper,
+                auth_context=refreshed_context,
+                decision=post_decision,
+                result=final_result,
+            )
+            if post_decision.decision == "deny":
+                await self._record_denial(
+                    manifest=manifest,
+                    arguments=arguments_wrapper,
+                    auth_context=refreshed_context,
+                    decision=post_decision,
+                )
+                return ToolResult(
+                    tool_call_id=tool_call_id,
+                    tool_id=manifest.tool_id,
+                    tool_version=manifest.tool_version,
+                    status="denied",
+                    summary=post_decision.user_message,
+                    policy=tool_result_policy(decision, post_decision),
+                    warnings=post_decision.reason_codes,
+                )
+
+        final_decision = post_decision or decision
+        return ToolResult(
+            tool_call_id=tool_call_id,
+            tool_id=manifest.tool_id,
+            tool_version=manifest.tool_version,
+            status="success",
+            summary="Tool 执行成功。",
+            data_result=final_result,
+            policy=tool_result_policy(decision, post_decision),
+            warnings=final_decision.reason_codes,
+        )
+
     async def _record_denial(
         self,
         *,
@@ -395,6 +647,36 @@ def _apply_result_scope(
             "result_fingerprint": canonical_fingerprint(
                 domain="data-result:object-profile:1.0.0",
                 value=visible_data,
+            ),
+        }
+    )
+
+
+def _apply_result_row_limit(result: DataResult, max_rows: int) -> DataResult:
+    """Apply max_result_rows limit to table results.
+
+    For table results, truncate rows to max_rows. For other result types,
+    return as-is.
+    """
+    from full_view_agent.domain.models import TableDataResult
+
+    if not isinstance(result, TableDataResult):
+        return result
+
+    data_rows = result.data.rows
+    if len(data_rows) <= max_rows:
+        return result
+
+    truncated_rows = data_rows[:max_rows]
+    truncated_data = result.data.model_copy(update={"rows": truncated_rows})
+    return result.model_copy(
+        update={
+            "data": truncated_data,
+            "row_count": len(truncated_rows),
+            "truncated": True,
+            "result_fingerprint": canonical_fingerprint(
+                domain="data-result:table:1.0.0",
+                value=truncated_data.model_dump(mode="json"),
             ),
         }
     )

@@ -15,6 +15,7 @@ from full_view_agent.application.capability_service import (
     AuthContextRefresher,
     CapabilityService,
     DenialLedger,
+    DynamicToolAdapter,
     ToolAdapter,
 )
 from full_view_agent.application.harness import (
@@ -61,6 +62,7 @@ def build_semantic_capability_stack(
     catalog: SemanticCatalog | None = None,
     auth_context_refresher: AuthContextRefresher | None = None,
     denial_ledger: DenialLedger | None = None,
+    dynamic_tool_adapter: DynamicToolAdapter | None = None,
 ) -> SemanticCapabilityStack:
     effective_policy = policy or MinimalPolicyAdapter()
     effective_catalog = catalog or SemanticCatalog.default(
@@ -72,6 +74,7 @@ def build_semantic_capability_stack(
         adapter=adapter,
         auth_context_refresher=auth_context_refresher,
         denial_ledger=denial_ledger,
+        dynamic_tool_adapter=dynamic_tool_adapter,
     )
     resolver = SemanticActionResolver(
         catalog=effective_catalog,

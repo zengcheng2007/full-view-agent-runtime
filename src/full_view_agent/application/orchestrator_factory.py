@@ -15,6 +15,7 @@ from full_view_agent.application.capability_service import (
     AuthContextRefresher,
     CapabilityService,
     DenialLedger,
+    DynamicToolAdapter,
     ToolAdapter,
 )
 from full_view_agent.application.model_planner import ModelPlannerFactory
@@ -47,6 +48,7 @@ def create_orchestrator(
     model_provider: ModelProvider | None = None,
     planner_factory: ModelPlannerFactory | None = None,
     semantic_stack: SemanticCapabilityStack | None = None,
+    dynamic_tool_adapter: DynamicToolAdapter | None = None,
 ) -> OrchestrationPort:
     """Build the orchestrator selected by ``FULL_VIEW_ORCHESTRATOR``.
 
@@ -73,6 +75,7 @@ def create_orchestrator(
             adapter=governance_adapter,
             auth_context_refresher=auth_context_refresher,
             denial_ledger=denial_ledger,
+            dynamic_tool_adapter=dynamic_tool_adapter,
         )
         harness = None
     observation_service = ToolObservationService(

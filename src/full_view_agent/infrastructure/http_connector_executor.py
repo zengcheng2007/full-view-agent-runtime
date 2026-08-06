@@ -81,10 +81,12 @@ class HttpConnectorExecutor:
         *,
         follow_redirects: bool = False,
         default_timeout_ms: int = 8000,
+        allow_private_networks: bool = False,
     ) -> None:
         self._repository = repository
         self._follow_redirects = follow_redirects
         self._default_timeout_ms = default_timeout_ms
+        self._allow_private_networks = allow_private_networks
 
     async def execute(
         self,
@@ -261,6 +263,10 @@ class HttpConnectorExecutor:
         if hostname in denied_hosts:
             raise SSRFProtectionError(f"Host {hostname} is denied")
 
+        # Allow private networks in test mode
+        if self._allow_private_networks:
+            return
+
         # Check blocked hosts
         if hostname in _BLOCKED_HOSTS:
             raise SSRFProtectionError(f"Host {hostname} is blocked")
@@ -281,6 +287,10 @@ class HttpConnectorExecutor:
         This prevents DNS rebinding attacks by checking all resolved IPs
         against blocked ranges.
         """
+        # Skip DNS validation in test mode
+        if self._allow_private_networks:
+            return
+
         parsed = urlparse(url)
         hostname = parsed.hostname
         if not hostname:

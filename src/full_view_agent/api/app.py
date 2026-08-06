@@ -68,7 +68,6 @@ from full_view_agent.application.errors import (
     WorkflowNotAvailable,
 )
 from full_view_agent.application.model_config_service import (
-    EncryptedModelConfigKeyStore,
     InMemoryModelConfigKeyStore,
     ModelConfigService,
 )
@@ -518,15 +517,25 @@ class RuntimeContainer:
                 dsn=database_url,
                 schema=os.getenv("FULL_VIEW_POSTGRES_SCHEMA", "full_view_agent"),
             )
-            # Use encrypted key store for production persistence
+            # Use PostgreSQL-backed key store for true restart persistence
             credential_key = _configured_credential_key()
             if credential_key:
-                model_config_key_store = EncryptedModelConfigKeyStore(
-                    encryption_key=credential_key
+                from full_view_agent.infrastructure.postgres_model_config_key_store import (
+                    PostgresModelConfigKeyStore,
                 )
+                model_config_key_store = PostgresModelConfigKeyStore(
+                    dsn=database_url,
+                    schema=os.getenv("FULL_VIEW_POSTGRES_SCHEMA", "full_view_agent"),
+                    encryption_key=credential_key,
+                )
+                logger.info("Using PostgresModelConfigKeyStore for persistent API key storage")
             else:
                 # Fallback to in-memory for development without credential key
                 model_config_key_store = InMemoryModelConfigKeyStore()
+                logger.warning(
+                    "Using InMemoryModelConfigKeyStore"
+                    " - keys will not persist across restarts"
+                )
         else:
             self.capability_repository = InMemoryCapabilityRepository()
             model_config_repo = InMemoryModelConfigRepository()
@@ -653,6 +662,31 @@ class RuntimeContainer:
                         os.getenv("FULL_VIEW_MODEL_TIMEOUT_SECONDS", "60")
                     ),
                 )
+        # P2: Create dynamic tool adapter for executing dynamic tools via HTTP connectors
+        dynamic_tool_adapter = None
+        if self.capability_repository is not None and hasattr(self.capability_repository, '_dsn'):
+            # Only create if we have a real repository (not in-memory for tests)
+            try:
+                from full_view_agent.application.dynamic_tool_adapter import (
+                    HttpDynamicToolAdapter,
+                )
+                from full_view_agent.infrastructure.http_connector_executor import (
+                    HttpConnectorExecutor,
+                )
+
+                http_executor = HttpConnectorExecutor(
+                    repository=self.capability_repository,
+                    follow_redirects=False,
+                    default_timeout_ms=8000,
+                )
+                dynamic_tool_adapter = HttpDynamicToolAdapter(
+                    repository=self.capability_repository,
+                    http_executor=http_executor,
+                )
+                logger.info("Dynamic tool adapter initialized for HTTP connector execution")
+            except Exception as e:
+                logger.warning(f"Failed to initialize dynamic tool adapter: {e}")
+
         # S1-A：语义入口与既有能力栈共享一份接线（Catalog/Resolver/
         # Executor/Fingerprinter/Presenter），Native 与 LangGraph 走同一
         # Harness 包装，不改变任何既有 Tool 的行为。
@@ -661,6 +695,7 @@ class RuntimeContainer:
             adapter=self.governance_adapter,
             auth_context_refresher=self.auth_context_refresher,
             denial_ledger=self.denial_ledger,
+            dynamic_tool_adapter=dynamic_tool_adapter,
         )
         if isinstance(self.governance_adapter, HttpGovernanceAdapter):
             validate_production_http_capabilities(
@@ -723,6 +758,7 @@ class RuntimeContainer:
             model_provider=self.model_provider,
             planner_factory=planner_factory,
             semantic_stack=self.semantic_stack,
+            dynamic_tool_adapter=dynamic_tool_adapter,
         )
         analysis_enabled = os.getenv(
             "FULL_VIEW_ANALYSIS_EXECUTION_ENABLED",

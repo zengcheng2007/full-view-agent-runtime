@@ -659,11 +659,15 @@ class PostgresModelConfigRepository:
             await conn.execute(
                 f"""
                 INSERT INTO {self._schema}.model_configs (
-                    config_id, name, api_base_url, model_name, protocol,
+                    config_id, name, api_base_url,
+                    api_key_ciphertext, api_key_nonce,
+                    model_name, protocol,
                     timeout_seconds, max_output_tokens, max_retries,
                     is_enabled, notes, created_at, updated_at, created_by, version
                 ) VALUES (
-                    %(config_id)s, %(name)s, %(api_base_url)s, %(model_name)s,
+                    %(config_id)s, %(name)s, %(api_base_url)s,
+                    ''::bytea, ''::bytea,
+                    %(model_name)s,
                     %(protocol)s, %(timeout_seconds)s, %(max_output_tokens)s,
                     %(max_retries)s, %(is_enabled)s, %(notes)s,
                     %(created_at)s, %(updated_at)s, %(created_by)s, %(version)s
