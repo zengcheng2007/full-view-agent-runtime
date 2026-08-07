@@ -33,6 +33,9 @@ from full_view_agent.application.harness import (
 )
 from full_view_agent.application.policy import MinimalPolicyAdapter
 from full_view_agent.application.ports import AgentStore, EventPublisher, OrchestrationPort
+from full_view_agent.application.run_capability_snapshot import (
+    RunCapabilitySnapshotService,
+)
 from full_view_agent.application.session_run_service import SessionRunService, new_id
 from full_view_agent.application.tool_observation_service import (
     PersistedToolObservation,
@@ -43,6 +46,7 @@ from full_view_agent.application.tool_observation_service import (
 from full_view_agent.application.tool_registry import ToolRegistry
 from full_view_agent.domain.models import (
     AgentMessage,
+    AgentRun,
     AuthContext,
     ResultReferenceContent,
     Steer,
@@ -112,6 +116,7 @@ class NativeOrchestrator(OrchestrationPort):
         planner_factory: RunPlannerFactory | None = None,
         evidence_source_system: str = "in_memory_fixture",
         observation_service: ToolObservationPort | None = None,
+        snapshot_service: RunCapabilitySnapshotService | None = None,
     ) -> None:
         self._service = service
         self._store = store
@@ -143,6 +148,7 @@ class NativeOrchestrator(OrchestrationPort):
             registry=self._registry,
             evidence_source_system=evidence_source_system,
         )
+        self._snapshot_service = snapshot_service
         self._run_tasks: dict[str, asyncio.Task[None]] = {}
         self._task_failures: list[str] = []
 
@@ -176,6 +182,50 @@ class NativeOrchestrator(OrchestrationPort):
             "completed", "failed", "cancelled", "expired",
         ):
             return  # terminal – must not resume or start tools
+
+        # P2-2: Create immutable capability snapshot for this run.
+        # The snapshot captures the state of published dynamic tools at the
+        # moment the run starts, ensuring that later publish/deactivate/
+        # rollback operations do not affect this in-flight run.
+        snapshot_created = False
+        if self._snapshot_service is not None:
+            try:
+                await self._snapshot_service.create_snapshot_for_run(
+                    run_id=run_id,
+                    base_registry=self._registry,
+                )
+                snapshot_created = True
+                logger.info(
+                    "Created capability snapshot for run %s", run_id,
+                )
+            except Exception:
+                logger.warning(
+                    "Failed to create capability snapshot for run %s; "
+                    "continuing without snapshot.",
+                    run_id,
+                    exc_info=True,
+                )
+
+        try:
+            await self._execute_run(user_id=user_id, run_id=run_id, current=current)
+        finally:
+            # P2-2: Always clean up the snapshot, even if the run fails.
+            if snapshot_created and self._snapshot_service is not None:
+                try:
+                    self._snapshot_service.remove_snapshot(run_id)
+                    logger.debug(
+                        "Removed capability snapshot for run %s", run_id,
+                    )
+                except Exception:
+                    logger.warning(
+                        "Failed to remove capability snapshot for run %s",
+                        run_id,
+                        exc_info=True,
+                    )
+
+    async def _execute_run(
+        self, *, user_id: str, run_id: str, current: AgentRun,
+    ) -> None:
         was_queued = current.status == "queued"
         running = (
             await self._service.start_run(user_id=user_id, run_id=run_id)

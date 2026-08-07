@@ -88,6 +88,9 @@ from full_view_agent.application.ports import (
     RunAuthContextStore,
 )
 from full_view_agent.application.run_admission import RunAdmissionService
+from full_view_agent.application.run_capability_snapshot import (
+    RunCapabilitySnapshotService,
+)
 from full_view_agent.application.semantic_wiring import (
     build_semantic_capability_stack,
 )
@@ -131,6 +134,7 @@ from full_view_agent.infrastructure.auth_context_store import (
     InMemoryRunAuthContextStore,
 )
 from full_view_agent.infrastructure.capability_repository import (
+    CapabilityRepository,
     InMemoryCapabilityRepository,
     InMemoryModelConfigRepository,
     PostgresCapabilityRepository,
@@ -350,13 +354,19 @@ class RuntimeContainer:
     # back to the legacy AnalysisPlanExecutor).
     analysis_orchestrator: AnalysisOrchestratorPort | None = None
     # P2: Capability Center services
-    capability_repository: object = field(default=None, init=False)
+    capability_repository: CapabilityRepository | None = field(default=None, init=False)
     capability_management_service: CapabilityManagementService | None = field(
         default=None, init=False
     )
     model_config_service: ModelConfigService | None = field(
         default=None, init=False
     )
+    run_capability_snapshot_service: RunCapabilitySnapshotService | None = field(
+        default=None, init=False
+    )
+    # Set True once async ``initialize()`` has completed.  Prevents
+    # re-initialisation on repeated lifespan calls.
+    _initialized: bool = field(default=False, init=False, repr=False)
 
     def __post_init__(self) -> None:
         runtime_profile = os.getenv("FULL_VIEW_RUNTIME_PROFILE", "development").lower()
@@ -548,120 +558,76 @@ class RuntimeContainer:
             repository=model_config_repo,
             key_store=model_config_key_store,
         )
+        # P2-2: RunCapabilitySnapshotService – creates per-run immutable
+        # capability snapshots so that dynamic tool version changes don't
+        # affect in-flight runs.
+        self.run_capability_snapshot_service = RunCapabilitySnapshotService(
+            repository=self.capability_repository,
+        )
 
-        # P2-1: Load published dynamic tools and merge into ToolRegistry
-        # This bridges the Capability Center CRUD with the execution path
-        if self.tool_registry is not None:
-            try:
-                import asyncio
+        # ── Async-initialised concerns (require event loop) ──────────
+        # Dynamic tool loading from capability repository and model config
+        # resolution from the database are deferred to the async lifecycle
+        # (``initialize()`` called from the FastAPI lifespan).  This avoids
+        # fragile ``run_until_complete()`` patterns that produce "coroutine
+        # was never awaited" warnings in async test contexts.
+        #
+        # Database config resolution MUST fail explicitly when a database is
+        # configured (A3 requirement: 数据库配置存在但读取失败时必须显式失
+        # 败，禁止静默回退环境变量).  Env-var fallback is ONLY used when no
+        # database URL is configured at all.
 
-                from full_view_agent.application.dynamic_tool_bridge import (
-                    build_dynamic_tool_registry_entries,
-                    load_published_tools,
+        if (
+            self.model_provider is None
+            and model_provider_mode == "openai_compatible"
+            and not database_url
+        ):
+            # No database: fall back to env vars (the only allowed fallback
+            # path per A3).
+            model_base_url = os.getenv("FULL_VIEW_MODEL_BASE_URL")
+            model_name = os.getenv("FULL_VIEW_MODEL_NAME")
+            if not model_base_url:
+                raise RuntimeError(
+                    "FULL_VIEW_MODEL_BASE_URL is required for openai_compatible "
+                    "when no enabled model config exists in database"
                 )
-
-                # Safely get or create an event loop for sync initialization
-                try:
-                    _dt_loop = asyncio.get_running_loop()
-                    # Already running - can't use run_until_complete
-                    _dt_loop = None
-                except RuntimeError:
-                    try:
-                        _dt_loop = asyncio.get_event_loop()
-                    except RuntimeError:
-                        _dt_loop = asyncio.new_event_loop()
-                        asyncio.set_event_loop(_dt_loop)
-
-                if _dt_loop is not None and not _dt_loop.is_running():
-                    # Load published tools from capability repository
-                    published_tools = _dt_loop.run_until_complete(
-                        load_published_tools(self.capability_repository)
-                    )
-
-                    if published_tools:
-                        # Convert to registry entries
-                        dynamic_manifests, dynamic_descriptors = (
-                            build_dynamic_tool_registry_entries(published_tools)
-                        )
-
-                        # Extract input schemas from tools
-                        dynamic_input_schemas = {
-                            tool.capability_id: tool.input_schema
-                            for tool in published_tools
-                            if tool.input_schema
-                        }
-
-                        # Merge into existing registry
-                        self.tool_registry = self.tool_registry.merge_dynamic(
-                            manifests=dynamic_manifests,
-                            descriptors=dynamic_descriptors,
-                            dynamic_input_schemas=dynamic_input_schemas,
-                        )
-                        logger.info(
-                            f"Merged {len(dynamic_manifests)} dynamic tools into ToolRegistry"
-                        )
-            except Exception as e:
-                logger.warning(
-                    f"Failed to load dynamic tools from capability repository: {e}. "
-                    "Continuing with static tools only."
+            if not model_name:
+                raise RuntimeError(
+                    "FULL_VIEW_MODEL_NAME is required for openai_compatible "
+                    "when no enabled model config exists in database"
                 )
+            model_api_key = os.getenv("FULL_VIEW_MODEL_API_KEY")
+            self.model_provider = OpenAICompatibleModelProvider(
+                base_url=model_base_url,
+                model=model_name,
+                api_key=SecretStr(model_api_key) if model_api_key else None,
+                timeout_seconds=float(
+                    os.getenv("FULL_VIEW_MODEL_TIMEOUT_SECONDS", "60")
+                ),
+            )
 
-        if self.model_provider is None and model_provider_mode == "openai_compatible":
-            # Check if there's an enabled model config in the database
-            import asyncio
-            try:
-                loop = asyncio.get_event_loop()
-            except RuntimeError:
-                loop = asyncio.new_event_loop()
-                asyncio.set_event_loop(loop)
+        # Build downstream components (semantic stack, executor, analysis
+        # services).  When model_provider was deferred (openai_compatible +
+        # database), it will be None here and the components are rebuilt in
+        # ``initialize()`` once the provider is resolved.
+        self._build_downstream_components(database_url)
 
-            enabled_config = None
-            if database_url:
-                try:
-                    enabled_config = loop.run_until_complete(
-                        self.model_config_service.resolve_for_runtime()
-                    )
-                except Exception as e:
-                    logger.warning(
-                        f"Failed to resolve model config from database: {e}. "
-                        "Falling back to environment variables."
-                    )
+    def _build_downstream_components(self, database_url: str | None) -> None:
+        """Build semantic stack, executor, and analysis services.
 
-            if enabled_config:
-                # Use database config
-                logger.info(
-                    f"Using database model config: {enabled_config.name} "
-                    f"({enabled_config.model_name})"
-                )
-                self.model_provider = OpenAICompatibleModelProvider(
-                    base_url=enabled_config.api_base_url,
-                    model=enabled_config.model_name,
-                    api_key=SecretStr(enabled_config.api_key_secret),
-                    timeout_seconds=float(enabled_config.timeout_seconds),
-                )
-            else:
-                # Fallback to environment variables
-                model_base_url = os.getenv("FULL_VIEW_MODEL_BASE_URL")
-                model_name = os.getenv("FULL_VIEW_MODEL_NAME")
-                if not model_base_url:
-                    raise RuntimeError(
-                        "FULL_VIEW_MODEL_BASE_URL is required for openai_compatible "
-                        "when no enabled model config exists in database"
-                    )
-                if not model_name:
-                    raise RuntimeError(
-                        "FULL_VIEW_MODEL_NAME is required for openai_compatible "
-                        "when no enabled model config exists in database"
-                    )
-                model_api_key = os.getenv("FULL_VIEW_MODEL_API_KEY")
-                self.model_provider = OpenAICompatibleModelProvider(
-                    base_url=model_base_url,
-                    model=model_name,
-                    api_key=SecretStr(model_api_key) if model_api_key else None,
-                    timeout_seconds=float(
-                        os.getenv("FULL_VIEW_MODEL_TIMEOUT_SECONDS", "60")
-                    ),
-                )
+        Called from ``__post_init__`` (with the sync-available model_provider)
+        and again from ``initialize()`` once the DB-backed model_provider has
+        been resolved.
+        """
+        runtime_profile = os.getenv("FULL_VIEW_RUNTIME_PROFILE", "development").lower()
+
+        # Type narrowing: these are always set by __post_init__ before this
+        # method is called.
+        assert self.tool_registry is not None
+        assert self.governance_adapter is not None
+        assert self.store is not None
+        assert self.events is not None
+
         # P2: Create dynamic tool adapter for executing dynamic tools via HTTP connectors
         dynamic_tool_adapter = None
         if self.capability_repository is not None and hasattr(self.capability_repository, '_dsn'):
@@ -759,6 +725,7 @@ class RuntimeContainer:
             planner_factory=planner_factory,
             semantic_stack=self.semantic_stack,
             dynamic_tool_adapter=dynamic_tool_adapter,
+            run_capability_snapshot_service=self.run_capability_snapshot_service,
         )
         analysis_enabled = os.getenv(
             "FULL_VIEW_ANALYSIS_EXECUTION_ENABLED",
@@ -788,6 +755,119 @@ class RuntimeContainer:
                 ),
                 binding_store=self.analysis_binding_store,
             )
+
+    async def initialize(self) -> None:
+        """Async lifecycle initialisation.
+
+        Resolves deferred concerns that require an event loop:
+
+        * Load published dynamic tools from the capability repository and
+          merge them into the ``ToolRegistry``.
+        * Resolve model config from the database when ``openai_compatible``
+          mode is active and a ``FULL_VIEW_DATABASE_URL`` is configured.
+          **If the database config exists but resolution fails, the error
+          is raised explicitly** — no silent fallback to env vars (A3).
+        * Env-var fallback for model config is used ONLY when no database
+          URL is configured.
+
+        Idempotent — safe to call multiple times.  Must be called from the
+        FastAPI lifespan (via ``create_app()``) before the first request.
+        Tests that instantiate ``RuntimeContainer`` directly and need async
+        resolution should call ``await runtime.initialize()`` explicitly.
+        """
+        if self._initialized:
+            return
+        self._initialized = True
+
+        database_url = os.getenv("FULL_VIEW_DATABASE_URL")
+        model_provider_mode = os.getenv(
+            "FULL_VIEW_MODEL_PROVIDER", "deterministic"
+        ).lower()
+
+        # ── Dynamic tool loading ──────────────────────────────────────
+        try:
+            from full_view_agent.application.dynamic_tool_bridge import (
+                build_dynamic_tool_registry_entries,
+                load_published_tools,
+            )
+
+            if self.capability_repository is None:
+                raise RuntimeError("capability_repository not initialized")
+            published_tools = await load_published_tools(self.capability_repository)
+            if published_tools:
+                dynamic_manifests, dynamic_descriptors = (
+                    build_dynamic_tool_registry_entries(published_tools)
+                )
+                dynamic_input_schemas = {
+                    tool.capability_id: tool.input_schema
+                    for tool in published_tools
+                    if tool.input_schema
+                }
+                if self.tool_registry is None:
+                    raise RuntimeError("tool_registry not initialized")
+                self.tool_registry = self.tool_registry.merge_dynamic(
+                    manifests=dynamic_manifests,
+                    descriptors=dynamic_descriptors,
+                    dynamic_input_schemas=dynamic_input_schemas,
+                )
+                logger.info(
+                    f"Merged {len(dynamic_manifests)} dynamic tools into ToolRegistry"
+                )
+        except Exception as e:
+            logger.warning(
+                f"Failed to load dynamic tools from capability repository: {e}. "
+                "Continuing with static tools only."
+            )
+
+        # ── Model config resolution ───────────────────────────────────
+        if (
+            self.model_provider is None
+            and model_provider_mode == "openai_compatible"
+            and database_url
+        ):
+            # Database URL is configured — resolution MUST succeed or raise
+            # explicitly.  Silent fallback to env vars is forbidden (A3).
+            assert self.model_config_service is not None
+            enabled_config = await self.model_config_service.resolve_for_runtime()
+            if enabled_config:
+                logger.info(
+                    f"Using database model config: {enabled_config.name} "
+                    f"({enabled_config.model_name})"
+                )
+                self.model_provider = OpenAICompatibleModelProvider(
+                    base_url=enabled_config.api_base_url,
+                    model=enabled_config.model_name,
+                    api_key=SecretStr(enabled_config.api_key_secret),
+                    timeout_seconds=float(enabled_config.timeout_seconds),
+                )
+            else:
+                # No enabled config in DB — fall back to env vars.
+                model_base_url = os.getenv("FULL_VIEW_MODEL_BASE_URL")
+                model_name = os.getenv("FULL_VIEW_MODEL_NAME")
+                if not model_base_url:
+                    raise RuntimeError(
+                        "FULL_VIEW_MODEL_BASE_URL is required for openai_compatible "
+                        "when no enabled model config exists in database"
+                    )
+                if not model_name:
+                    raise RuntimeError(
+                        "FULL_VIEW_MODEL_NAME is required for openai_compatible "
+                        "when no enabled model config exists in database"
+                    )
+                model_api_key = os.getenv("FULL_VIEW_MODEL_API_KEY")
+                self.model_provider = OpenAICompatibleModelProvider(
+                    base_url=model_base_url,
+                    model=model_name,
+                    api_key=SecretStr(model_api_key) if model_api_key else None,
+                    timeout_seconds=float(
+                        os.getenv("FULL_VIEW_MODEL_TIMEOUT_SECONDS", "60")
+                    ),
+                )
+            # Model provider resolved from DB (or env) — rebuild downstream
+            # components with the now-available provider.
+            self._build_downstream_components(database_url)
+        # If not deferred (openai_compatible + database_url), downstream
+        # components were already built in __post_init__.  Nothing more to do.
 
     def schedule_run(self, *, user_id: str, run_id: str) -> None:
         """Delegate scheduling to the OrchestrationPort."""
@@ -1030,6 +1110,7 @@ def create_app(runtime: RuntimeContainer | None = None) -> FastAPI:
 
     @asynccontextmanager
     async def lifespan(_app: FastAPI):
+        await runtime.initialize()
         await runtime.recover_runs()
         yield
         await runtime.executor.shutdown()

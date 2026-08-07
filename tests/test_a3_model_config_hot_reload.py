@@ -69,6 +69,7 @@ async def test_model_config_persists_across_runtime_rebuild(
 
     # --- Phase 1: Create config + store key via first Runtime ---
     runtime1 = RuntimeContainer()
+    await runtime1.initialize()
     # Save model config
     config = ModelConfig(
         config_id=config_id,
@@ -93,6 +94,7 @@ async def test_model_config_persists_across_runtime_rebuild(
     del runtime1
 
     runtime2 = RuntimeContainer()
+    await runtime2.initialize()
     resolved2 = await runtime2.model_config_service.resolve_for_runtime()
     assert resolved2 is not None, "Runtime2 should resolve config after rebuild"
     assert resolved2.api_key_secret == test_api_key, (
@@ -118,6 +120,7 @@ async def test_model_config_switch_only_affects_new_run(
     test_api_key_v2 = "sk-test-a3-v2"
 
     runtime = RuntimeContainer()
+    await runtime.initialize()
 
     # Create v1 config
     config_v1 = ModelConfig(
@@ -186,6 +189,7 @@ async def test_db_config_read_failure_does_not_silently_fall_back(
     config_id = clean_model_config
 
     runtime = RuntimeContainer()
+    await runtime.initialize()
 
     # Save a config
     config = ModelConfig(

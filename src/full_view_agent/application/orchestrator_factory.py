@@ -28,6 +28,9 @@ from full_view_agent.application.ports import (
     EventPublisher,
     OrchestrationPort,
 )
+from full_view_agent.application.run_capability_snapshot import (
+    RunCapabilitySnapshotService,
+)
 from full_view_agent.application.semantic_wiring import SemanticCapabilityStack
 from full_view_agent.application.session_run_service import SessionRunService
 from full_view_agent.application.tool_observation_service import ToolObservationService
@@ -49,6 +52,7 @@ def create_orchestrator(
     planner_factory: ModelPlannerFactory | None = None,
     semantic_stack: SemanticCapabilityStack | None = None,
     dynamic_tool_adapter: DynamicToolAdapter | None = None,
+    run_capability_snapshot_service: RunCapabilitySnapshotService | None = None,
 ) -> OrchestrationPort:
     """Build the orchestrator selected by ``FULL_VIEW_ORCHESTRATOR``.
 
@@ -96,6 +100,7 @@ def create_orchestrator(
             planner_factory=planner_factory,
             evidence_source_system=evidence_source_system,
             observation_service=observation_service,
+            snapshot_service=run_capability_snapshot_service,
         )
     if mode == "langgraph":
         from full_view_agent.infrastructure.checkpoint_mapping_store import (
@@ -139,6 +144,7 @@ def create_orchestrator(
             observation_service=observation_service,
             checkpoint_manager=checkpoint_manager,
             checkpoint_mappings=checkpoint_mappings,
+            snapshot_service=run_capability_snapshot_service,
         )
     raise RuntimeError(
         f"Unknown FULL_VIEW_ORCHESTRATOR={mode!r}; "
