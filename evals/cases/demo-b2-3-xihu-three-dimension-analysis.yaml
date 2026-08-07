@@ -1,0 +1,52 @@
+schema_version: "1.0"
+case_id: demo-b2-3-xihu-three-dimension-analysis
+description: "B2-Demo3: 分析西湖区独居老人、出租房和事件治理情况"
+user_message: 分析西湖区独居老人、出租房和事件治理情况。
+auth:
+  area_codes: ["3301"]
+  datasets: [administrative_area, population, housing, event]
+  entitlements: [governance.area.read, governance.population.aggregate.read, governance.housing.aggregate.read, governance.event.aggregate.read]
+  field_policy_set: governance_analyst_v1
+model_steps:
+  - type: tool_call
+    tool_id: governance.resolve_area
+    arguments:
+      query: 西湖区
+  - type: tool_call
+    tool_id: governance.semantic_query
+    arguments:
+      spec:
+        subject: population
+        metrics: [person_count]
+        scope: {area_code: "330106", include_descendants: true}
+        filters:
+          - {field: person_category, operator: eq, value: solitary_elderly}
+        group_by: [street]
+  - type: tool_call
+    tool_id: governance.semantic_query
+    arguments:
+      spec:
+        subject: housing
+        metrics: [dwelling_count]
+        scope: {area_code: "330106", include_descendants: true}
+        group_by: [street]
+  - type: tool_call
+    tool_id: governance.semantic_query
+    arguments:
+      spec:
+        subject: event
+        metrics: [finish_rate]
+        scope: {area_code: "330106", include_descendants: true}
+  - type: finish
+    content: 西湖区独居老人、出租房和事件治理三维度分析完成。
+expected:
+  terminal_status: completed
+  outcome: success
+  completion_reason_code: goal_completed
+  tool_ids:
+    - governance.resolve_area
+    - governance.semantic_query
+    - governance.semantic_query
+    - governance.semantic_query
+  min_evidence_count: 3
+  required_event_types: [tool.completed, result.available, run.completed]
