@@ -895,11 +895,11 @@ def _tool_from_row(row: tuple[object, ...] | list[object]) -> ToolCapability:
         cache_enabled=bool(r[22]),
         cache_ttl_seconds=int(r[23]),  # type: ignore[arg-type]
         credential_ref=_str_field(r[24]) or None,
-        created_at=r[26],  # type: ignore[arg-type]
-        updated_at=r[27],  # type: ignore[arg-type]
-        created_by=_str_field(r[25]) if len(r) > 27 else "system",
-        updated_by=_str_field(r[26]) if len(r) > 28 else "system",
-        etag=int(r[27]) if len(r) > 28 else 1,  # type: ignore[arg-type]
+        created_at=r[25],  # type: ignore[arg-type]
+        updated_at=r[26],  # type: ignore[arg-type]
+        created_by=_str_field(r[27]) if len(r) > 27 else "system",
+        updated_by=_str_field(r[28]) if len(r) > 28 else "system",
+        etag=int(r[29]) if len(r) > 29 else 1,  # type: ignore[arg-type]
     )
 
 
@@ -923,11 +923,11 @@ def _skill_from_row(row: tuple[object, ...] | list[object]) -> SkillCapability:
         output_constraints=_json_field(r[14], {}),  # type: ignore[return-value]
         examples=_json_field(r[15], []),  # type: ignore[return-value]
         counter_examples=_json_field(r[16], []),  # type: ignore[return-value]
-        created_at=r[19],  # type: ignore[arg-type]
-        updated_at=r[20],  # type: ignore[arg-type]
-        created_by=_str_field(r[17]) if len(r) > 17 else "system",
-        updated_by=_str_field(r[18]) if len(r) > 18 else "system",
-        etag=int(r[19]) if len(r) > 19 else 1,  # type: ignore[arg-type]
+        created_at=r[17],  # type: ignore[arg-type]
+        updated_at=r[18],  # type: ignore[arg-type]
+        created_by=_str_field(r[19]) if len(r) > 19 else "system",
+        updated_by=_str_field(r[20]) if len(r) > 20 else "system",
+        etag=int(r[21]) if len(r) > 21 else 1,  # type: ignore[arg-type]
     )
 
 
@@ -948,11 +948,11 @@ def _workflow_from_row(row: tuple[object, ...] | list[object]) -> WorkflowCapabi
         edges=_json_field(r[11], []),  # type: ignore[return-value]
         timeout_seconds=int(r[12]),  # type: ignore[arg-type]
         requires_human_confirmation=bool(r[13]),
-        created_at=r[16],  # type: ignore[arg-type]
-        updated_at=r[17],  # type: ignore[arg-type]
-        created_by=_str_field(r[14]) if len(r) > 14 else "system",
-        updated_by=_str_field(r[15]) if len(r) > 15 else "system",
-        etag=int(r[16]) if len(r) > 16 else 1,  # type: ignore[arg-type]
+        created_at=r[14],  # type: ignore[arg-type]
+        updated_at=r[15],  # type: ignore[arg-type]
+        created_by=_str_field(r[16]) if len(r) > 16 else "system",
+        updated_by=_str_field(r[17]) if len(r) > 17 else "system",
+        etag=int(r[18]) if len(r) > 18 else 1,  # type: ignore[arg-type]
     )
 
 
