@@ -107,7 +107,10 @@ class AnalysisPlanner:
             self._default_budget
         )
         # overview ??? Catalog ?????????????????
-        subject_goals = _subject_goals(goals, self._catalog.subject_ids())
+        subject_goals = _subject_goals(
+            goals,
+            self._catalog.analysis_overview_subject_ids(),
+        )
 
         steps: list[AnalysisStep] = []
         omissions: list[AnalysisOmission] = []

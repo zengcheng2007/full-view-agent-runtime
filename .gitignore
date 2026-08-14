@@ -6,6 +6,11 @@ __pycache__/
 *.py[cod]
 .env
 .env.local
+.env.test.local
+*.log
+.runtime-8000*
+runtime.stderr.log
+runtime.stdout.log
 .claude/worktree-scope.json
 data/
 *.db

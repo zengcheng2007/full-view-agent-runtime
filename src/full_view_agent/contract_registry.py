@@ -1,5 +1,6 @@
 """Single registry for every standalone JSON Schema published by the runtime."""
 
+from full_view_agent.domain.knowledge import KnowledgeSearchInput
 from full_view_agent.domain.models import (
     AgentEvent,
     AgentMessage,
@@ -8,20 +9,34 @@ from full_view_agent.domain.models import (
     AreaCandidatesResult,
     AuthContext,
     ContractModel,
+    EnterpriseIndustryDistributionTable,
+    EnterpriseMetricTable,
+    EnterpriseScaleDistributionTable,
+    EnterpriseTypeDistributionTable,
+    EventCategoryTable,
     EventFinishRateTable,
+    EventTrendTable,
     Evidence,
     FrontendCommand,
     FrontendCommandReceipt,
     GetObjectProfileInput,
+    GovernanceOverviewTable,
+    GovernancePowerMetricTable,
     HousingAreaGroupTable,
     HousingLeaseTypeTable,
+    HousingRoomUseTable,
+    HousingStockOverviewTable,
     InternalToolManifest,
     ModelToolDescriptor,
     ObjectProfileResult,
     PendingInputRequest,
     PolicyDecision,
     PopulationMetricTable,
+    PopulationRankingTable,
+    QueryEnterpriseMetricsInput,
     QueryEventMetricsInput,
+    QueryGovernanceOverviewInput,
+    QueryGovernancePowerMetricsInput,
     QueryHousingMetricsInput,
     QueryPopulationMetricsInput,
     ResolveAreaInput,
@@ -50,9 +65,15 @@ SCHEMA_MODELS: dict[str, type[ContractModel]] = {
     "tools/model-tool-descriptor.schema.json": ModelToolDescriptor,
     "tools/resolve-area-input.schema.json": ResolveAreaInput,
     "tools/query-event-metrics-input.schema.json": QueryEventMetricsInput,
+    "tools/query-enterprise-metrics-input.schema.json": QueryEnterpriseMetricsInput,
+    "tools/query-governance-overview-input.schema.json": QueryGovernanceOverviewInput,
+    "tools/query-governance-power-metrics-input.schema.json": (
+        QueryGovernancePowerMetricsInput
+    ),
     "tools/query-housing-metrics-input.schema.json": QueryHousingMetricsInput,
     "tools/query-population-metrics-input.schema.json": QueryPopulationMetricsInput,
     "tools/get-object-profile-input.schema.json": GetObjectProfileInput,
+    "tools/knowledge-search-input.schema.json": KnowledgeSearchInput,
     "tools/tool-result.schema.json": ToolResult,
     "data/area-candidates.schema.json": AreaCandidatesResult,
     "data/object-profile.schema.json": ObjectProfileResult,
@@ -60,7 +81,26 @@ SCHEMA_MODELS: dict[str, type[ContractModel]] = {
     "data/result-metadata.schema.json": ResultMetadata,
     "data/evidence.schema.json": Evidence,
     "data/tool-specific/population-metric-table.schema.json": PopulationMetricTable,
+    "data/tool-specific/population-ranking-table.schema.json": PopulationRankingTable,
     "data/tool-specific/housing-lease-type-table.schema.json": HousingLeaseTypeTable,
     "data/tool-specific/housing-area-group-table.schema.json": HousingAreaGroupTable,
+    "data/tool-specific/housing-room-use-table.schema.json": HousingRoomUseTable,
+    "data/tool-specific/housing-stock-overview.schema.json": HousingStockOverviewTable,
     "data/tool-specific/event-finish-rate-table.schema.json": EventFinishRateTable,
+    "data/tool-specific/event-category-table.schema.json": EventCategoryTable,
+    "data/tool-specific/event-trend-table.schema.json": EventTrendTable,
+    "data/tool-specific/enterprise-metric-table.schema.json": EnterpriseMetricTable,
+    "data/tool-specific/enterprise-scale-distribution-table.schema.json": (
+        EnterpriseScaleDistributionTable
+    ),
+    "data/tool-specific/enterprise-type-distribution-table.schema.json": (
+        EnterpriseTypeDistributionTable
+    ),
+    "data/tool-specific/enterprise-industry-distribution-table.schema.json": (
+        EnterpriseIndustryDistributionTable
+    ),
+    "data/tool-specific/governance-overview-table.schema.json": GovernanceOverviewTable,
+    "data/tool-specific/governance-power-metric-table.schema.json": (
+        GovernancePowerMetricTable
+    ),
 }

@@ -10,6 +10,7 @@ from full_view_agent.application.checkpoint_mapping import CheckpointMappingStor
 from full_view_agent.application.errors import ReauthenticationRequired
 from full_view_agent.application.harness import (
     AfterToolCall,
+    AgentHarness,
     BeforeToolCall,
     FinishAction,
     HarnessAction,
@@ -75,7 +76,10 @@ class LangGraphOrchestrator(NativeOrchestrator):
         after_tool_call: AfterToolCall | None,
         inherited_result_ids: tuple[str, ...] = (),
         inherited_evidence_ids: tuple[str, ...] = (),
+        harness: AgentHarness | None = None,
     ) -> HarnessResult:
+        effective_harness = harness or self._harness
+
         def require_control(state: _LoopState) -> HarnessControl:
             control = state["control"]
             if control is None:
@@ -85,14 +89,14 @@ class LangGraphOrchestrator(NativeOrchestrator):
         def prepare_context(state: _LoopState) -> dict[str, object]:
             del state
             return {
-                "control": self._harness.begin(
+                "control": effective_harness.begin(
                     inherited_result_ids=inherited_result_ids,
                     inherited_evidence_ids=inherited_evidence_ids,
                 )
             }
 
         async def plan(state: _LoopState) -> dict[str, object]:
-            control, action = await self._harness.plan_action_once(
+            control, action = await effective_harness.plan_action_once(
                 planner=planner,
                 control=require_control(state),
             )
@@ -104,7 +108,7 @@ class LangGraphOrchestrator(NativeOrchestrator):
                 raise RuntimeError("Tool execution node requires a ToolAction")
             while True:
                 try:
-                    execution = await self._harness.authorize_and_execute_once(
+                    execution = await effective_harness.authorize_and_execute_once(
                         action=action,
                         auth_context=auth_context,
                         control=require_control(state),
@@ -126,7 +130,7 @@ class LangGraphOrchestrator(NativeOrchestrator):
             execution = state["execution"]
             if execution is None:
                 raise RuntimeError("Observe node requires a Tool execution")
-            control = self._harness.observe_once(
+            control = effective_harness.observe_once(
                 execution=execution,
                 control=require_control(state),
             )
@@ -136,7 +140,7 @@ class LangGraphOrchestrator(NativeOrchestrator):
             action = state["action"]
             if action is None:
                 raise RuntimeError("Validate node requires a Harness action")
-            control, summary = await self._harness.validate_once(
+            control, summary = await effective_harness.validate_once(
                 action=action,
                 control=require_control(state),
             )

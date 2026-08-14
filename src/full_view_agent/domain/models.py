@@ -1,7 +1,8 @@
-from datetime import UTC, datetime, timedelta
+import re
+from datetime import UTC, date, datetime, timedelta
 from typing import Annotated, Literal
 
-from pydantic import ConfigDict, Field, model_validator
+from pydantic import ConfigDict, Field, JsonValue, field_validator, model_validator
 
 from full_view_agent.domain.analysis_report import AnalysisReportDataResult
 from full_view_agent.domain.contract_model import ContractModel
@@ -94,14 +95,29 @@ class PopulationMetricFilter(ContractModel):
         return self
 
 
+class PopulationMetricOrder(ContractModel):
+    field: Literal["person_count"]
+    direction: Literal["asc", "desc"] = "asc"
+
+
 class PopulationMetricQuerySpec(ContractModel):
     schema_version: Literal["1.1"] = "1.1"
     metrics: list[Literal["person_count"]] = Field(min_length=1, max_length=1)
     scope: MetricQueryScope
     filters: list[PopulationMetricFilter] = Field(default_factory=list, max_length=10)
     group_by: list[
-        Literal["street", "community", "grid", "gender", "age_band"]
+        Literal[
+            "district",
+            "street",
+            "community",
+            "grid",
+            "descendant_street",
+            "descendant_community",
+            "gender",
+            "age_band",
+        ]
     ] = Field(default_factory=list, max_length=2)
+    order_by: list[PopulationMetricOrder] = Field(default_factory=list, max_length=1)
     limit: int = Field(default=200, ge=1, le=1000)
     presentation_hint: Literal["table", "metric", "choropleth"] = "table"
 
@@ -115,9 +131,28 @@ class QueryPopulationMetricsInput(ContractModel):
 
 class HousingMetricQuerySpec(ContractModel):
     schema_version: Literal["1.1"] = "1.1"
+    metrics: list[
+        Literal["dwelling_count", "building_count", "room_count"]
+    ] = Field(default_factory=lambda: ["dwelling_count"], min_length=1, max_length=2)
     scope: MetricQueryScope
-    group_by: list[Literal["next_area"]] = Field(default_factory=list, max_length=1)
+    group_by: list[
+        Literal["next_area", "descendant_street", "room_use"]
+    ] = Field(
+        default_factory=list,
+        max_length=1,
+    )
     limit: int = Field(default=200, ge=1, le=1000)
+
+    @model_validator(mode="after")
+    def validate_metric_shape(self) -> "HousingMetricQuerySpec":
+        if self.metrics == ["dwelling_count"]:
+            return self
+        if self.metrics == ["building_count", "room_count"] and not self.group_by:
+            return self
+        raise ValueError(
+            "housing metrics 仅支持 dwelling_count，或不分组的 "
+            "[building_count, room_count] 存量总览"
+        )
 
 
 class QueryHousingMetricsInput(ContractModel):
@@ -127,14 +162,122 @@ class QueryHousingMetricsInput(ContractModel):
         return self.query.scope
 
 
+_ISO_DATE = re.compile(r"[0-9]{4}-[0-9]{2}-[0-9]{2}\Z")
+
+
+class EventMetricTimeRange(ContractModel):
+    start: date
+    end: date
+
+    @field_validator("start", "end", mode="before")
+    @classmethod
+    def require_iso_calendar_date(cls, value: object) -> object:
+        if not isinstance(value, str) or _ISO_DATE.fullmatch(value) is None:
+            raise ValueError("事件趋势日期必须使用 yyyy-MM-dd 格式")
+        return value
+
+    @model_validator(mode="after")
+    def validate_controlled_range(self) -> "EventMetricTimeRange":
+        if self.start < date(2021, 1, 1):
+            raise ValueError("事件趋势起始日期不得早于 2021-01-01")
+        if self.end < self.start:
+            raise ValueError("事件趋势结束日期不得早于起始日期")
+        calendar_months = (
+            (self.end.year - self.start.year) * 12
+            + self.end.month
+            - self.start.month
+            + 1
+        )
+        if calendar_months > 24:
+            raise ValueError("事件趋势最多查询 24 个自然月")
+        return self
+
+
 class EventMetricQuerySpec(ContractModel):
     schema_version: Literal["1.1"] = "1.1"
+    metrics: list[Literal["finish_rate", "event_count"]] = Field(
+        default_factory=lambda: ["finish_rate"],
+        min_length=1,
+        max_length=1,
+    )
     scope: MetricQueryScope
+    group_by: list[Literal["month", "event_category"]] = Field(
+        default_factory=list, max_length=1
+    )
+    time_range: EventMetricTimeRange | None = None
     limit: int = Field(default=200, ge=1, le=1000)
+
+    @model_validator(mode="after")
+    def validate_metric_shape(self) -> "EventMetricQuerySpec":
+        if (
+            self.metrics == ["finish_rate"]
+            and not self.group_by
+            and self.time_range is None
+        ):
+            return self
+        if (
+            self.metrics == ["event_count"]
+            and self.group_by == ["month"]
+            and self.time_range is not None
+        ):
+            return self
+        if (
+            self.metrics == ["event_count"]
+            and self.group_by == ["event_category"]
+            and self.time_range is None
+        ):
+            return self
+        raise ValueError(
+            "事件指标仅支持办结率快照、带时间范围的事件总数月度趋势，"
+            "或无时间范围的网格事件一级分类统计"
+        )
 
 
 class QueryEventMetricsInput(ContractModel):
     query: EventMetricQuerySpec
+
+    def authorization_area_scope(self) -> MetricQueryScope:
+        return self.query.scope
+
+
+class GovernanceOverviewQuerySpec(ContractModel):
+    schema_version: Literal["1.1"] = "1.1"
+    scope: MetricQueryScope
+
+
+class QueryGovernanceOverviewInput(ContractModel):
+    query: GovernanceOverviewQuerySpec
+
+    def authorization_area_scope(self) -> MetricQueryScope:
+        return self.query.scope
+
+
+class GovernancePowerMetricQuerySpec(ContractModel):
+    schema_version: Literal["1.0"] = "1.0"
+    scope: MetricQueryScope
+
+
+class QueryGovernancePowerMetricsInput(ContractModel):
+    query: GovernancePowerMetricQuerySpec
+
+    def authorization_area_scope(self) -> MetricQueryScope:
+        return self.query.scope
+
+
+class EnterpriseMetricQuerySpec(ContractModel):
+    schema_version: Literal["1.1"] = "1.1"
+    scope: MetricQueryScope
+    group_by: list[
+        Literal["next_area", "enterprise_type", "enterprise_scale", "industry_name"]
+    ] = Field(
+        min_length=1,
+        max_length=1,
+    )
+    limit: int = Field(default=200, ge=1, le=1000)
+
+
+class QueryEnterpriseMetricsInput(ContractModel):
+    query: EnterpriseMetricQuerySpec
 
     def authorization_area_scope(self) -> MetricQueryScope:
         return self.query.scope
@@ -360,7 +503,16 @@ class FrontendCommandPreconditions(ContractModel):
     session_id: str = Field(min_length=1, max_length=128)
     area_code: str | None = Field(default=None, min_length=1, max_length=32)
     required_client_capability: Literal[
-        "panel.show_table@1.0", "map.render_choropleth@1.0"
+        "panel.show_table@1.0",
+        "map.render_choropleth@1.0",
+        "map.render_points@1.0",
+        "map.render_cluster@1.0",
+        "map.render_heatmap@1.0",
+        "map.zoom_to@1.0",
+        "map.highlight_area@1.0",
+        "layer.clear@1.0",
+        "panel.show_summary@1.0",
+        "route.navigate@1.0",
     ]
 
 
@@ -370,12 +522,76 @@ class PanelShowTablePayload(ContractModel):
 
 class MapRenderChoroplethPayload(ContractModel):
     result_id: str = Field(min_length=1, max_length=128)
-    metric_field: Literal["person_count"] = "person_count"
+    metric_field: Literal[
+        "person_count", "dwelling_count", "enterprise_count"
+    ] = "person_count"
     label_field: Literal["area_name"] = "area_name"
     area_code_field: Literal["area_code"] = "area_code"
-    legend_title: str = Field(default="独居老人数量", min_length=1, max_length=100)
+    legend_title: str = Field(default="人口数量", min_length=1, max_length=100)
     palette: Literal["sequential_blue_5"] = "sequential_blue_5"
     fit_bounds: bool = True
+
+
+class MapRenderHolographicPayload(ContractModel):
+    result_id: str = Field(min_length=1, max_length=128)
+    lng_field: str = Field(min_length=1, max_length=128)
+    lat_field: str = Field(min_length=1, max_length=128)
+    color_field: str | None = Field(default=None, min_length=1, max_length=128)
+    radius_field: str | None = Field(default=None, min_length=1, max_length=128)
+    weight_field: str | None = Field(default=None, min_length=1, max_length=128)
+    label_field: str | None = Field(default=None, min_length=1, max_length=128)
+    default_color: str = Field(default="#0187e6", pattern=r"^#[0-9a-fA-F]{6}$")
+    default_radius: float = Field(default=6, ge=1, le=100)
+    fit_bounds: bool = True
+
+
+class MapZoomToPayload(ContractModel):
+    center: tuple[float, float] | None = None
+    zoom: float | None = Field(default=None, ge=0, le=22)
+    bounds: tuple[tuple[float, float], tuple[float, float]] | None = None
+    fit_features: bool = False
+
+    @model_validator(mode="after")
+    def validate_zoom_target(self) -> "MapZoomToPayload":
+        if self.zoom is None and self.bounds is None and not self.fit_features:
+            raise ValueError("map zoom command requires a target")
+        return self
+
+
+class MapHighlightStyle(ContractModel):
+    color: str = Field(default="#ff6b35", pattern=r"^#[0-9a-fA-F]{6}$")
+    opacity: float = Field(default=0.5, ge=0, le=1)
+
+
+class MapHighlightAreaPayload(ContractModel):
+    area_code: str = Field(min_length=1, max_length=32)
+    style: MapHighlightStyle = Field(default_factory=MapHighlightStyle)
+
+
+class LayerClearPayload(ContractModel):
+    clear_data_only: bool = False
+    layer_ids: list[str] = Field(default_factory=list, max_length=100)
+
+
+class SummaryItem(ContractModel):
+    label: str = Field(min_length=1, max_length=100)
+    value: str | int | float | bool
+    unit: str | None = Field(default=None, max_length=32)
+
+
+class PanelShowSummaryPayload(ContractModel):
+    title: str = Field(min_length=1, max_length=100)
+    items: list[SummaryItem] = Field(min_length=1, max_length=100)
+
+
+class RouteNavigatePayload(ContractModel):
+    path: str = Field(min_length=1, max_length=2048)
+
+    @model_validator(mode="after")
+    def validate_local_path(self) -> "RouteNavigatePayload":
+        if not self.path.startswith("/") or self.path.startswith("//"):
+            raise ValueError("route navigation requires a local absolute path")
+        return self
 
 
 class FrontendCommand(ContractModel):
@@ -383,14 +599,36 @@ class FrontendCommand(ContractModel):
     command_id: str = Field(min_length=1, max_length=128)
     run_id: str = Field(min_length=1, max_length=128)
     target_client_instance_id: str = Field(min_length=1, max_length=128)
-    type: Literal["panel.show_table", "map.render_choropleth"]
-    target: Literal["result_panel", "map_panel"] = "result_panel"
+    type: Literal[
+        "panel.show_table",
+        "map.render_choropleth",
+        "map.render_points",
+        "map.render_cluster",
+        "map.render_heatmap",
+        "map.zoom_to",
+        "map.highlight_area",
+        "layer.clear",
+        "panel.show_summary",
+        "route.navigate",
+    ]
+    target: Literal["result_panel", "map_panel", "summary_panel", "app_router"] = (
+        "result_panel"
+    )
     issued_at: datetime = Field(default_factory=lambda: datetime.now(UTC))
     expires_at: datetime = Field(
         default_factory=lambda: datetime.now(UTC) + timedelta(minutes=5)
     )
     preconditions: FrontendCommandPreconditions
-    payload: PanelShowTablePayload | MapRenderChoroplethPayload
+    payload: (
+        PanelShowTablePayload
+        | MapRenderChoroplethPayload
+        | MapRenderHolographicPayload
+        | MapZoomToPayload
+        | MapHighlightAreaPayload
+        | LayerClearPayload
+        | PanelShowSummaryPayload
+        | RouteNavigatePayload
+    )
 
     @model_validator(mode="after")
     def validate_expiry(self) -> "FrontendCommand":
@@ -406,6 +644,38 @@ class FrontendCommand(ContractModel):
                 "map_panel",
                 "map.render_choropleth@1.0",
                 MapRenderChoroplethPayload,
+            ),
+            "map.render_points": (
+                "map_panel",
+                "map.render_points@1.0",
+                MapRenderHolographicPayload,
+            ),
+            "map.render_cluster": (
+                "map_panel",
+                "map.render_cluster@1.0",
+                MapRenderHolographicPayload,
+            ),
+            "map.render_heatmap": (
+                "map_panel",
+                "map.render_heatmap@1.0",
+                MapRenderHolographicPayload,
+            ),
+            "map.zoom_to": ("map_panel", "map.zoom_to@1.0", MapZoomToPayload),
+            "map.highlight_area": (
+                "map_panel",
+                "map.highlight_area@1.0",
+                MapHighlightAreaPayload,
+            ),
+            "layer.clear": ("map_panel", "layer.clear@1.0", LayerClearPayload),
+            "panel.show_summary": (
+                "summary_panel",
+                "panel.show_summary@1.0",
+                PanelShowSummaryPayload,
+            ),
+            "route.navigate": (
+                "app_router",
+                "route.navigate@1.0",
+                RouteNavigatePayload,
             ),
         }[self.type]
         target, capability, payload_type = expected
@@ -424,6 +694,7 @@ FrontendCommandReceiptStatus = Literal[
     "failed",
     "unsupported",
     "rejected_precondition",
+    "rejected_protocol",
     "expired",
 ]
 
@@ -535,6 +806,7 @@ class SessionContext(ContractModel):
 class AgentSession(ContractModel):
     schema_version: Literal["1.1"] = "1.1"
     session_id: str
+    owner_tenant_id: str = Field(default="legacy", exclude=True)
     owner_user_id: str = Field(exclude=True)
     app_id: str = "full_information_view"
     title: str = Field(min_length=1, max_length=200)
@@ -564,13 +836,28 @@ class PopulationMetricRow(ContractModel):
     area_name: str = Field(title="区域")
     person_count: int = Field(
         ge=0,
-        title="独居老人人数",
+        title="人口数",
         json_schema_extra={"unit": "人"},
     )
 
 
 class PopulationMetricTable(ContractModel):
     rows: list[PopulationMetricRow]
+
+
+class PopulationRankingRow(ContractModel):
+    rank: int = Field(ge=1, title="排名")
+    area_code: str = Field(title="区域编码")
+    area_name: str = Field(title="区域")
+    person_count: int = Field(
+        ge=0,
+        title="人口数",
+        json_schema_extra={"unit": "人"},
+    )
+
+
+class PopulationRankingTable(ContractModel):
+    rows: list[PopulationRankingRow]
 
 
 class HousingLeaseTypeRow(ContractModel):
@@ -600,6 +887,36 @@ class HousingAreaGroupTable(ContractModel):
     rows: list[HousingAreaGroupRow]
 
 
+class HousingRoomUseRow(ContractModel):
+    room_use: str = Field(min_length=1, max_length=100, title="户室用途")
+    dwelling_count: int = Field(
+        ge=0,
+        title="户室数量",
+        json_schema_extra={"unit": "套"},
+    )
+
+
+class HousingRoomUseTable(ContractModel):
+    rows: list[HousingRoomUseRow]
+
+
+class HousingStockOverviewRow(ContractModel):
+    building_count: int = Field(
+        ge=0,
+        title="楼幢总数",
+        json_schema_extra={"unit": "栋"},
+    )
+    room_count: int = Field(
+        ge=0,
+        title="户室总数",
+        json_schema_extra={"unit": "间"},
+    )
+
+
+class HousingStockOverviewTable(ContractModel):
+    rows: list[HousingStockOverviewRow]
+
+
 class EventFinishRateRow(ContractModel):
     level: Literal["grid", "community", "street"] = Field(
         title="层级",
@@ -614,13 +931,181 @@ class EventFinishRateRow(ContractModel):
     finish_rate: float = Field(
         ge=0,
         le=100,
-        title="办结率",
+        title="事件办结率",
         json_schema_extra={"unit": "%"},
     )
 
 
 class EventFinishRateTable(ContractModel):
     rows: list[EventFinishRateRow]
+
+
+class EventTrendRow(ContractModel):
+    month: str = Field(
+        min_length=7,
+        max_length=7,
+        pattern=r"^[0-9]{4}-(0[1-9]|1[0-2])$",
+        title="月份",
+    )
+    event_count: int = Field(
+        ge=0,
+        title="事件总数",
+        json_schema_extra={"unit": "件"},
+    )
+
+
+class EventTrendTable(ContractModel):
+    rows: list[EventTrendRow]
+
+
+class EventCategoryRow(ContractModel):
+    category_code: str = Field(min_length=1, max_length=64, title="分类编码")
+    category_name: str = Field(min_length=1, max_length=200, title="一级分类")
+    event_count: int = Field(
+        ge=0, title="事件数量", json_schema_extra={"unit": "件"}
+    )
+
+
+class EventCategoryTable(ContractModel):
+    rows: list[EventCategoryRow]
+
+
+class GovernanceOverviewRow(ContractModel):
+    subject: Literal["person", "house", "enterprise", "event", "matter"] = Field(
+        title="治理要素",
+        json_schema_extra={
+            "value_labels": {
+                "person": "人",
+                "house": "房",
+                "enterprise": "企",
+                "event": "事",
+                "matter": "物",
+            }
+        },
+    )
+    subject_label: str = Field(min_length=1, max_length=20, title="治理要素名称")
+    related_count: int = Field(
+        ge=0, title="治理关联数", json_schema_extra={"unit": "个"}
+    )
+    total_count: int = Field(ge=0, title="要素总数", json_schema_extra={"unit": "个"})
+    coverage_rate: float = Field(
+        ge=0, title="治理覆盖率", json_schema_extra={"unit": "%"}
+    )
+
+
+class GovernanceOverviewTable(ContractModel):
+    rows: list[GovernanceOverviewRow]
+
+
+class GovernancePowerMetricRow(ContractModel):
+    type_code: Literal["roomNum", "10", "11", "12", "13", "nGridSum", "gridUnitSum"]
+    type_name: str = Field(min_length=1, max_length=20)
+    count: int = Field(ge=0)
+
+
+class GovernancePowerMetricTable(ContractModel):
+    rows: list[GovernancePowerMetricRow]
+
+
+class EnterpriseMetricRow(ContractModel):
+    area_code: str = Field(min_length=1, max_length=32, title="区域编码")
+    area_name: str = Field(min_length=1, max_length=200, title="区域")
+    enterprise_count: int = Field(
+        ge=0,
+        title="企业数量",
+        json_schema_extra={"unit": "家"},
+    )
+
+
+class EnterpriseMetricTable(ContractModel):
+    rows: list[EnterpriseMetricRow]
+
+
+class EnterpriseTypeDistributionRow(ContractModel):
+    enterprise_type: str = Field(min_length=1, max_length=100, title="企业类型")
+    enterprise_count: int = Field(
+        ge=0,
+        title="企业数量",
+        json_schema_extra={"unit": "家"},
+    )
+
+
+class EnterpriseTypeDistributionTable(ContractModel):
+    rows: list[EnterpriseTypeDistributionRow]
+
+
+class EnterpriseScaleDistributionRow(ContractModel):
+    enterprise_scale: str = Field(min_length=1, max_length=100, title="企业规模")
+    enterprise_count: int = Field(
+        ge=0,
+        title="企业数量",
+        json_schema_extra={"unit": "家"},
+    )
+
+
+class EnterpriseScaleDistributionTable(ContractModel):
+    rows: list[EnterpriseScaleDistributionRow]
+
+
+class EnterpriseIndustryDistributionRow(ContractModel):
+    industry_name: str = Field(min_length=1, max_length=100, title="行业名称")
+    enterprise_count: int = Field(
+        ge=0,
+        title="企业数量",
+        json_schema_extra={"unit": "家"},
+    )
+
+
+class EnterpriseIndustryDistributionTable(ContractModel):
+    rows: list[EnterpriseIndustryDistributionRow]
+
+
+class DynamicTableData(ContractModel):
+    """JSON-safe rows returned by a configured read-only Tool."""
+
+    rows: list[dict[str, JsonValue]]
+
+
+class ResultDisplayField(ContractModel):
+    field: str = Field(min_length=1, max_length=100)
+    label: str = Field(min_length=1, max_length=100)
+    role: Literal["dimension", "metric", "identifier"]
+    unit: str | None = Field(default=None, max_length=32)
+    value_labels: dict[str, str] = Field(default_factory=dict)
+
+
+class ResultVisualization(ContractModel):
+    kind: Literal["table", "metric", "bar", "line", "choropleth"]
+    title: str = Field(min_length=1, max_length=100)
+    category_field: str | None = Field(default=None, max_length=100)
+    value_field: str | None = Field(default=None, max_length=100)
+    label_field: str | None = Field(default=None, max_length=100)
+    area_code_field: str | None = Field(default=None, max_length=100)
+    x_field: str | None = Field(default=None, max_length=100)
+    y_field: str | None = Field(default=None, max_length=100)
+
+
+class ResultDownload(ContractModel):
+    formats: list[Literal["csv"]] = Field(min_length=1, max_length=1)
+    path: str = Field(min_length=1, max_length=512)
+
+    @model_validator(mode="after")
+    def validate_local_path(self) -> "ResultDownload":
+        if not self.path.startswith("/agent-api/v1/results/"):
+            raise ValueError("result download path must be a local result API path")
+        return self
+
+
+class ResultPresentation(ContractModel):
+    """Optional business-facing metadata; stable machine fields remain authoritative."""
+
+    locale: Literal["zh-CN"] = "zh-CN"
+    title: str = Field(min_length=1, max_length=100)
+    summary: str = Field(min_length=1, max_length=500)
+    status_label: str = Field(min_length=1, max_length=32)
+    fields: list[ResultDisplayField] = Field(default_factory=list, max_length=100)
+    visualizations: list[ResultVisualization] = Field(default_factory=list, max_length=10)
+    download: ResultDownload | None = None
 
 
 class TableDataResult(ContractModel):
@@ -637,12 +1122,25 @@ class TableDataResult(ContractModel):
     inline: bool = True
     data: (
         PopulationMetricTable
+        | PopulationRankingTable
         | HousingLeaseTypeTable
         | HousingAreaGroupTable
+        | HousingRoomUseTable
+        | HousingStockOverviewTable
         | EventFinishRateTable
+        | EventTrendTable
+        | EventCategoryTable
+        | GovernanceOverviewTable
+        | GovernancePowerMetricTable
+        | EnterpriseMetricTable
+        | EnterpriseTypeDistributionTable
+        | EnterpriseScaleDistributionTable
+        | EnterpriseIndustryDistributionTable
+        | DynamicTableData
     )
     row_count: int = Field(ge=0)
     truncated: bool = False
+    presentation: ResultPresentation | None = None
 
 
 class AreaCandidate(ContractModel):
@@ -673,6 +1171,7 @@ class AreaCandidatesResult(ContractModel):
     inline: bool = True
     data: AreaCandidatesData
     candidate_count: int = Field(ge=0, le=20)
+    presentation: ResultPresentation | None = None
 
     def authorization_area_scope(self) -> MetricQueryScope | None:
         if self.data.resolved_area_code is None:
@@ -756,6 +1255,17 @@ class EvidenceFreshness(ContractModel):
     expected_update_cycle: str | None = None
 
 
+class EvidenceDisplay(ContractModel):
+    locale: Literal["zh-CN"] = "zh-CN"
+    title: str = Field(default="数据证据", min_length=1, max_length=100)
+    source_label: str = Field(min_length=1, max_length=100)
+    dataset_label: str = Field(min_length=1, max_length=100)
+    tool_label: str = Field(min_length=1, max_length=100)
+    area_summary: str = Field(min_length=1, max_length=300)
+    freshness_label: str = Field(min_length=1, max_length=100)
+    method_note: str | None = Field(default=None, min_length=1, max_length=300)
+
+
 class Evidence(ContractModel):
     schema_version: Literal["1.1"] = "1.1"
     evidence_id: str
@@ -774,6 +1284,7 @@ class Evidence(ContractModel):
     policy_fingerprint: str
     tool: EvidenceToolRef
     freshness: EvidenceFreshness
+    display: EvidenceDisplay | None = None
 
 
 class ToolResultPolicy(ContractModel):
@@ -786,6 +1297,15 @@ class ToolResultPolicy(ContractModel):
     request_fingerprint: str
     policy_fingerprint: str
     masked_fields: list[str] = Field(default_factory=list)
+
+
+class SemanticFilterLineage(ContractModel):
+    """Server-resolved semantic filter context safe for answer rendering."""
+
+    field: str = Field(min_length=1, max_length=64)
+    operator: str = Field(min_length=1, max_length=64)
+    value: str | int | float | bool | list[str | int | float] | None = None
+    display_label: str | None = Field(default=None, min_length=1, max_length=100)
 
 
 class SemanticResultLineage(ContractModel):
@@ -811,6 +1331,7 @@ class SemanticResultLineage(ContractModel):
     area_code: str = Field(min_length=1, max_length=32)
     output: str = Field(min_length=1, max_length=32)
     metric_definitions: list[EvidenceMetricDefinition] = Field(default_factory=list)
+    filter_contexts: list[SemanticFilterLineage] = Field(default_factory=list)
 
 
 class ToolResult(ContractModel):

@@ -9,7 +9,12 @@ from __future__ import annotations
 
 from datetime import UTC, datetime
 
-from full_view_agent.application.errors import ResourceNotFound, RunStateConflict
+from full_view_agent.application.errors import (
+    ConnectorConfigurationInvalid,
+    ResourceNotFound,
+    RunStateConflict,
+    UpstreamUnavailable,
+)
 from full_view_agent.application.session_run_service import new_id
 from full_view_agent.domain.capability import (
     CapabilityBase,
@@ -18,21 +23,39 @@ from full_view_agent.domain.capability import (
     CapabilityStatus,
     CapabilityType,
     Connector,
+    ConnectorAuditEvent,
     SkillCapability,
     ToolCapability,
     WorkflowCapability,
+    WorkflowEdgeDefinition,
+    WorkflowNodeDefinition,
     is_valid_transition,
 )
 from full_view_agent.infrastructure.capability_repository import (
     CapabilityRepository,
+)
+from full_view_agent.infrastructure.http_connector_executor import (
+    HttpConnectorExecutor,
+    SSRFProtectionError,
+    configured_connector_allowed_private_hosts,
 )
 
 
 class CapabilityManagementService:
     """Manages capability lifecycle.  All mutations go through here."""
 
-    def __init__(self, repository: CapabilityRepository) -> None:
+    def __init__(
+        self,
+        repository: CapabilityRepository,
+        *,
+        allowed_private_hosts: frozenset[str] | None = None,
+    ) -> None:
         self._repo = repository
+        self._allowed_private_hosts = (
+            configured_connector_allowed_private_hosts()
+            if allowed_private_hosts is None
+            else allowed_private_hosts
+        )
 
     # ---- Tool CRUD ----
 
@@ -178,27 +201,14 @@ class CapabilityManagementService:
         version: str,
         domain: str = "governance",
         description: str = "",
-        nodes: list[dict[str, object]] | None = None,
-        edges: list[dict[str, object]] | None = None,
+        nodes: list[WorkflowNodeDefinition] | None = None,
+        edges: list[WorkflowEdgeDefinition] | None = None,
         timeout_seconds: int = 300,
         requires_human_confirmation: bool = False,
         created_by: str = "system",
     ) -> WorkflowCapability:
-        from full_view_agent.domain.capability import (
-            WorkflowEdgeDefinition,
-            WorkflowNodeDefinition,
-        )
-
-        parsed_nodes = (
-            [WorkflowNodeDefinition.model_validate(n) for n in nodes]
-            if nodes
-            else []
-        )
-        parsed_edges = (
-            [WorkflowEdgeDefinition.model_validate(e) for e in edges]
-            if edges
-            else []
-        )
+        parsed_nodes = [WorkflowNodeDefinition.model_validate(n) for n in nodes] if nodes else []
+        parsed_edges = [WorkflowEdgeDefinition.model_validate(e) for e in edges] if edges else []
         workflow = WorkflowCapability(
             capability_id=capability_id,
             name=name,
@@ -226,14 +236,15 @@ class CapabilityManagementService:
         to_status: CapabilityStatus,
         changed_by: str,
         reason: str = "",
+        expected_etag: int | None = None,
     ) -> CapabilityBase:
         existing = await self._repo.get(capability_id, version)
         if existing is None:
             raise ResourceNotFound("capability not found")
+        if expected_etag is not None and existing.etag != expected_etag:
+            raise RunStateConflict("capability etag mismatch")
         if not is_valid_transition(existing.status, to_status):
-            raise RunStateConflict(
-                f"invalid transition {existing.status} -> {to_status}"
-            )
+            raise RunStateConflict(f"invalid transition {existing.status} -> {to_status}")
         updated = existing.model_copy(
             update={
                 "status": to_status,
@@ -261,6 +272,24 @@ class CapabilityManagementService:
         )
         return updated
 
+    async def mark_testing(
+        self,
+        *,
+        capability_id: str,
+        version: str,
+        changed_by: str,
+        reason: str = "",
+        expected_etag: int | None = None,
+    ) -> CapabilityBase:
+        return await self.advance_status(
+            capability_id=capability_id,
+            version=version,
+            to_status="testing",
+            changed_by=changed_by,
+            reason=reason,
+            expected_etag=expected_etag,
+        )
+
     async def publish(
         self,
         *,
@@ -268,6 +297,7 @@ class CapabilityManagementService:
         version: str,
         published_by: str,
         reason: str = "",
+        expected_etag: int | None = None,
     ) -> CapabilitySnapshot:
         capability = await self.advance_status(
             capability_id=capability_id,
@@ -275,6 +305,7 @@ class CapabilityManagementService:
             to_status="published",
             changed_by=published_by,
             reason=reason,
+            expected_etag=expected_etag,
         )
         snapshot = CapabilitySnapshot(
             snapshot_id=new_id("snap"),
@@ -294,6 +325,7 @@ class CapabilityManagementService:
         version: str,
         changed_by: str,
         reason: str = "",
+        expected_etag: int | None = None,
     ) -> CapabilityBase:
         result = await self.advance_status(
             capability_id=capability_id,
@@ -301,6 +333,7 @@ class CapabilityManagementService:
             to_status="disabled",
             changed_by=changed_by,
             reason=reason,
+            expected_etag=expected_etag,
         )
         await self._repo.deactivate_snapshots(capability_id)
         return result
@@ -312,14 +345,20 @@ class CapabilityManagementService:
         to_version: str,
         changed_by: str,
         reason: str = "",
+        expected_etag: int | None = None,
     ) -> CapabilitySnapshot:
         current = await self._repo.get_active_snapshot(capability_id)
         target = await self._repo.get(capability_id, to_version)
         if target is None:
             raise ResourceNotFound("target version not found")
+        if expected_etag is not None and target.etag != expected_etag:
+            raise RunStateConflict("capability etag mismatch")
+        if target.status not in ("published", "disabled"):
+            raise RunStateConflict("rollback requires a previously published version")
         if target.status == "published":
             pass
         else:
+            previous_status = target.status
             target = target.model_copy(
                 update={
                     "status": "published",
@@ -334,6 +373,17 @@ class CapabilityManagementService:
                 await self._repo.save_skill(target)
             elif isinstance(target, WorkflowCapability):
                 await self._repo.save_workflow(target)
+            await self._repo.record_lifecycle_event(
+                CapabilityLifecycleEvent(
+                    event_id=new_id("cle"),
+                    capability_id=capability_id,
+                    from_status=previous_status,
+                    to_status="published",
+                    version=to_version,
+                    changed_by=changed_by,
+                    reason=f"rollback restore: {reason}",
+                )
+            )
         snapshot = CapabilitySnapshot(
             snapshot_id=new_id("snap"),
             capability_id=capability_id,
@@ -355,9 +405,7 @@ class CapabilityManagementService:
 
     # ---- Queries ----
 
-    async def get(
-        self, capability_id: str, version: str
-    ) -> CapabilityBase | None:
+    async def get(self, capability_id: str, version: str) -> CapabilityBase | None:
         return await self._repo.get(capability_id, version)
 
     async def list_capabilities(
@@ -366,25 +414,17 @@ class CapabilityManagementService:
         capability_type: CapabilityType | None = None,
         status: CapabilityStatus | None = None,
     ) -> list[CapabilityBase]:
-        return await self._repo.list_capabilities(
-            capability_type=capability_type, status=status
-        )
+        return await self._repo.list_capabilities(capability_type=capability_type, status=status)
 
-    async def get_active_snapshot(
-        self, capability_id: str
-    ) -> CapabilitySnapshot | None:
+    async def get_active_snapshot(self, capability_id: str) -> CapabilitySnapshot | None:
         return await self._repo.get_active_snapshot(capability_id)
 
     async def get_runtime_tools(self) -> list[ToolCapability]:
         """Return only published tools for runtime discovery."""
-        all_tools = await self._repo.list_capabilities(
-            capability_type="tool", status="published"
-        )
+        all_tools = await self._repo.list_capabilities(capability_type="tool", status="published")
         return [t for t in all_tools if isinstance(t, ToolCapability)]
 
-    async def list_lifecycle_events(
-        self, capability_id: str
-    ) -> list[CapabilityLifecycleEvent]:
+    async def list_lifecycle_events(self, capability_id: str) -> list[CapabilityLifecycleEvent]:
         return await self._repo.list_lifecycle_events(capability_id)
 
     # ---- Connectors ----
@@ -400,100 +440,156 @@ class CapabilityManagementService:
         denied_hosts: list[str] | None = None,
         timeout_ms: int = 8000,
         credential_ref: str | None = None,
+        created_by: str = "system",
     ) -> Connector:
-        # F4: Require non-empty path whitelist
-        if not allowed_path_prefixes:
-            raise ValueError(
-                "allowed_path_prefixes must be non-empty for security. "
-                "Connectors must specify which paths are allowed."
-            )
-
-        # F4: Validate base_url for SSRF protection
-        _validate_url_ssrf(base_url)
-
+        if await self._repo.get_connector(connector_id) is not None:
+            raise RunStateConflict("connector already exists")
         connector = Connector(
             connector_id=connector_id,
             name=name,
             base_url=base_url,
             description=description,
-            allowed_path_prefixes=allowed_path_prefixes,
+            allowed_path_prefixes=allowed_path_prefixes or [],
             denied_hosts=denied_hosts or [],
             credential_ref=credential_ref,
             timeout_ms=timeout_ms,
+            created_by=created_by,
+            updated_by=created_by,
         )
+        await self._validate_connector_configuration(connector)
         await self._repo.save_connector(connector)
         return connector
 
-    async def list_connectors(
-        self, *, active_only: bool = True
-    ) -> list[Connector]:
+    async def list_connectors(self, *, active_only: bool = True) -> list[Connector]:
         return await self._repo.list_connectors(active_only=active_only)
 
+    async def get_connector(self, connector_id: str) -> Connector:
+        connector = await self._repo.get_connector(connector_id)
+        if connector is None:
+            raise ResourceNotFound("connector not found")
+        return connector
 
-def _validate_url_ssrf(url: str) -> None:
-    """F4: Validate URL to prevent SSRF attacks.
-
-    Rejects:
-    - Loopback addresses (127.0.0.0/8, ::1)
-    - Private networks (10.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16)
-    - Link-local (169.254.0.0/16, fe80::/10)
-    - Multicast (224.0.0.0/4, ff00::/8)
-    - Cloud metadata (169.254.169.254)
-    - localhost, .local, .internal domains
-    """
-    import ipaddress
-    import socket
-    from urllib.parse import urlparse
-
-    parsed = urlparse(url)
-    if not parsed.scheme or not parsed.netloc:
-        raise ValueError(f"Invalid URL: {url}")
-
-    # Reject non-HTTP(S) schemes
-    if parsed.scheme not in ("http", "https"):
-        raise ValueError(f"URL scheme must be http or https, got {parsed.scheme}")
-
-    hostname = parsed.hostname
-    if not hostname:
-        raise ValueError(f"URL must have a hostname: {url}")
-
-    # Reject localhost and internal domains
-    hostname_lower = hostname.lower()
-    if hostname_lower in ("localhost", "127.0.0.1", "::1"):
-        raise ValueError(f"Cannot use localhost or loopback: {hostname}")
-    if hostname_lower.endswith(".local") or hostname_lower.endswith(".internal"):
-        raise ValueError(f"Cannot use .local or .internal domains: {hostname}")
-
-    # Resolve hostname and check all IPs
-    try:
-        addrinfos = socket.getaddrinfo(hostname, None, socket.AF_UNSPEC, socket.SOCK_STREAM)
-    except socket.gaierror as e:
-        raise ValueError(f"Cannot resolve hostname {hostname}: {e}") from e
-
-    for addrinfo in addrinfos:
-        ip_str = addrinfo[4][0]
+    async def update_connector(
+        self,
+        *,
+        connector_id: str,
+        expected_etag: int,
+        actor: str,
+        reason: str,
+        **fields: object,
+    ) -> Connector:
+        existing = await self.get_connector(connector_id)
+        if existing.etag != expected_etag:
+            raise RunStateConflict("connector etag conflict")
+        allowed_fields = {
+            "name", "base_url", "description", "allowed_path_prefixes",
+            "denied_hosts", "timeout_ms", "credential_ref",
+        }
+        unknown = set(fields).difference(allowed_fields)
+        if unknown:
+            raise ValueError(f"unsupported connector fields: {sorted(unknown)}")
+        changes = {
+            key: value
+            for key, value in fields.items()
+            if value is not None or key == "credential_ref"
+        }
+        candidate = existing.model_copy(update=changes)
+        await self._validate_connector_configuration(candidate)
+        changed_fields = sorted(
+            key for key in changes if getattr(existing, key) != getattr(candidate, key)
+        )
+        candidate = candidate.model_copy(
+            update={
+                "updated_by": actor,
+                "updated_at": datetime.now(UTC),
+                "etag": existing.etag + 1,
+            }
+        )
+        event = ConnectorAuditEvent(
+            event_id=new_id("cae"), connector_id=connector_id,
+            action="update", actor=actor, reason=reason,
+            previous_etag=existing.etag, new_etag=candidate.etag,
+            changed_fields=changed_fields, from_active=existing.is_active,
+            to_active=candidate.is_active,
+        )
         try:
-            ip = ipaddress.ip_address(ip_str)
-        except ValueError:
-            continue
+            return await self._repo.update_connector(
+                candidate, expected_etag=expected_etag, event=event
+            )
+        except KeyError as exc:
+            raise ResourceNotFound("connector not found") from exc
 
-        # Reject private, loopback, link-local, multicast, reserved
-        if ip.is_private:
-            raise ValueError(f"URL resolves to private IP {ip_str}: {url}")
-        if ip.is_loopback:
-            raise ValueError(f"URL resolves to loopback IP {ip_str}: {url}")
-        if ip.is_link_local:
-            raise ValueError(f"URL resolves to link-local IP {ip_str}: {url}")
-        if ip.is_multicast:
-            raise ValueError(f"URL resolves to multicast IP {ip_str}: {url}")
-        if ip.is_reserved:
-            raise ValueError(f"URL resolves to reserved IP {ip_str}: {url}")
-        if ip.is_unspecified:
-            raise ValueError(f"URL resolves to unspecified IP {ip_str}: {url}")
+    async def set_connector_active(
+        self,
+        *,
+        connector_id: str,
+        is_active: bool,
+        expected_etag: int,
+        actor: str,
+        reason: str,
+    ) -> Connector:
+        existing = await self.get_connector(connector_id)
+        if existing.etag != expected_etag:
+            raise RunStateConflict("connector etag conflict")
+        if existing.is_active == is_active:
+            raise RunStateConflict("connector already has requested state")
+        if is_active:
+            await self._validate_connector_configuration(existing)
+        candidate = existing.model_copy(
+            update={
+                "is_active": is_active,
+                "updated_by": actor,
+                "updated_at": datetime.now(UTC),
+                "etag": existing.etag + 1,
+            }
+        )
+        event = ConnectorAuditEvent(
+            event_id=new_id("cae"), connector_id=connector_id,
+            action="enable" if is_active else "disable",
+            actor=actor, reason=reason, previous_etag=existing.etag,
+            new_etag=candidate.etag, changed_fields=["is_active"],
+            from_active=existing.is_active, to_active=is_active,
+        )
+        try:
+            return await self._repo.update_connector(
+                candidate, expected_etag=expected_etag, event=event
+            )
+        except KeyError as exc:
+            raise ResourceNotFound("connector not found") from exc
 
-        # Specifically reject cloud metadata endpoint
-        if ip_str == "169.254.169.254":
-            raise ValueError(f"URL resolves to cloud metadata IP {ip_str}: {url}")
+    async def list_connector_audit_events(
+        self, connector_id: str
+    ) -> list[ConnectorAuditEvent]:
+        await self.get_connector(connector_id)
+        return await self._repo.list_connector_audit_events(connector_id)
+
+    async def _validate_connector_configuration(self, connector: Connector) -> None:
+        if not connector.allowed_path_prefixes:
+            raise ConnectorConfigurationInvalid(
+                "允许路径前缀不能为空"
+            )
+        import posixpath
+
+        for prefix in connector.allowed_path_prefixes:
+            if (
+                not prefix.startswith("/")
+                or "//" in prefix
+                or ".." in prefix.split("/")
+                or posixpath.normpath(prefix) != prefix
+            ):
+                raise ConnectorConfigurationInvalid(
+                    "允许路径前缀包含不安全或非规范路径"
+                )
+        validator = HttpConnectorExecutor(
+            self._repo, allowed_private_hosts=self._allowed_private_hosts
+        )
+        try:
+            validator._validate_url_ssrf(connector.base_url, connector.denied_hosts)  # noqa: SLF001
+            await validator._validate_dns(connector.base_url)  # noqa: SLF001
+        except (SSRFProtectionError, UpstreamUnavailable) as exc:
+            raise ConnectorConfigurationInvalid(
+                "基础地址未通过 SSRF 安全校验"
+            ) from exc
 
 
 def _path_allowed(connector: Connector, resource_path: str) -> bool:
@@ -506,6 +602,7 @@ def _path_allowed(connector: Connector, resource_path: str) -> bool:
     """
     # Normalize the resource path
     import posixpath
+
     normalized_path = posixpath.normpath(resource_path)
 
     # Reject paths with directory traversal attempts
@@ -517,7 +614,10 @@ def _path_allowed(connector: Connector, resource_path: str) -> bool:
         return False
 
     # Check if normalized path starts with any allowed prefix
-    return any(
-        normalized_path.startswith(prefix.rstrip("/"))
-        for prefix in connector.allowed_path_prefixes
-    )
+    for prefix in connector.allowed_path_prefixes:
+        normalized_prefix = posixpath.normpath(prefix)
+        if normalized_prefix == "/" or normalized_path == normalized_prefix:
+            return True
+        if normalized_path.startswith(f"{normalized_prefix.rstrip('/')}/"):
+            return True
+    return False

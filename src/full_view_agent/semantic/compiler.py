@@ -132,7 +132,12 @@ class SemanticCompiler:
             )
         rows = result.data.rows
         if rows:
-            actual_fields = set(rows[0].model_dump().keys())
+            first_row = rows[0]
+            actual_fields = set(
+                first_row.keys()
+                if isinstance(first_row, dict)
+                else first_row.model_dump().keys()
+            )
             if actual_fields != set(expected.row_fields):
                 raise ResultSchemaMismatch(
                     f"result row fields {sorted(actual_fields)} do not match "
@@ -145,9 +150,15 @@ class SemanticCompiler:
         spec: SemanticQuerySpec,
     ) -> ResultShape:
         requested = tuple(spec.group_by)
+        requested_metrics = tuple(spec.metrics)
         for shape in subject.result_shapes:
-            if shape.group_by_selection is not None and (
-                shape.group_by_selection == requested
+            if (
+                shape.group_by_selection is not None
+                and shape.group_by_selection == requested
+                and (
+                    shape.metric_selection is None
+                    or shape.metric_selection == requested_metrics
+                )
             ):
                 return shape
         for shape in subject.result_shapes:
@@ -155,7 +166,7 @@ class SemanticCompiler:
                 return shape
         raise SemanticKernelError(
             f"subject {subject.subject_id} has no result shape for "
-            f"group_by {list(requested)}"
+            f"metrics {list(requested_metrics)} and group_by {list(requested)}"
         )
 
     @staticmethod
@@ -174,6 +185,7 @@ class SemanticCompiler:
                         query_filter.model_dump() for query_filter in spec.filters
                     ],
                     "group_by": list(spec.group_by),
+                    "order_by": [order.model_dump() for order in spec.order_by],
                     "limit": spec.limit,
                     "presentation_hint": (
                         "choropleth" if spec.output == "choropleth" else "table"
@@ -184,16 +196,51 @@ class SemanticCompiler:
             return {
                 "query": {
                     "schema_version": "1.1",
+                    "metrics": list(spec.metrics),
                     "scope": scope,
                     "group_by": list(spec.group_by),
                     "limit": spec.limit,
                 }
             }
         if capability_id == "governance.query_event_metrics":
+            if spec.metrics == ["finish_rate"]:
+                return {
+                    "query": {
+                        "schema_version": "1.1",
+                        "scope": scope,
+                        "limit": spec.limit,
+                    }
+                }
+            query: dict[str, object] = {
+                "schema_version": "1.1",
+                "metrics": list(spec.metrics),
+                "scope": scope,
+                "group_by": list(spec.group_by),
+                "limit": spec.limit,
+            }
+            if spec.time_range is not None:
+                query["time_range"] = spec.time_range.model_dump(mode="json")
+            return {"query": query}
+        if capability_id == "governance.get_governance_overview":
             return {
                 "query": {
                     "schema_version": "1.1",
                     "scope": scope,
+                }
+            }
+        if capability_id == "governance.query_governance_power_metrics":
+            return {
+                "query": {
+                    "schema_version": "1.0",
+                    "scope": scope,
+                }
+            }
+        if capability_id == "governance.query_enterprise_metrics":
+            return {
+                "query": {
+                    "schema_version": "1.1",
+                    "scope": scope,
+                    "group_by": list(spec.group_by),
                     "limit": spec.limit,
                 }
             }

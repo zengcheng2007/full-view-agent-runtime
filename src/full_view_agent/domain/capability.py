@@ -144,10 +144,19 @@ class WorkflowNodeDefinition(ContractModel):
 
     node_id: str = Field(min_length=1, max_length=64)
     node_type: Literal[
-        "start", "tool", "condition", "human_confirmation", "summary", "end"
+        "start",
+        "tool",
+        "skill",
+        "condition",
+        "join",
+        "human_confirmation",
+        "summary",
+        "end",
     ]
     tool_capability_id: str | None = None
     tool_version: str | None = None
+    skill_capability_id: str | None = None
+    skill_version: str | None = None
     condition_expression: str | None = None
     config: dict[str, object] = Field(default_factory=dict)
 
@@ -155,6 +164,8 @@ class WorkflowNodeDefinition(ContractModel):
     def validate_tool_node(self) -> WorkflowNodeDefinition:
         if self.node_type == "tool" and not self.tool_capability_id:
             raise ValueError("tool node requires tool_capability_id")
+        if self.node_type == "skill" and not self.skill_capability_id:
+            raise ValueError("skill node requires skill_capability_id")
         return self
 
 
@@ -220,6 +231,9 @@ class Connector(ContractModel):
     is_active: bool = True
     credential_ref: str | None = None
     timeout_ms: int = Field(default=8000, ge=100, le=120_000)
+    created_by: str = Field(default="system", min_length=1, max_length=100)
+    updated_by: str = Field(default="system", min_length=1, max_length=100)
+    etag: int = Field(default=1, ge=1)
     created_at: datetime = Field(default_factory=lambda: datetime.now(UTC))
     updated_at: datetime = Field(default_factory=lambda: datetime.now(UTC))
 
@@ -229,6 +243,20 @@ class Connector(ContractModel):
         if not v.startswith(("http://", "https://")):
             raise ValueError("base_url must start with http:// or https://")
         return v
+
+
+class ConnectorAuditEvent(ContractModel):
+    event_id: str = Field(min_length=1, max_length=128)
+    connector_id: str = Field(min_length=1, max_length=128)
+    action: Literal["update", "enable", "disable"]
+    actor: str = Field(min_length=1, max_length=100)
+    reason: str = Field(min_length=1, max_length=2000)
+    previous_etag: int = Field(ge=1)
+    new_etag: int = Field(ge=2)
+    changed_fields: list[str] = Field(default_factory=list)
+    from_active: bool
+    to_active: bool
+    changed_at: datetime = Field(default_factory=lambda: datetime.now(UTC))
 
 
 class ModelConfig(ContractModel):

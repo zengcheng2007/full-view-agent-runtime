@@ -18,9 +18,11 @@ from full_view_agent.application.capability_service import (
     DynamicToolAdapter,
     ToolAdapter,
 )
-from full_view_agent.application.model_planner import ModelPlannerFactory
 from full_view_agent.application.model_provider import ModelProvider
-from full_view_agent.application.native_orchestrator import NativeOrchestrator
+from full_view_agent.application.native_orchestrator import (
+    NativeOrchestrator,
+    RunPlannerFactory,
+)
 from full_view_agent.application.policy import MinimalPolicyAdapter
 from full_view_agent.application.ports import (
     AgentStore,
@@ -30,6 +32,9 @@ from full_view_agent.application.ports import (
 )
 from full_view_agent.application.run_capability_snapshot import (
     RunCapabilitySnapshotService,
+)
+from full_view_agent.application.runtime_workflow_registry import (
+    RuntimeWorkflowRegistry,
 )
 from full_view_agent.application.semantic_wiring import SemanticCapabilityStack
 from full_view_agent.application.session_run_service import SessionRunService
@@ -49,10 +54,11 @@ def create_orchestrator(
     auth_context_refresher: AuthContextRefresher | None = None,
     denial_ledger: DenialLedger | None = None,
     model_provider: ModelProvider | None = None,
-    planner_factory: ModelPlannerFactory | None = None,
+    planner_factory: RunPlannerFactory | None = None,
     semantic_stack: SemanticCapabilityStack | None = None,
     dynamic_tool_adapter: DynamicToolAdapter | None = None,
     run_capability_snapshot_service: RunCapabilitySnapshotService | None = None,
+    runtime_workflow_registry: RuntimeWorkflowRegistry | None = None,
 ) -> OrchestrationPort:
     """Build the orchestrator selected by ``FULL_VIEW_ORCHESTRATOR``.
 
@@ -101,6 +107,12 @@ def create_orchestrator(
             evidence_source_system=evidence_source_system,
             observation_service=observation_service,
             snapshot_service=run_capability_snapshot_service,
+            run_harness_factory=(
+                semantic_stack.build_harness_for_registry
+                if semantic_stack is not None
+                else None
+            ),
+            runtime_workflow_registry=runtime_workflow_registry,
         )
     if mode == "langgraph":
         from full_view_agent.infrastructure.checkpoint_mapping_store import (
@@ -145,6 +157,12 @@ def create_orchestrator(
             checkpoint_manager=checkpoint_manager,
             checkpoint_mappings=checkpoint_mappings,
             snapshot_service=run_capability_snapshot_service,
+            run_harness_factory=(
+                semantic_stack.build_harness_for_registry
+                if semantic_stack is not None
+                else None
+            ),
+            runtime_workflow_registry=runtime_workflow_registry,
         )
     raise RuntimeError(
         f"Unknown FULL_VIEW_ORCHESTRATOR={mode!r}; "

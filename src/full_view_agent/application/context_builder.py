@@ -4,6 +4,9 @@ from typing import Protocol
 from full_view_agent.application.analysis_intent_presenter import (
     AnalysisIntentToolPresentation,
 )
+from full_view_agent.application.dynamic_skill_workflow_bridge import (
+    RuntimeSkillContract,
+)
 from full_view_agent.application.errors import ResourceNotFound
 from full_view_agent.application.harness import HarnessState
 from full_view_agent.application.model_provider import (
@@ -17,8 +20,14 @@ from full_view_agent.application.prompt_catalog import (
     FULL_VIEW_SYSTEM_PROMPT_VERSION,
     build_full_view_system_prompt,
 )
+from full_view_agent.application.runtime_prompt_registry import RuntimePromptRegistry
+from full_view_agent.application.runtime_skill_registry import (
+    SKILL_INVOKE_TOOL_ID,
+    RuntimeSkillRegistry,
+)
 from full_view_agent.application.tool_registry import ToolRegistry
 from full_view_agent.domain.models import AgentMessage, AuthContext, MessageContent
+from full_view_agent.domain.prompt_template import RuntimePromptSnapshot
 from full_view_agent.semantic.presenter import SemanticToolPresentation
 
 NON_RETRYABLE_TOOL_WARNINGS = {
@@ -63,6 +72,9 @@ class AgentContextBuilder:
         max_context_chars: int = MAX_CONTEXT_CHARS,
         semantic_presenter: SemanticToolPresenting | None = None,
         analysis_intent_presenter: AnalysisIntentToolPresenting | None = None,
+        skill_registry: RuntimeSkillRegistry | None = None,
+        prompt_registry: RuntimePromptRegistry | None = None,
+        prompt_snapshot: RuntimePromptSnapshot | None = None,
     ) -> None:
         self._store = store
         self._registry = registry
@@ -70,6 +82,38 @@ class AgentContextBuilder:
         self._max_chars = max_context_chars
         self._semantic_presenter = semantic_presenter
         self._analysis_intent_presenter = analysis_intent_presenter
+        self._skill_registry = skill_registry or RuntimeSkillRegistry()
+        self._prompt_registry = prompt_registry or RuntimePromptRegistry()
+        self._prompt_snapshot = prompt_snapshot
+
+    def for_registry(
+        self,
+        registry: ToolRegistry,
+        *,
+        skill_registry: RuntimeSkillRegistry | None = None,
+        prompt_snapshot: RuntimePromptSnapshot | None = None,
+    ) -> "AgentContextBuilder":
+        """Clone model context construction against the Run-pinned registry."""
+
+        return AgentContextBuilder(
+            store=self._store,
+            registry=registry,
+            max_context_messages=self._max_messages,
+            max_context_chars=self._max_chars,
+            semantic_presenter=self._semantic_presenter,
+            analysis_intent_presenter=self._analysis_intent_presenter,
+            skill_registry=(skill_registry or self._skill_registry).snapshot(),
+            prompt_registry=self._prompt_registry,
+            prompt_snapshot=prompt_snapshot or self._prompt_snapshot,
+        )
+
+    def skill_registry_snapshot(self):
+        """Expose immutable contracts for integration tests and diagnostics."""
+
+        return self._skill_registry.list()
+
+    def registry_snapshot(self) -> ToolRegistry:
+        return self._registry.snapshot()
 
     async def build(
         self,
@@ -128,6 +172,15 @@ class AgentContextBuilder:
             if tool_id not in terminal_tool_ids
             if self._is_tool_authorized(tool_id, entitlements, datasets)
         )
+        skill_callable_tool_ids = set(authorized_tool_ids)
+        if semantic_presentation is not None:
+            skill_callable_tool_ids.add(semantic_presentation.tool_id)
+        if analysis_intent_presentation is not None:
+            skill_callable_tool_ids.add(analysis_intent_presentation.tool_id)
+        available_skills = self._skill_registry.available_for_tools(
+            skill_callable_tool_ids
+        )
+        prompt_snapshot = self._prompt_snapshot or self._prompt_registry.snapshot()
         messages = [
             ModelMessage(
                 role="system",
@@ -142,6 +195,10 @@ class AgentContextBuilder:
                     housing_next_area_enabled=(
                         self._registry.housing_next_area_enabled
                     ),
+                    event_category_enabled=(
+                        self._registry.event_category_enabled
+                    ),
+                    managed_guidance=(prompt_snapshot.content if prompt_snapshot else None),
                 ),
             )
         ]
@@ -152,6 +209,13 @@ class AgentContextBuilder:
         messages.extend(
             _format_messages(session_messages, self._max_messages, self._max_chars)
         )
+        if available_skills:
+            messages.append(
+                ModelMessage(
+                    role="system",
+                    content=self._skill_registry.prompt_fragment(available_skills),
+                )
+            )
         if state.inherited_result_ids:
             inherited_observations: list[dict[str, object]] = []
             for result_id in state.inherited_result_ids:
@@ -260,7 +324,7 @@ class AgentContextBuilder:
 
         entitlements = set(auth_context.entitlements)
         datasets = set(auth_context.data_scopes.datasets)
-        tools: list[ModelToolDefinition] = []
+        direct_tools: list[ModelToolDefinition] = []
         for tool_id in self._registry.list_tool_ids():
             if tool_id in shadowed_tool_ids:
                 continue
@@ -269,7 +333,7 @@ class AgentContextBuilder:
             if not self._is_tool_authorized(tool_id, entitlements, datasets):
                 continue
             descriptor = self._registry.get_model_descriptor(tool_id)
-            tools.append(
+            direct_tools.append(
                 ModelToolDefinition(
                     tool_id=tool_id,
                     description=descriptor.description,
@@ -281,7 +345,7 @@ class AgentContextBuilder:
             semantic_presentation is not None
             and semantic_presentation.tool_id not in terminal_tool_ids
         ):
-            tools.append(
+            direct_tools.append(
                 ModelToolDefinition(
                     tool_id=semantic_presentation.tool_id,
                     description=semantic_presentation.description,
@@ -289,10 +353,13 @@ class AgentContextBuilder:
                     server_arguments=semantic_presentation.server_arguments,
                     subject_intent_terms=semantic_presentation.subject_intent_terms,
                     subject_trigger_terms=semantic_presentation.subject_trigger_terms,
+                    specialized_filter_intent_terms=(
+                        semantic_presentation.specialized_filter_intent_terms
+                    ),
                 )
             )
         if analysis_intent_presentation is not None:
-            tools.append(
+            direct_tools.append(
                 ModelToolDefinition(
                     tool_id=analysis_intent_presentation.tool_id,
                     description=analysis_intent_presentation.description,
@@ -300,10 +367,15 @@ class AgentContextBuilder:
                     subject_intent_terms=analysis_intent_presentation.goal_intent_terms,
                 )
             )
+        tools = _apply_skill_entry(direct_tools, available_skills)
         return ModelRequest(
             messages=tuple(messages),
             tools=tuple(tools),
-            prompt_version=FULL_VIEW_SYSTEM_PROMPT_VERSION,
+            prompt_version=(
+                f"{FULL_VIEW_SYSTEM_PROMPT_VERSION}+{prompt_snapshot.composite_version}"
+                if prompt_snapshot
+                else FULL_VIEW_SYSTEM_PROMPT_VERSION
+            ),
         )
 
     def _is_tool_authorized(
@@ -318,6 +390,56 @@ class AgentContextBuilder:
         if not set(manifest.required_permissions).issubset(entitlements):
             return False
         return manifest.dataset_id in datasets
+
+
+def _apply_skill_entry(
+    tools: list[ModelToolDefinition],
+    skills: tuple[RuntimeSkillContract, ...],
+) -> list[ModelToolDefinition]:
+    if not skills:
+        return tools
+    allowlists = {
+        skill.skill_id: tuple(skill.allowed_tool_ids)
+        for skill in skills
+    }
+    covered_tool_ids = {
+        tool_id for allowed in allowlists.values() for tool_id in allowed
+    }
+    definitions = {tool.tool_id: tool for tool in tools}
+    wrapped = {
+        tool_id: definitions[tool_id]
+        for tool_id in sorted(covered_tool_ids)
+        if tool_id in definitions
+    }
+    if not wrapped:
+        return tools
+    direct = [tool for tool in tools if tool.tool_id not in wrapped]
+    skill_ids = sorted(allowlists)
+    return [
+        *direct,
+        ModelToolDefinition(
+            tool_id=SKILL_INVOKE_TOOL_ID,
+            description=(
+                "按已发布 Skill 的指导调用其白名单内业务 Tool。"
+                "skill_id 与 tool_id 的组合会由服务端再次校验。"
+            ),
+            input_schema={
+                "type": "object",
+                "additionalProperties": False,
+                "properties": {
+                    "skill_id": {"type": "string", "enum": skill_ids},
+                    "tool_id": {
+                        "type": "string",
+                        "enum": sorted(wrapped),
+                    },
+                    "arguments": {"type": "object"},
+                },
+                "required": ["skill_id", "tool_id", "arguments"],
+            },
+            skill_tool_allowlists=allowlists,
+            wrapped_tool_definitions=wrapped,
+        ),
+    ]
 
 
 def _build_observation(result: object) -> dict[str, object]:

@@ -32,6 +32,19 @@ class ModelToolDefinition:
     # exposed without a semantic facade (for example in reduced test/runtime
     # configurations). It is server metadata and is never sent to providers.
     required_intent_terms: tuple[str, ...] = ()
+    # Optional filter values may represent a materially narrower business
+    # object than their parent subject. The runtime accepts those values only
+    # when the latest user message contains an explicit matching term.
+    specialized_filter_intent_terms: dict[
+        str, dict[str, tuple[str, ...]]
+    ] = field(default_factory=dict)
+    # Server-only metadata for the virtual Skill entry. Providers serialize
+    # only ``tool_id``, ``description`` and ``input_schema``. The planner uses
+    # these maps to unwrap and validate a Skill-owned Tool call.
+    skill_tool_allowlists: dict[str, tuple[str, ...]] = field(default_factory=dict)
+    wrapped_tool_definitions: dict[str, ModelToolDefinition] = field(
+        default_factory=dict
+    )
 
 
 @dataclass(frozen=True)

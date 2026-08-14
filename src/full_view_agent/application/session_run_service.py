@@ -20,30 +20,58 @@ class SessionRunService:
     def __init__(self, store: AgentStore) -> None:
         self._store = store
 
-    async def create_session(self, *, user_id: str, title: str) -> AgentSession:
+    async def create_session(
+        self,
+        *,
+        tenant_id: str = "legacy",
+        user_id: str,
+        title: str,
+        app_id: str = "full_information_view",
+    ) -> AgentSession:
         session = AgentSession(
             session_id=new_id("ses"),
+            owner_tenant_id=tenant_id,
             owner_user_id=user_id,
+            app_id=app_id,
             title=title,
         )
         return await self._store.create_session(session)
 
     async def get_session(
-        self, *, user_id: str, session_id: str
+        self,
+        *,
+        tenant_id: str = "legacy",
+        app_id: str = "full_information_view",
+        user_id: str,
+        session_id: str,
     ) -> AgentSession:
-        return await self._store.get_session(user_id=user_id, session_id=session_id)
+        return await self._store.get_session(
+            tenant_id=tenant_id,
+            app_id=app_id,
+            user_id=user_id,
+            session_id=session_id,
+        )
 
     async def list_sessions(
         self,
         *,
+        tenant_id: str = "legacy",
+        app_id: str = "full_information_view",
         user_id: str,
         status: Literal["active", "archived"] | None = None,
     ) -> list[AgentSession]:
-        return await self._store.list_sessions(user_id=user_id, status=status)
+        return await self._store.list_sessions(
+            tenant_id=tenant_id,
+            app_id=app_id,
+            user_id=user_id,
+            status=status,
+        )
 
     async def update_session(
         self,
         *,
+        tenant_id: str = "legacy",
+        app_id: str = "full_information_view",
         user_id: str,
         session_id: str,
         title: str | None = None,
@@ -52,6 +80,8 @@ class SessionRunService:
         if title is None and status is None:
             raise ValueError("at least one session field must be updated")
         return await self._store.update_session(
+            tenant_id=tenant_id,
+            app_id=app_id,
             user_id=user_id,
             session_id=session_id,
             title=title,
@@ -61,10 +91,18 @@ class SessionRunService:
     async def create_run(
         self,
         *,
+        tenant_id: str = "legacy",
+        app_id: str = "full_information_view",
         user_id: str,
         session_id: str,
         request: RunCreateRequest,
     ) -> AgentRun:
+        await self._store.get_session(
+            tenant_id=tenant_id,
+            app_id=app_id,
+            user_id=user_id,
+            session_id=session_id,
+        )
         message_id = new_id("msg")
         run = AgentRun(
             run_id=new_id("run"),

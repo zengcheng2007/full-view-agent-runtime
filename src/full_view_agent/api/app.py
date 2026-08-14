@@ -1,6 +1,9 @@
+import asyncio
 import base64
 import binascii
+import csv
 import hashlib
+import io
 import json
 import logging
 import os
@@ -9,12 +12,14 @@ from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
 from secrets import token_bytes
+from threading import RLock
 from typing import Annotated, Literal, cast
 
 from fastapi import Depends, FastAPI, Header, Query, Request
 from fastapi.exceptions import RequestValidationError
-from fastapi.responses import JSONResponse, StreamingResponse
-from pydantic import Field, SecretStr, model_validator
+from fastapi.responses import JSONResponse, Response, StreamingResponse
+from httpx import AsyncBaseTransport
+from pydantic import Field, JsonValue, SecretStr, model_validator
 
 from full_view_agent.api._api_deps import (
     CurrentUser,
@@ -22,7 +27,14 @@ from full_view_agent.api._api_deps import (
     UnauthenticatedError,
     require_geotoken,
 )
+from full_view_agent.api.agent_routes import create_agent_router
 from full_view_agent.api.capability_routes import create_capability_router
+from full_view_agent.api.knowledge_routes import create_knowledge_router
+from full_view_agent.api.prompt_routes import create_prompt_router
+from full_view_agent.application.agent_management_service import (
+    AgentManagementService,
+    AgentRepository,
+)
 from full_view_agent.application.analysis_graph import AnalysisRunOutcome
 from full_view_agent.application.analysis_plan_repository import (
     AnalysisPlanRepository,
@@ -31,6 +43,14 @@ from full_view_agent.application.analysis_plan_repository import (
 from full_view_agent.application.analysis_planner import AnalysisPlanner
 from full_view_agent.application.analysis_run_binding import AnalysisRunBindingStore
 from full_view_agent.application.analysis_service import AnalysisPlanningService
+from full_view_agent.application.application_identity_registry import (
+    ApplicationIdentityAdapterRegistry,
+    TrustedApplicationIdentityContext,
+)
+from full_view_agent.application.application_management_service import (
+    ApplicationManagementService,
+    ApplicationRegistry,
+)
 from full_view_agent.application.auth_context_refresh import RunAuthContextRefresher
 from full_view_agent.application.capability_consistency import (
     validate_production_http_capabilities,
@@ -38,12 +58,20 @@ from full_view_agent.application.capability_consistency import (
 from full_view_agent.application.capability_management_service import (
     CapabilityManagementService,
 )
-from full_view_agent.application.capability_service import ToolAdapter
+from full_view_agent.application.capability_service import DynamicToolAdapter, ToolAdapter
 from full_view_agent.application.context_builder import AgentContextBuilder
 from full_view_agent.application.cursor_codec import SignedCursorCodec
 from full_view_agent.application.deployment_capabilities import (
+    EVENT_CATEGORY_ENV,
     HOUSING_NEXT_AREA_ENV,
+    parse_event_category_enabled,
     parse_housing_next_area_enabled,
+)
+from full_view_agent.application.dynamic_skill_workflow_bridge import (
+    PublishedRuntimeCapabilityLoader,
+    RuntimeCapabilityDefinitionInvalid,
+    RuntimeSkillContract,
+    RuntimeWorkflowGraphSnapshot,
 )
 from full_view_agent.application.errors import (
     AnalysisExecutionUnavailable,
@@ -51,8 +79,10 @@ from full_view_agent.application.errors import (
     AnalysisRequestRejected,
     ApplicationError,
     AuthenticationFailed,
+    AuthorizationDenied,
     CommandClientMismatch,
     CommandReceiptConflict,
+    ConnectorConfigurationInvalid,
     EventHistoryExpired,
     IdempotencyConflict,
     IdentityProviderUnavailable,
@@ -67,12 +97,22 @@ from full_view_agent.application.errors import (
     SessionActiveRunConflict,
     WorkflowNotAvailable,
 )
+from full_view_agent.application.knowledge_service import KnowledgeService
+from full_view_agent.application.model_config_repository import (
+    InMemoryRunModelBindingRepository,
+    PostgresRunModelBindingRepository,
+    RunModelBindingRepository,
+)
 from full_view_agent.application.model_config_service import (
     InMemoryModelConfigKeyStore,
     ModelConfigService,
 )
-from full_view_agent.application.model_planner import ModelPlannerFactory
+from full_view_agent.application.model_planner import (
+    ModelPlannerFactory,
+    RunBoundModelPlannerFactory,
+)
 from full_view_agent.application.model_provider import ModelProvider
+from full_view_agent.application.native_orchestrator import RunPlannerFactory
 from full_view_agent.application.orchestrator_factory import (
     create_analysis_orchestrator,
     create_orchestrator,
@@ -87,9 +127,20 @@ from full_view_agent.application.ports import (
     OrchestrationPort,
     RunAuthContextStore,
 )
+from full_view_agent.application.prompt_template_service import PromptTemplateService
 from full_view_agent.application.run_admission import RunAdmissionService
 from full_view_agent.application.run_capability_snapshot import (
     RunCapabilitySnapshotService,
+)
+from full_view_agent.application.run_capability_snapshot_store import (
+    InMemoryRunCapabilitySnapshotStore,
+    PostgresRunCapabilitySnapshotStore,
+    RunCapabilitySnapshotStore,
+)
+from full_view_agent.application.runtime_prompt_registry import RuntimePromptRegistry
+from full_view_agent.application.runtime_skill_registry import RuntimeSkillRegistry
+from full_view_agent.application.runtime_workflow_registry import (
+    RuntimeWorkflowRegistry,
 )
 from full_view_agent.application.semantic_wiring import (
     build_semantic_capability_stack,
@@ -100,20 +151,33 @@ from full_view_agent.application.tool_registry import (
     ToolRegistry,
 )
 from full_view_agent.application.workflow_registry import WorkflowRegistry
+from full_view_agent.domain.agent_definition import AgentDefinition
 from full_view_agent.domain.analysis_plan import AnalysisPlan, AnalysisRequest
+from full_view_agent.domain.capability import CapabilityBase, CapabilityStatus
 from full_view_agent.domain.models import (
     AgentMessage,
     AgentRun,
     AgentSession,
     ContractModel,
     DataResult,
+    EnterpriseIndustryDistributionRow,
+    EnterpriseMetricRow,
+    EnterpriseScaleDistributionRow,
+    EnterpriseTypeDistributionRow,
+    EventCategoryRow,
     EventFinishRateRow,
+    EventTrendRow,
     Evidence,
     FrontendCommandReceipt,
+    GovernanceOverviewRow,
+    GovernancePowerMetricRow,
     HousingAreaGroupRow,
     HousingLeaseTypeRow,
+    HousingRoomUseRow,
+    HousingStockOverviewRow,
     PendingInputRequest,
     PopulationMetricRow,
+    PopulationRankingRow,
     ResultMetadata,
     ResultReferenceContent,
     RunCreateRequest,
@@ -121,6 +185,11 @@ from full_view_agent.domain.models import (
     Steer,
     TableDataResult,
     TextContent,
+    WorkflowRef,
+)
+from full_view_agent.infrastructure.agent_repository import (
+    InMemoryAgentRepository,
+    PostgresAgentRepository,
 )
 from full_view_agent.infrastructure.analysis_plan_repository import (
     InMemoryAnalysisPlanRepository,
@@ -129,6 +198,9 @@ from full_view_agent.infrastructure.analysis_plan_repository import (
 from full_view_agent.infrastructure.analysis_run_binding_store import (
     InMemoryAnalysisRunBindingStore,
     PostgresAnalysisRunBindingStore,
+)
+from full_view_agent.infrastructure.application_registry import (
+    default_application_registry,
 )
 from full_view_agent.infrastructure.auth_context_store import (
     InMemoryRunAuthContextStore,
@@ -150,13 +222,32 @@ from full_view_agent.infrastructure.governance_adapter import (
     HttpGovernanceAdapter,
     InMemoryGovernanceAdapter,
 )
+from full_view_agent.infrastructure.http_connector_executor import (
+    ConnectorConnectionTester,
+    configured_connector_allowed_private_hosts,
+)
 from full_view_agent.infrastructure.idempotency_store import InMemoryIdempotencyStore
+from full_view_agent.infrastructure.knowledge_repository import (
+    InMemoryKeywordRetriever,
+    InMemoryKnowledgeRepository,
+    TextDocumentParser,
+)
+from full_view_agent.infrastructure.knowledge_tool_adapter import (
+    KnowledgeAwareToolAdapter,
+)
 from full_view_agent.infrastructure.legacy_identity import HttpLegacyIdentityAdapter
 from full_view_agent.infrastructure.memory_store import InMemoryAgentStore
 from full_view_agent.infrastructure.openai_compatible_model import (
     OpenAICompatibleModelProvider,
 )
+from full_view_agent.infrastructure.postgres_knowledge_repository import (
+    PostgresKnowledgeRepository,
+)
 from full_view_agent.infrastructure.postgres_persistence import PostgresAgentPersistence
+from full_view_agent.infrastructure.prompt_template_repository import (
+    InMemoryPromptTemplateRepository,
+    PostgresPromptTemplateRepository,
+)
 from full_view_agent.infrastructure.redis_event_notifier import RedisEventNotifier
 
 logger = logging.getLogger(__name__)
@@ -254,9 +345,21 @@ class SessionListResponse(ContractModel):
 class ResultItemsResponse(ContractModel):
     data: list[
         PopulationMetricRow
+        | PopulationRankingRow
         | HousingLeaseTypeRow
         | HousingAreaGroupRow
+        | HousingRoomUseRow
+        | HousingStockOverviewRow
         | EventFinishRateRow
+        | EventCategoryRow
+        | EventTrendRow
+        | EnterpriseMetricRow
+        | EnterpriseScaleDistributionRow
+        | EnterpriseTypeDistributionRow
+        | EnterpriseIndustryDistributionRow
+        | GovernanceOverviewRow
+        | GovernancePowerMetricRow
+        | dict[str, JsonValue]
     ]
     meta: CursorPageMeta
 
@@ -328,6 +431,38 @@ def configured_p0_allowed_user_ids() -> set[str]:
     }
 
 
+class _ProjectedCapabilityRepository:
+    """Read-only repository view with lifecycle changes overlaid in memory."""
+
+    def __init__(
+        self,
+        repository: CapabilityRepository,
+        overrides: dict[tuple[str, str], CapabilityBase],
+    ) -> None:
+        self._repository = repository
+        self._overrides = overrides
+
+    async def list_capabilities(
+        self,
+        *,
+        capability_type=None,
+        status=None,
+    ) -> list[CapabilityBase]:
+        capabilities = await self._repository.list_capabilities(
+            capability_type=capability_type,
+            status=None,
+        )
+        projected = [
+            self._overrides.get(
+                (capability.capability_id, capability.version), capability
+            )
+            for capability in capabilities
+        ]
+        if status is not None:
+            projected = [item for item in projected if item.status == status]
+        return sorted(projected, key=lambda item: (item.capability_id, item.version))
+
+
 @dataclass
 class RuntimeContainer:
     store: AgentStore | None = None
@@ -336,10 +471,43 @@ class RuntimeContainer:
     identity_port: LegacyIdentityPort = field(
         default_factory=default_identity_port
     )
+    application_identity_adapters: ApplicationIdentityAdapterRegistry | None = None
+    capability_identity_port: LegacyIdentityPort | None = None
     credentials: CredentialBroker | None = None
     auth_contexts: RunAuthContextStore | None = None
     denial_ledger: InMemoryDenialLedger = field(default_factory=InMemoryDenialLedger)
     workflow_registry: WorkflowRegistry = field(default_factory=WorkflowRegistry.default)
+    runtime_skills: tuple[RuntimeSkillContract, ...] = field(
+        default=(), init=False
+    )
+    runtime_workflows: tuple[RuntimeWorkflowGraphSnapshot, ...] = field(
+        default=(), init=False
+    )
+    runtime_skill_registry: RuntimeSkillRegistry = field(
+        default_factory=RuntimeSkillRegistry, init=False
+    )
+    runtime_workflow_registry: RuntimeWorkflowRegistry = field(
+        default_factory=RuntimeWorkflowRegistry, init=False
+    )
+    runtime_prompt_registry: RuntimePromptRegistry = field(
+        default_factory=RuntimePromptRegistry, init=False
+    )
+    runtime_capability_generation: int = field(default=0, init=False)
+    _runtime_capability_reload_lock: asyncio.Lock = field(
+        default_factory=asyncio.Lock, init=False, repr=False
+    )
+    _runtime_capability_state_lock: RLock = field(
+        default_factory=RLock, init=False, repr=False
+    )
+    _static_tool_registry: ToolRegistry = field(init=False, repr=False)
+    application_registry: ApplicationRegistry | None = None
+    application_management_service: ApplicationManagementService | None = field(
+        default=None, init=False
+    )
+    agent_repository: AgentRepository | None = field(default=None, init=False)
+    agent_management_service: AgentManagementService | None = field(
+        default=None, init=False
+    )
     persistence: PostgresAgentPersistence | None = field(default=None, init=False)
     event_notifier: RedisEventNotifier | None = None
     cursor_codec: SignedCursorCodec | None = None
@@ -354,14 +522,35 @@ class RuntimeContainer:
     # back to the legacy AnalysisPlanExecutor).
     analysis_orchestrator: AnalysisOrchestratorPort | None = None
     # P2: Capability Center services
-    capability_repository: CapabilityRepository | None = field(default=None, init=False)
+    capability_repository: CapabilityRepository | None = None
+    dynamic_tool_adapter: DynamicToolAdapter | None = None
+    connector_connection_transport: AsyncBaseTransport | None = None
+    connector_allowed_private_hosts: frozenset[str] = field(
+        default_factory=configured_connector_allowed_private_hosts
+    )
     capability_management_service: CapabilityManagementService | None = field(
         default=None, init=False
     )
     model_config_service: ModelConfigService | None = field(
         default=None, init=False
     )
+    prompt_template_service: PromptTemplateService | None = field(
+        default=None, init=False
+    )
+    knowledge_service: KnowledgeService | None = field(default=None, init=False)
     run_capability_snapshot_service: RunCapabilitySnapshotService | None = field(
+        default=None, init=False
+    )
+    # Run-scoped model config binding repository: persists (run_id,
+    # config_id, config_version) bindings plus immutable snapshots of the
+    # config metadata (with encrypted key material) at binding time.
+    run_model_binding_repository: RunModelBindingRepository | None = field(
+        default=None, init=False
+    )
+    # Run-scoped capability snapshot store: persists (run_id, tool_id,
+    # version) triples so that a Run's pinned dynamic-tool versions
+    # survive process restart.
+    run_capability_snapshot_store: RunCapabilitySnapshotStore | None = field(
         default=None, init=False
     )
     # Set True once async ``initialize()`` has completed.  Prevents
@@ -441,11 +630,22 @@ class RuntimeContainer:
         self.auth_contexts = (
             self.auth_contexts or self.persistence or InMemoryRunAuthContextStore()
         )
+        self.application_registry = self.application_registry or default_application_registry(
+            dsn=database_url,
+            schema=os.getenv("FULL_VIEW_POSTGRES_SCHEMA", "full_view_agent"),
+        )
+        self.application_identity_adapters = (
+            self.application_identity_adapters
+            or ApplicationIdentityAdapterRegistry(
+                {"identity.legacy_geo": self.identity_port}
+            )
+        )
         assert self.store is not None
         assert self.events is not None
         assert self.idempotency is not None
         assert self.credentials is not None
         assert self.auth_contexts is not None
+        assert self.application_registry is not None
         if self.cursor_codec is None:
             encoded_cursor_key = os.getenv("FULL_VIEW_CURSOR_KEY")
             cursor_key = (
@@ -462,6 +662,7 @@ class RuntimeContainer:
         self.admission = RunAdmissionService(
             credential_broker=self.credentials,
             auth_context_store=self.auth_contexts,
+            application_registry=self.application_registry,
             p0_allowed_user_ids=configured_p0_allowed_user_ids(),
         )
         self.auth_context_refresher = RunAuthContextRefresher(
@@ -471,6 +672,9 @@ class RuntimeContainer:
         )
         housing_next_area_enabled = parse_housing_next_area_enabled(
             os.getenv(HOUSING_NEXT_AREA_ENV)
+        )
+        event_category_enabled = parse_event_category_enabled(
+            os.getenv(EVENT_CATEGORY_ENV)
         )
         if self.governance_adapter is None:
             if adapter_mode == "memory":
@@ -507,23 +711,67 @@ class RuntimeContainer:
                     "injected ToolRegistry disagrees with "
                     f"{HOUSING_NEXT_AREA_ENV}"
                 )
+            if (
+                self.tool_registry is not None
+                and self.tool_registry.event_category_enabled
+                != event_category_enabled
+            ):
+                raise RuntimeError(
+                    "injected ToolRegistry disagrees with "
+                    f"{EVENT_CATEGORY_ENV}"
+                )
             self.tool_registry = self.tool_registry or ToolRegistry.default(
-                housing_next_area_enabled=housing_next_area_enabled
+                housing_next_area_enabled=housing_next_area_enabled,
+                event_category_enabled=event_category_enabled,
             )
             self.tool_registry = self.tool_registry.subset(
-                set(PRODUCTION_HTTP_TOOL_IDS)
+                set(PRODUCTION_HTTP_TOOL_IDS) | {"knowledge.search"}
             )
         else:
             self.tool_registry = self.tool_registry or ToolRegistry.default()
+        self.tool_registry.bind_lock(self._runtime_capability_state_lock)
+        self.runtime_skill_registry.bind_lock(self._runtime_capability_state_lock)
+        self.runtime_workflow_registry.bind_lock(
+            self._runtime_capability_state_lock
+        )
+        self._static_tool_registry = self.tool_registry.snapshot()
 
         # P2: Initialize Capability Center services EARLY so we can check for
         # enabled model configs before creating model_provider
         if database_url:
-            self.capability_repository = PostgresCapabilityRepository(
+            self.capability_repository = self.capability_repository or (
+                PostgresCapabilityRepository(
+                    dsn=database_url,
+                    schema=os.getenv("FULL_VIEW_POSTGRES_SCHEMA", "full_view_agent"),
+                )
+            )
+            model_config_repo = PostgresModelConfigRepository(
                 dsn=database_url,
                 schema=os.getenv("FULL_VIEW_POSTGRES_SCHEMA", "full_view_agent"),
             )
-            model_config_repo = PostgresModelConfigRepository(
+            self.agent_repository = PostgresAgentRepository(
+                dsn=database_url,
+                schema=os.getenv("FULL_VIEW_POSTGRES_SCHEMA", "full_view_agent"),
+            )
+            prompt_template_repo = PostgresPromptTemplateRepository(
+                dsn=database_url,
+                schema=os.getenv("FULL_VIEW_POSTGRES_SCHEMA", "full_view_agent"),
+            )
+            knowledge_repo = PostgresKnowledgeRepository(
+                dsn=database_url,
+                schema=os.getenv("FULL_VIEW_POSTGRES_SCHEMA", "full_view_agent"),
+            )
+            # Run-scoped binding repository: persists (run_id, config_id,
+            # config_version) plus the immutable snapshot row for that
+            # tuple. Uses the same PostgreSQL instance as the other
+            # repositories so bindings survive process restarts.
+            self.run_model_binding_repository = PostgresRunModelBindingRepository(
+                dsn=database_url,
+                schema=os.getenv("FULL_VIEW_POSTGRES_SCHEMA", "full_view_agent"),
+            )
+            # Run-scoped capability snapshot store: persists (run_id,
+            # tool_id, version) triples for cross-process durability.
+            self.run_capability_snapshot_store = PostgresRunCapabilitySnapshotStore(
                 dsn=database_url,
                 schema=os.getenv("FULL_VIEW_POSTGRES_SCHEMA", "full_view_agent"),
             )
@@ -547,22 +795,59 @@ class RuntimeContainer:
                     " - keys will not persist across restarts"
                 )
         else:
-            self.capability_repository = InMemoryCapabilityRepository()
+            self.capability_repository = (
+                self.capability_repository or InMemoryCapabilityRepository()
+            )
             model_config_repo = InMemoryModelConfigRepository()
+            self.agent_repository = InMemoryAgentRepository()
             model_config_key_store = InMemoryModelConfigKeyStore()
+            prompt_template_repo = InMemoryPromptTemplateRepository()
+            knowledge_repo = InMemoryKnowledgeRepository()
+            self.run_model_binding_repository = InMemoryRunModelBindingRepository()
+            self.run_capability_snapshot_store = InMemoryRunCapabilitySnapshotStore()
 
         self.capability_management_service = CapabilityManagementService(
             repository=self.capability_repository,
+            allowed_private_hosts=self.connector_allowed_private_hosts,
+        )
+        assert self.application_registry is not None
+        self.application_management_service = ApplicationManagementService(
+            application_registry=self.application_registry,
+            capability_repository=self.capability_repository,
         )
         self.model_config_service = ModelConfigService(
             repository=model_config_repo,
             key_store=model_config_key_store,
         )
+        self.prompt_template_service = PromptTemplateService(prompt_template_repo)
+        self.knowledge_service = KnowledgeService(
+            repository=knowledge_repo,
+            retriever=InMemoryKeywordRetriever(),
+            parsers=(TextDocumentParser(),),
+        )
+        assert self.agent_repository is not None
+        self.agent_management_service = AgentManagementService(
+            repository=self.agent_repository,
+            application_registry=self.application_registry,
+            model_config_service=self.model_config_service,
+            capability_repository=self.capability_repository,
+            prompt_reader=self.prompt_template_service,
+            knowledge_reader=self.knowledge_service,
+            model_snapshot_repository=self.run_model_binding_repository,
+        )
         # P2-2: RunCapabilitySnapshotService – creates per-run immutable
         # capability snapshots so that dynamic tool version changes don't
-        # affect in-flight runs.
+        # affect in-flight runs. The ``store`` (when set) provides
+        # cross-process durability for the pinned version triples.
+        assert self.run_capability_snapshot_store is not None
         self.run_capability_snapshot_service = RunCapabilitySnapshotService(
             repository=self.capability_repository,
+            store=self.run_capability_snapshot_store,
+            application_registry=self.application_registry,
+            runtime_skill_registry=self.runtime_skill_registry,
+            runtime_workflow_registry=self.runtime_workflow_registry,
+            runtime_prompt_registry=self.runtime_prompt_registry,
+            prompt_snapshot_loader=self.prompt_template_service.load_snapshot,
         )
 
         # ── Async-initialised concerns (require event loop) ──────────
@@ -629,9 +914,8 @@ class RuntimeContainer:
         assert self.events is not None
 
         # P2: Create dynamic tool adapter for executing dynamic tools via HTTP connectors
-        dynamic_tool_adapter = None
-        if self.capability_repository is not None and hasattr(self.capability_repository, '_dsn'):
-            # Only create if we have a real repository (not in-memory for tests)
+        dynamic_tool_adapter = self.dynamic_tool_adapter
+        if dynamic_tool_adapter is None and self.capability_repository is not None:
             try:
                 from full_view_agent.application.dynamic_tool_adapter import (
                     HttpDynamicToolAdapter,
@@ -644,11 +928,14 @@ class RuntimeContainer:
                     repository=self.capability_repository,
                     follow_redirects=False,
                     default_timeout_ms=8000,
+                    allowed_private_hosts=self.connector_allowed_private_hosts,
+                    credential_broker=self.credentials,
                 )
                 dynamic_tool_adapter = HttpDynamicToolAdapter(
                     repository=self.capability_repository,
                     http_executor=http_executor,
                 )
+                self.dynamic_tool_adapter = dynamic_tool_adapter
                 logger.info("Dynamic tool adapter initialized for HTTP connector execution")
             except Exception as e:
                 logger.warning(f"Failed to initialize dynamic tool adapter: {e}")
@@ -656,16 +943,23 @@ class RuntimeContainer:
         # S1-A：语义入口与既有能力栈共享一份接线（Catalog/Resolver/
         # Executor/Fingerprinter/Presenter），Native 与 LangGraph 走同一
         # Harness 包装，不改变任何既有 Tool 的行为。
+        assert self.knowledge_service is not None
+        assert self.run_capability_snapshot_service is not None
+        runtime_tool_adapter = KnowledgeAwareToolAdapter(
+            inner=self.governance_adapter,
+            knowledge_service=self.knowledge_service,
+            snapshot_reader=self.run_capability_snapshot_service,
+        )
         self.semantic_stack = build_semantic_capability_stack(
             registry=self.tool_registry,
-            adapter=self.governance_adapter,
+            adapter=runtime_tool_adapter,
             auth_context_refresher=self.auth_context_refresher,
             denial_ledger=self.denial_ledger,
             dynamic_tool_adapter=dynamic_tool_adapter,
         )
         if isinstance(self.governance_adapter, HttpGovernanceAdapter):
             validate_production_http_capabilities(
-                registry=self.tool_registry,
+                registry=self.tool_registry.subset(set(PRODUCTION_HTTP_TOOL_IDS)),
                 catalog=self.semantic_stack.catalog,
             )
         self.analysis_plan_repository = self.analysis_plan_repository or (
@@ -689,13 +983,16 @@ class RuntimeContainer:
             if database_url
             else InMemoryAnalysisRunBindingStore()
         )
-        planner_factory = (
+        planner_factory: RunPlannerFactory | None = (
             ModelPlannerFactory(
                 provider=self.model_provider,
+                event_publisher=self.events,
                 context_builder=AgentContextBuilder(
                     store=self.store,
                     registry=self.tool_registry,
                     semantic_presenter=self.semantic_stack.presenter,
+                    skill_registry=self.runtime_skill_registry,
+                    prompt_registry=self.runtime_prompt_registry,
                 ),
                 max_total_tokens=int(
                     os.getenv("FULL_VIEW_MODEL_TOKEN_BUDGET", "32000")
@@ -707,6 +1004,20 @@ class RuntimeContainer:
             if self.model_provider is not None
             else None
         )
+        if planner_factory is not None and self.model_config_service is not None:
+            assert self.run_model_binding_repository is not None
+            planner_factory = RunBoundModelPlannerFactory(
+                base_factory=planner_factory,
+                config_resolver=self.model_config_service,
+                provider_builder=lambda config: OpenAICompatibleModelProvider(
+                    base_url=config.api_base_url,
+                    model=config.model_name,
+                    api_key=SecretStr(config.api_key_secret),
+                    timeout_seconds=float(config.timeout_seconds),
+                ),
+                config_repository=self.run_model_binding_repository,
+                agent_release_repository=self.agent_repository,
+            )
         self.executor: OrchestrationPort = create_orchestrator(
             service=self.service,
             store=self.store,
@@ -726,6 +1037,7 @@ class RuntimeContainer:
             semantic_stack=self.semantic_stack,
             dynamic_tool_adapter=dynamic_tool_adapter,
             run_capability_snapshot_service=self.run_capability_snapshot_service,
+            runtime_workflow_registry=self.runtime_workflow_registry,
         )
         analysis_enabled = os.getenv(
             "FULL_VIEW_ANALYSIS_EXECUTION_ENABLED",
@@ -756,6 +1068,27 @@ class RuntimeContainer:
                 binding_store=self.analysis_binding_store,
             )
 
+    async def resolve_application_identity(
+        self,
+        *,
+        app_id: str,
+        raw_token: SecretStr,
+    ) -> TrustedApplicationIdentityContext:
+        """Resolve identity for a server-selected application.
+
+        Data-plane routes must pass a fixed application identifier or one
+        derived from trusted gateway routing, never a client header/query.
+        """
+        assert self.application_registry is not None
+        assert self.application_identity_adapters is not None
+        application = await self.application_registry.get_application(app_id)
+        if application is None:
+            raise ResourceNotFound("application is not registered")
+        return await self.application_identity_adapters.resolve_for_application(
+            application=application,
+            raw_token=raw_token,
+        )
+
     async def initialize(self) -> None:
         """Async lifecycle initialisation.
 
@@ -784,40 +1117,78 @@ class RuntimeContainer:
             "FULL_VIEW_MODEL_PROVIDER", "deterministic"
         ).lower()
 
-        # ── Dynamic tool loading ──────────────────────────────────────
-        try:
-            from full_view_agent.application.dynamic_tool_bridge import (
-                build_dynamic_tool_registry_entries,
-                load_published_tools,
-            )
+        # Managed capability, prompt, and knowledge repositories share the
+        # persistence schema. Apply its ordered idempotent migrations before
+        # any of those repositories are queried during startup.
+        if self.persistence is not None:
+            await self.persistence.initialize()
 
-            if self.capability_repository is None:
-                raise RuntimeError("capability_repository not initialized")
-            published_tools = await load_published_tools(self.capability_repository)
-            if published_tools:
-                dynamic_manifests, dynamic_descriptors = (
-                    build_dynamic_tool_registry_entries(published_tools)
-                )
-                dynamic_input_schemas = {
-                    tool.capability_id: tool.input_schema
-                    for tool in published_tools
-                    if tool.input_schema
-                }
-                if self.tool_registry is None:
-                    raise RuntimeError("tool_registry not initialized")
-                self.tool_registry = self.tool_registry.merge_dynamic(
-                    manifests=dynamic_manifests,
-                    descriptors=dynamic_descriptors,
-                    dynamic_input_schemas=dynamic_input_schemas,
-                )
-                logger.info(
-                    f"Merged {len(dynamic_manifests)} dynamic tools into ToolRegistry"
-                )
-        except Exception as e:
-            logger.warning(
-                f"Failed to load dynamic tools from capability repository: {e}. "
-                "Continuing with static tools only."
+        # Materialise the legacy default Agent as a first-class definition.
+        # Existing deployments therefore gain an application-centred control
+        # plane without changing any data-plane behavior until an Agent
+        # version is explicitly published.
+        if self.agent_management_service is not None:
+            existing_agents = await self.agent_management_service.list_agents(
+                "full_information_view"
             )
+            if not existing_agents:
+                await self.agent_management_service.create_agent(
+                    AgentDefinition(
+                        app_id="full_information_view",
+                        agent_id="governance_general_agent",
+                        name="全量信息视图智能体",
+                        description="全量信息视图默认治理问答智能体",
+                    )
+                )
+
+        # ── Dynamic tool loading ──────────────────────────────────────
+        await self.reload_runtime_capabilities()
+        effective_prompt = None
+        if self.prompt_template_service is not None:
+            effective_prompt = await self.prompt_template_service.get_effective(
+                app_id="full_information_view"
+            )
+            self.runtime_prompt_registry.activate(effective_prompt)
+
+        # Backfill the historical default only after migrations and managed
+        # resources are readable. The release freezes existing grants and can
+        # never broaden what the application is allowed to use.
+        if (
+            self.agent_management_service is not None
+            and self.prompt_template_service is not None
+            and self.knowledge_service is not None
+        ):
+            knowledge_refs: list[str] = []
+            for knowledge_base in await self.knowledge_service.list_knowledge_bases(
+                tenant_id="legacy",
+                app_id="full_information_view",
+            ):
+                version = knowledge_base.published_version
+                if version is not None and await self.knowledge_service.is_ready_version(
+                    app_id="full_information_view",
+                    knowledge_base_id=knowledge_base.knowledge_base_id,
+                    version=version,
+                ):
+                    knowledge_refs.append(
+                        f"{knowledge_base.knowledge_base_id}@{version}.0.0"
+                    )
+            baseline = (
+                await self.agent_management_service.ensure_legacy_baseline_release(
+                    app_id="full_information_view",
+                    agent_id="governance_general_agent",
+                    prompt_ref=(
+                        effective_prompt.composite_version
+                        if effective_prompt is not None
+                        else None
+                    ),
+                    knowledge_base_refs=tuple(knowledge_refs),
+                )
+            )
+            if baseline is None:
+                logger.warning(
+                    "Legacy default Agent has no active release and no unique "
+                    "trusted model; retaining explicit legacy compatibility"
+                )
 
         # ── Model config resolution ───────────────────────────────────
         if (
@@ -868,6 +1239,189 @@ class RuntimeContainer:
             self._build_downstream_components(database_url)
         # If not deferred (openai_compatible + database_url), downstream
         # components were already built in __post_init__.  Nothing more to do.
+
+    async def reload_runtime_capabilities(self) -> int:
+        """Fail closed while switching the published runtime generation."""
+
+        async with self._runtime_capability_reload_lock:
+            candidate = await self._build_runtime_capability_candidate(
+                self.capability_repository
+            )
+            return self._activate_runtime_capability_candidate(candidate)
+
+    async def validate_runtime_capability_transition(
+        self,
+        capability_id: str,
+        version: str,
+        to_status: CapabilityStatus,
+    ) -> None:
+        """Compile a projected lifecycle state before any repository mutation."""
+
+        if self.capability_repository is None:
+            raise RuntimeError("runtime capability dependencies not initialized")
+        existing = await self.capability_repository.get(capability_id, version)
+        if existing is None:
+            raise ResourceNotFound("capability not found")
+        projected = existing.model_copy(update={"status": to_status})
+        repository = _ProjectedCapabilityRepository(
+            self.capability_repository,
+            {(capability_id, version): projected},
+        )
+        async with self._runtime_capability_reload_lock:
+            await self._build_runtime_capability_candidate(
+                cast(CapabilityRepository, repository)
+            )
+
+    async def validate_runtime_capability_rollback(
+        self,
+        capability_id: str,
+        to_version: str,
+    ) -> None:
+        """Compile the rollback target and deactivated current version first."""
+
+        if self.capability_repository is None:
+            raise RuntimeError("runtime capability dependencies not initialized")
+        target = await self.capability_repository.get(capability_id, to_version)
+        if target is None:
+            raise ResourceNotFound("target version not found")
+        overrides: dict[tuple[str, str], CapabilityBase] = {
+            (capability_id, to_version): target.model_copy(
+                update={"status": "published"}
+            )
+        }
+        current = await self.capability_repository.get_active_snapshot(capability_id)
+        if current is not None and current.version != to_version:
+            current_capability = await self.capability_repository.get(
+                capability_id, current.version
+            )
+            if current_capability is not None:
+                overrides[(capability_id, current.version)] = (
+                    current_capability.model_copy(update={"status": "disabled"})
+                )
+        repository = _ProjectedCapabilityRepository(
+            self.capability_repository,
+            overrides,
+        )
+        async with self._runtime_capability_reload_lock:
+            await self._build_runtime_capability_candidate(
+                cast(CapabilityRepository, repository)
+            )
+
+    async def _build_runtime_capability_candidate(
+        self,
+        repository: CapabilityRepository | None,
+    ) -> tuple[
+        ToolRegistry,
+        tuple[RuntimeSkillContract, ...],
+        tuple[RuntimeWorkflowGraphSnapshot, ...],
+        int,
+    ]:
+        """Build and validate one complete generation without activating it."""
+
+        from full_view_agent.application.dynamic_tool_bridge import (
+            build_dynamic_input_schemas,
+            build_dynamic_tool_registry_entries,
+            load_published_tools,
+        )
+
+        if repository is None or self.tool_registry is None:
+            raise RuntimeError("runtime capability dependencies not initialized")
+
+        published_tools = await load_published_tools(repository)
+        manifests, descriptors = build_dynamic_tool_registry_entries(
+            published_tools,
+            base_registry=self._static_tool_registry,
+        )
+        if len(manifests) != len(published_tools) or len(descriptors) != len(
+            published_tools
+        ):
+            raise RuntimeError(
+                "one or more published Tools could not be converted; "
+                "runtime generation was not changed"
+            )
+        candidate_tools = self._static_tool_registry.snapshot()
+        candidate_tools.replace_dynamic(
+            manifests=manifests,
+            descriptors=descriptors,
+            dynamic_input_schemas=build_dynamic_input_schemas(published_tools),
+        )
+
+        loader = PublishedRuntimeCapabilityLoader(
+            repository,
+            base_tool_registry=candidate_tools,
+        )
+        candidate_skills = await loader.load_skills()
+        available_tool_ids = set(candidate_tools.list_tool_ids()) | {
+            "governance.semantic_query",
+            "agent.request_regional_analysis",
+        }
+        for skill in candidate_skills:
+            missing = set(skill.allowed_tool_ids).difference(available_tool_ids)
+            if missing:
+                raise RuntimeCapabilityDefinitionInvalid(
+                    skill.skill_id,
+                    "references unavailable Tool: " + ", ".join(sorted(missing)),
+                )
+        candidate_skill_registry = RuntimeSkillRegistry(candidate_skills)
+
+        candidate_workflows = await loader.load_workflows()
+        candidate_workflow_registry = RuntimeWorkflowRegistry(candidate_workflows)
+        for workflow in candidate_workflows:
+            try:
+                candidate_workflow_registry.create_planner(
+                    WorkflowRef(
+                        workflow_id=workflow.workflow_id,
+                        workflow_version=workflow.version,
+                    ),
+                    tool_registry=candidate_tools,
+                    skill_registry=candidate_skill_registry,
+                )
+            except WorkflowNotAvailable as exc:
+                raise RuntimeCapabilityDefinitionInvalid(
+                    workflow.workflow_id,
+                    str(exc),
+                ) from exc
+        return candidate_tools, candidate_skills, candidate_workflows, len(manifests)
+
+    def _activate_runtime_capability_candidate(
+        self,
+        candidate: tuple[
+            ToolRegistry,
+            tuple[RuntimeSkillContract, ...],
+            tuple[RuntimeWorkflowGraphSnapshot, ...],
+            int,
+        ],
+    ) -> int:
+        """Atomically switch the in-process registries to a built candidate."""
+
+        if self.tool_registry is None:
+            raise RuntimeError("runtime capability dependencies not initialized")
+        candidate_tools, candidate_skills, candidate_workflows, manifest_count = candidate
+        with self._runtime_capability_state_lock:
+            old_tools = self.tool_registry.snapshot()
+            old_skills = self.runtime_skill_registry.list()
+            old_workflows = self.runtime_workflow_registry.list()
+            try:
+                self.tool_registry.replace_with(candidate_tools)
+                self.runtime_skill_registry.replace(candidate_skills)
+                self.runtime_workflow_registry.replace(candidate_workflows)
+            except Exception:
+                self.tool_registry.replace_with(old_tools)
+                self.runtime_skill_registry.replace(old_skills)
+                self.runtime_workflow_registry.replace(old_workflows)
+                raise
+
+            self.runtime_skills = candidate_skills
+            self.runtime_workflows = candidate_workflows
+            self.runtime_capability_generation += 1
+        logger.info(
+            "Activated runtime capability generation %d (%d Tools, %d Skills, %d Workflows)",
+            self.runtime_capability_generation,
+            manifest_count,
+            len(candidate_skills),
+            len(candidate_workflows),
+        )
+        return self.runtime_capability_generation
 
     def schedule_run(self, *, user_id: str, run_id: str) -> None:
         """Delegate scheduling to the OrchestrationPort."""
@@ -1128,12 +1682,48 @@ def create_app(runtime: RuntimeContainer | None = None) -> FastAPI:
     app.state.runtime = runtime
 
     # P2: Mount Capability Center routes
-    if runtime.capability_management_service and runtime.model_config_service:
+    if (
+        runtime.capability_management_service
+        and runtime.application_management_service
+        and runtime.model_config_service
+        and runtime.capability_repository
+    ):
         capability_router = create_capability_router(
             management_service=runtime.capability_management_service,
+            application_management_service=runtime.application_management_service,
             model_config_service=runtime.model_config_service,
+            connector_connection_tester=ConnectorConnectionTester(
+                runtime.capability_repository,
+                transport=runtime.connector_connection_transport,
+                allowed_private_hosts=runtime.connector_allowed_private_hosts,
+            ),
+            reload_runtime_capabilities=runtime.reload_runtime_capabilities,
+            validate_runtime_transition=(
+                runtime.validate_runtime_capability_transition
+            ),
+            validate_runtime_rollback=runtime.validate_runtime_capability_rollback,
         )
         app.include_router(capability_router)
+    if runtime.agent_management_service is not None:
+        app.include_router(create_agent_router(runtime.agent_management_service))
+    if runtime.prompt_template_service is not None:
+        prompt_service = runtime.prompt_template_service
+
+        async def refresh_runtime_prompt() -> None:
+            runtime.runtime_prompt_registry.activate(
+                await prompt_service.get_effective(
+                    app_id="full_information_view"
+                )
+            )
+
+        app.include_router(
+            create_prompt_router(
+                prompt_service,
+                refresh_runtime=refresh_runtime_prompt,
+            )
+        )
+    if runtime.knowledge_service is not None:
+        app.include_router(create_knowledge_router(runtime.knowledge_service))
 
     def error_response(
         *,
@@ -1203,7 +1793,7 @@ def create_app(runtime: RuntimeContainer | None = None) -> FastAPI:
             status_code = 410
         elif isinstance(exc, ResourceNotFound):
             status_code = 404
-        elif isinstance(exc, CommandClientMismatch):
+        elif isinstance(exc, (AuthorizationDenied, CommandClientMismatch)):
             status_code = 403
         elif isinstance(exc, SessionActiveRunConflict):
             status_code = 409
@@ -1242,7 +1832,13 @@ def create_app(runtime: RuntimeContainer | None = None) -> FastAPI:
             retryable = True
         elif isinstance(
             exc,
-            (AnalysisRequestRejected, WorkflowNotAvailable, InvalidCursor),
+            (
+                AnalysisRequestRejected,
+                ConnectorConfigurationInvalid,
+                WorkflowNotAvailable,
+                InvalidCursor,
+                RuntimeCapabilityDefinitionInvalid,
+            ),
         ):
             status_code = 422
         return error_response(
@@ -1301,7 +1897,9 @@ def create_app(runtime: RuntimeContainer | None = None) -> FastAPI:
     ) -> SessionResponse:
         async def operation():
             return await app.state.runtime.service.create_session(
+                tenant_id=user.identity.principal.tenant_id,
                 user_id=user.user_id,
+                app_id="full_information_view",
                 title=body.title,
             )
 
@@ -1331,7 +1929,9 @@ def create_app(runtime: RuntimeContainer | None = None) -> FastAPI:
         cursor: Annotated[str | None, Query(min_length=1)] = None,
     ) -> SessionListResponse:
         sessions = await app.state.runtime.service.list_sessions(
+            tenant_id=user.identity.principal.tenant_id,
             user_id=user.user_id,
+            app_id="full_information_view",
             status=status,
         )
         resource_id = f"sessions:status:{status or 'all'}"
@@ -1373,7 +1973,9 @@ def create_app(runtime: RuntimeContainer | None = None) -> FastAPI:
         user: Annotated[CurrentUser, Depends(require_geotoken)],
     ) -> SessionResponse:
         session = await app.state.runtime.service.get_session(
+            tenant_id=user.identity.principal.tenant_id,
             user_id=user.user_id,
+            app_id="full_information_view",
             session_id=session_id,
         )
         return SessionResponse(
@@ -1392,7 +1994,9 @@ def create_app(runtime: RuntimeContainer | None = None) -> FastAPI:
 
         async def operation():
             return await app.state.runtime.service.update_session(
+                tenant_id=user.identity.principal.tenant_id,
                 user_id=user.user_id,
+                app_id="full_information_view",
                 session_id=session_id,
                 title=body.title,
                 status=body.status,
@@ -1424,9 +2028,10 @@ def create_app(runtime: RuntimeContainer | None = None) -> FastAPI:
         idempotency_key: Annotated[str, Header(alias="Idempotency-Key", min_length=1)],
     ) -> RunResponse:
         if body.mode == "workflow" and body.workflow_ref is not None:
-            app.state.runtime.workflow_registry.require_available(
-                workflow_ref=body.workflow_ref,
-                identity=user.identity,
+            app.state.runtime.runtime_workflow_registry.create_planner(
+                body.workflow_ref,
+                tool_registry=app.state.runtime.tool_registry,
+                skill_registry=app.state.runtime.runtime_skill_registry,
             )
 
         natural_replayed = False
@@ -1435,19 +2040,69 @@ def create_app(runtime: RuntimeContainer | None = None) -> FastAPI:
             nonlocal natural_replayed
 
             async def create_from_message():
-                run = await app.state.runtime.service.create_run(
+                session = await app.state.runtime.service.get_session(
+                    tenant_id=user.identity.principal.tenant_id,
                     user_id=user.user_id,
+                    app_id="full_information_view",
+                    session_id=session_id,
+                )
+                run = await app.state.runtime.service.create_run(
+                    tenant_id=user.identity.principal.tenant_id,
+                    user_id=user.user_id,
+                    app_id="full_information_view",
                     session_id=session_id,
                     request=body,
                 )
+                admitted_context = None
                 try:
-                    await app.state.runtime.admission.admit(
+                    admitted_context = await app.state.runtime.admission.admit(
                         identity=user.identity,
                         raw_token=user.raw_token,
                         session_id=session_id,
                         run_id=run.run_id,
+                        app_id=session.app_id,
+                    )
+                    assert app.state.runtime.run_capability_snapshot_service is not None
+                    assert app.state.runtime.tool_registry is not None
+                    agent_release = None
+                    # Resolve and persist the immutable Agent release first;
+                    # the resource snapshot below must be derived from it.
+                    # A deployment with no published release remains on the
+                    # explicit legacy application-level path.
+                    if (
+                        app.state.runtime.agent_management_service is not None
+                        and app.state.runtime._initialized
+                    ):
+                        try:
+                            agent_release = (
+                                await app.state.runtime.agent_management_service.bind_run(
+                                    run_id=run.run_id,
+                                    app_id=session.app_id,
+                                    agent_id=admitted_context.application.agent_id,
+                                    tenant_id=admitted_context.principal.tenant_id,
+                                )
+                            )
+                        except ResourceNotFound as exc:
+                            legacy_unreleased = (
+                                admitted_context.application.agent_id
+                                == "governance_general_agent"
+                                and "no active release" in str(exc)
+                            )
+                            if not legacy_unreleased:
+                                raise
+                    await app.state.runtime.run_capability_snapshot_service.create_snapshot_for_run(
+                        run_id=run.run_id,
+                        base_registry=app.state.runtime.tool_registry,
+                        app_id=session.app_id,
+                        agent_release=agent_release,
                     )
                 except Exception:
+                    if admitted_context is not None:
+                        await app.state.runtime.credentials.revoke(
+                            credential_ref=admitted_context.credential_ref
+                        )
+                        assert app.state.runtime.auth_contexts is not None
+                        await app.state.runtime.auth_contexts.delete(run_id=run.run_id)
                     try:
                         await app.state.runtime.service.start_run(
                             user_id=user.user_id,
@@ -1507,9 +2162,17 @@ def create_app(runtime: RuntimeContainer | None = None) -> FastAPI:
         limit: Annotated[int, Query(ge=1, le=200)] = 50,
         cursor: Annotated[str | None, Query(min_length=1)] = None,
     ) -> MessageListResponse:
+        await app.state.runtime.service.get_session(
+            tenant_id=user.identity.principal.tenant_id,
+            user_id=user.user_id,
+            app_id="full_information_view",
+            session_id=session_id,
+        )
         messages = await app.state.runtime.store.list_messages(
             user_id=user.user_id,
             session_id=session_id,
+            tenant_id=user.identity.principal.tenant_id,
+            app_id="full_information_view",
         )
         resource_id = f"session:{session_id}:messages"
         offset = (
@@ -1549,7 +2212,12 @@ def create_app(runtime: RuntimeContainer | None = None) -> FastAPI:
         run_id: str,
         user: Annotated[CurrentUser, Depends(require_geotoken)],
     ) -> RunResponse:
-        run = await app.state.runtime.store.get_run(user_id=user.user_id, run_id=run_id)
+        run = await app.state.runtime.store.get_run(
+            tenant_id=user.identity.principal.tenant_id,
+            app_id="full_information_view",
+            user_id=user.user_id,
+            run_id=run_id,
+        )
         return RunResponse(
             data=run,
             meta=ResponseMeta(request_id=new_id("req")),
@@ -1561,6 +2229,8 @@ def create_app(runtime: RuntimeContainer | None = None) -> FastAPI:
         user: Annotated[CurrentUser, Depends(require_geotoken)],
     ) -> PendingInputResponse:
         run = await app.state.runtime.store.get_run(
+            tenant_id=user.identity.principal.tenant_id,
+            app_id="full_information_view",
             user_id=user.user_id,
             run_id=run_id,
         )
@@ -1610,6 +2280,8 @@ def create_app(runtime: RuntimeContainer | None = None) -> FastAPI:
         # part of the cacheable operation. A replay must never bypass tenant
         # ownership checks or return a plan after permissions were revoked.
         run = await app.state.runtime.store.get_run(
+            tenant_id=user.identity.principal.tenant_id,
+            app_id="full_information_view",
             user_id=user.user_id,
             run_id=run_id,
         )
@@ -1720,6 +2392,8 @@ def create_app(runtime: RuntimeContainer | None = None) -> FastAPI:
         user: Annotated[CurrentUser, Depends(require_geotoken)],
     ) -> AnalysisPlanResponse:
         run = await app.state.runtime.store.get_run(
+            tenant_id=user.identity.principal.tenant_id,
+            app_id="full_information_view",
             user_id=user.user_id,
             run_id=run_id,
         )
@@ -1783,6 +2457,8 @@ def create_app(runtime: RuntimeContainer | None = None) -> FastAPI:
                 "analysis execution orchestrator is not configured"
             )
         run = await app.state.runtime.store.get_run(
+            tenant_id=user.identity.principal.tenant_id,
+            app_id="full_information_view",
             user_id=user.user_id,
             run_id=run_id,
         )
@@ -1841,6 +2517,8 @@ def create_app(runtime: RuntimeContainer | None = None) -> FastAPI:
                 # join a state that the idempotent analysis orchestrator can
                 # safely replay; every other conflict remains fail-closed.
                 run = await app.state.runtime.store.get_run(
+                    tenant_id=user.identity.principal.tenant_id,
+                    app_id="full_information_view",
                     user_id=user.user_id,
                     run_id=run_id,
                 )
@@ -1878,7 +2556,10 @@ def create_app(runtime: RuntimeContainer | None = None) -> FastAPI:
             raise
         except Exception:
             current = await app.state.runtime.store.get_run(
-                user_id=user.user_id, run_id=run_id
+                tenant_id=user.identity.principal.tenant_id,
+                app_id="full_information_view",
+                user_id=user.user_id,
+                run_id=run_id,
             )
             if current.status in {"queued", "running"}:
                 failed = await app.state.runtime.service.fail_run(
@@ -1914,6 +2595,13 @@ def create_app(runtime: RuntimeContainer | None = None) -> FastAPI:
         run_id: str,
         user: Annotated[CurrentUser, Depends(require_geotoken)],
     ) -> RunResponse:
+        await app.state.runtime.store.get_run(
+            tenant_id=user.identity.principal.tenant_id,
+            app_id="full_information_view",
+            user_id=user.user_id,
+            run_id=run_id,
+        )
+
         async def operation():
             await app.state.runtime.executor.cancel(
                 user_id=user.user_id, run_id=run_id,
@@ -1951,6 +2639,8 @@ def create_app(runtime: RuntimeContainer | None = None) -> FastAPI:
                     "the pending reauthentication request requires a reauthenticated response"
                 )
             current = await app.state.runtime.store.get_run(
+                tenant_id=user.identity.principal.tenant_id,
+                app_id="full_information_view",
                 user_id=user.user_id,
                 run_id=run_id,
             )
@@ -2097,7 +2787,10 @@ def create_app(runtime: RuntimeContainer | None = None) -> FastAPI:
                     run_state_version=body.run_state_version,
                 )
             resumed = await app.state.runtime.store.get_run(
-                user_id=user.user_id, run_id=run_id,
+                tenant_id=user.identity.principal.tenant_id,
+                app_id="full_information_view",
+                user_id=user.user_id,
+                run_id=run_id,
             )
             if current.mode != "analysis":
                 await app.state.runtime.events.publish(
@@ -2125,7 +2818,10 @@ def create_app(runtime: RuntimeContainer | None = None) -> FastAPI:
             operation=operation,
         )
         current = await app.state.runtime.store.get_run(
-            user_id=user.user_id, run_id=run_id
+            tenant_id=user.identity.principal.tenant_id,
+            app_id="full_information_view",
+            user_id=user.user_id,
+            run_id=run_id,
         )
         if not replayed and current.mode != "analysis":
             app.state.runtime.schedule_run(user_id=user.user_id, run_id=run_id)
@@ -2144,6 +2840,13 @@ def create_app(runtime: RuntimeContainer | None = None) -> FastAPI:
         user: Annotated[CurrentUser, Depends(require_geotoken)],
         idempotency_key: Annotated[str, Header(alias="Idempotency-Key", min_length=1)],
     ) -> SteerResponse:
+        await app.state.runtime.store.get_run(
+            tenant_id=user.identity.principal.tenant_id,
+            app_id="full_information_view",
+            user_id=user.user_id,
+            run_id=run_id,
+        )
+
         async def operation():
             return await app.state.runtime.executor.steer(
                 user_id=user.user_id,
@@ -2180,6 +2883,12 @@ def create_app(runtime: RuntimeContainer | None = None) -> FastAPI:
         body: FrontendCommandReceipt,
         user: Annotated[CurrentUser, Depends(require_geotoken)],
     ) -> FrontendCommandReceiptResponse:
+        await app.state.runtime.store.get_run(
+            tenant_id=user.identity.principal.tenant_id,
+            app_id="full_information_view",
+            user_id=user.user_id,
+            run_id=run_id,
+        )
         if body.command_id != command_id:
             raise RunStateConflict("receipt command does not match request path")
         receipt = await app.state.runtime.store.put_frontend_command_receipt(
@@ -2202,7 +2911,12 @@ def create_app(runtime: RuntimeContainer | None = None) -> FastAPI:
         user: Annotated[CurrentUser, Depends(require_geotoken)],
         last_event_id: Annotated[str | None, Header(alias="Last-Event-ID")] = None,
     ) -> StreamingResponse:
-        await app.state.runtime.store.get_run(user_id=user.user_id, run_id=run_id)
+        await app.state.runtime.store.get_run(
+            tenant_id=user.identity.principal.tenant_id,
+            app_id="full_information_view",
+            user_id=user.user_id,
+            run_id=run_id,
+        )
         await app.state.runtime.events.validate_cursor(
             run_id=run_id,
             after_event_id=last_event_id,
@@ -2239,6 +2953,8 @@ def create_app(runtime: RuntimeContainer | None = None) -> FastAPI:
         user: Annotated[CurrentUser, Depends(require_geotoken)],
     ) -> ResultResponse:
         result = await app.state.runtime.store.get_result(
+            tenant_id=user.identity.principal.tenant_id,
+            app_id="full_information_view",
             user_id=user.user_id,
             result_id=result_id,
         )
@@ -2260,6 +2976,8 @@ def create_app(runtime: RuntimeContainer | None = None) -> FastAPI:
         cursor: Annotated[str | None, Query(min_length=1)] = None,
     ) -> ResultItemsResponse:
         result = await app.state.runtime.store.get_result(
+            tenant_id=user.identity.principal.tenant_id,
+            app_id="full_information_view",
             user_id=user.user_id,
             result_id=result_id,
         )
@@ -2299,12 +3017,37 @@ def create_app(runtime: RuntimeContainer | None = None) -> FastAPI:
             ),
         )
 
+    @app.get("/agent-api/v1/results/{result_id}/download")
+    async def download_result(
+        result_id: str,
+        user: Annotated[CurrentUser, Depends(require_geotoken)],
+        format: Literal["csv"] = "csv",
+    ) -> Response:
+        result = await app.state.runtime.store.get_result(
+            tenant_id=user.identity.principal.tenant_id,
+            app_id="full_information_view",
+            user_id=user.user_id,
+            result_id=result_id,
+        )
+        if result.payload_expires_at <= datetime.now(UTC):
+            raise ResultPayloadExpired("result payload is no longer available")
+        if not isinstance(result, TableDataResult):
+            raise ResourceNotFound("result download is not available")
+        csv_text = _table_result_csv(result)
+        return Response(
+            content="\ufeff" + csv_text,
+            media_type="text/csv",
+            headers={"Content-Disposition": 'attachment; filename="result.csv"'},
+        )
+
     @app.get("/agent-api/v1/evidence/{evidence_id}")
     async def get_evidence(
         evidence_id: str,
         user: Annotated[CurrentUser, Depends(require_geotoken)],
     ) -> EvidenceResponse:
         evidence = await app.state.runtime.store.get_evidence(
+            tenant_id=user.identity.principal.tenant_id,
+            app_id="full_information_view",
             user_id=user.user_id,
             evidence_id=evidence_id,
         )
@@ -2351,6 +3094,54 @@ def _expired_result_metadata(result: DataResult) -> ResultMetadata:
         evidence_ids=result.evidence_ids,
         payload_expires_at=result.payload_expires_at,
     )
+
+
+def _table_result_csv(result: TableDataResult) -> str:
+    rows = [
+        row if isinstance(row, dict) else row.model_dump(mode="json")
+        for row in result.data.rows
+    ]
+    field_names: list[str] = []
+    for row in rows:
+        for field_name in row:
+            if field_name not in field_names:
+                field_names.append(field_name)
+    display_labels = {
+        field.field: field.label
+        for field in (result.presentation.fields if result.presentation else [])
+    }
+    export_names: dict[str, str] = {}
+    used_labels: set[str] = set()
+    for field_name in field_names:
+        label = display_labels.get(field_name, field_name)
+        if label in used_labels:
+            label = f"{label}（{field_name}）"
+        export_names[field_name] = label
+        used_labels.add(label)
+    output = io.StringIO(newline="")
+    writer = csv.DictWriter(
+        output,
+        fieldnames=[export_names[field_name] for field_name in field_names],
+        extrasaction="ignore",
+    )
+    if field_names:
+        writer.writeheader()
+        for row in rows:
+            writer.writerow(
+                {
+                    export_names[field_name]: _csv_safe_cell(row.get(field_name))
+                    for field_name in field_names
+                }
+            )
+    return output.getvalue()
+
+
+def _csv_safe_cell(value: object) -> object:
+    if isinstance(value, (dict, list)):
+        value = json.dumps(value, ensure_ascii=False, separators=(",", ":"))
+    if isinstance(value, str) and value.lstrip().startswith(("=", "+", "-", "@")):
+        return "'" + value
+    return value
 
 
 app = create_app()

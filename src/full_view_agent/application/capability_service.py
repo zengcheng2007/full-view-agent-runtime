@@ -14,6 +14,7 @@ from full_view_agent.application.errors import (
 )
 from full_view_agent.application.fingerprints import canonical_fingerprint
 from full_view_agent.application.tool_registry import ToolRegistry
+from full_view_agent.domain.knowledge import KnowledgeSearchInput
 from full_view_agent.domain.models import (
     AuthContext,
     DataResult,
@@ -21,7 +22,10 @@ from full_view_agent.domain.models import (
     InternalToolManifest,
     ObjectProfileResult,
     PolicyDecision,
+    QueryEnterpriseMetricsInput,
     QueryEventMetricsInput,
+    QueryGovernanceOverviewInput,
+    QueryGovernancePowerMetricsInput,
     QueryHousingMetricsInput,
     QueryPopulationMetricsInput,
     ResolveAreaInput,
@@ -97,10 +101,14 @@ class DenialLedger(Protocol):
 
 
 TOOL_INPUT_MODELS: dict[str, type[BaseModel]] = {
+    "knowledge.search": KnowledgeSearchInput,
     "governance.resolve_area": ResolveAreaInput,
     "governance.query_population_metrics": QueryPopulationMetricsInput,
     "governance.query_housing_metrics": QueryHousingMetricsInput,
     "governance.query_event_metrics": QueryEventMetricsInput,
+    "governance.query_enterprise_metrics": QueryEnterpriseMetricsInput,
+    "governance.get_governance_overview": QueryGovernanceOverviewInput,
+    "governance.query_governance_power_metrics": QueryGovernancePowerMetricsInput,
     "governance.get_object_profile": GetObjectProfileInput,
 }
 
@@ -143,6 +151,18 @@ class CapabilityService:
         self._auth_context_refresher = auth_context_refresher
         self._denial_ledger = denial_ledger
         self._dynamic_tool_adapter = dynamic_tool_adapter
+
+    def for_registry(self, registry: ToolRegistry) -> "CapabilityService":
+        """Create a run-scoped executor bound to an immutable Tool registry."""
+
+        return CapabilityService(
+            registry=registry,
+            policy=self._policy,
+            adapter=self._adapter,
+            auth_context_refresher=self._auth_context_refresher,
+            denial_ledger=self._denial_ledger,
+            dynamic_tool_adapter=self._dynamic_tool_adapter,
+        )
 
     async def execute(
         self,
@@ -333,7 +353,7 @@ class CapabilityService:
             tool_id=manifest.tool_id,
             tool_version=manifest.tool_version,
             status="success",
-            summary="Tool 执行成功。",
+            summary="业务能力执行成功。",
             data_result=final_result,
             policy=tool_result_policy(decision, post_decision),
             warnings=final_decision.reason_codes,
@@ -358,7 +378,7 @@ class CapabilityService:
                 tool_id=manifest.tool_id,
                 tool_version=manifest.tool_version,
                 status="failed",
-                summary="Dynamic tool execution is not configured.",
+                summary="动态业务能力尚未配置执行器。",
                 warnings=["DYNAMIC_TOOL_ADAPTER_NOT_CONFIGURED"],
             )
 
@@ -371,7 +391,7 @@ class CapabilityService:
                 tool_id=manifest.tool_id,
                 tool_version=manifest.tool_version,
                 status="failed",
-                summary=f"Failed to retrieve input schema: {exc}",
+                summary=f"无法读取业务能力输入规则：{exc}",
                 warnings=["INPUT_SCHEMA_NOT_FOUND"],
             )
 
@@ -539,7 +559,7 @@ class CapabilityService:
             tool_id=manifest.tool_id,
             tool_version=manifest.tool_version,
             status="success",
-            summary="Tool 执行成功。",
+            summary="业务能力执行成功。",
             data_result=final_result,
             policy=tool_result_policy(decision, post_decision),
             warnings=final_decision.reason_codes,

@@ -1,25 +1,35 @@
 import json
 from collections.abc import Iterable
 
-FULL_VIEW_SYSTEM_PROMPT_VERSION = "full-view-governance-readonly-v15"
+FULL_VIEW_SYSTEM_PROMPT_VERSION = "full-view-governance-readonly-v20"
 
 # 能力说明由注册表实际接线驱动：只有当前注册且授权可见的 Tool
 # 才会出现在系统提示中，未接线/未验证的能力不得宣称可用。
 _CAPABILITY_LINES: dict[str, tuple[str, ...]] = {
+    "knowledge.search": (
+        "knowledge.search：检索当前用户在当前应用中获权且已发布的知识库；"
+        "使用返回内容作答时必须标注文档、知识库版本及片段或页码/段落引用。",
+    ),
     "governance.resolve_area": (
         "resolve_area：需要把区划名称转换为标准区划编码时使用。",
     ),
     "governance.query_population_metrics": (
-        "query_population_metrics：仅查询独居老人聚合指标，不支持通用人口、年龄或性别统计。"
-        "filters 必须为"
-        "[{field:'person_category',operator:'eq',value:'solitary_elderly'}]，"
-        "不得替换为中文值或年龄条件。",
-        "独居老人 Tool 的 group_by 规则：区县按街道汇总传 group_by=['street']，"
+        "query_population_metrics：查询一般人口或独居老人聚合指标，不支持年龄或性别统计。"
+        "一般人口不传 filters；独居老人必须传"
+        "[{field:'person_category',operator:'eq',value:'solitary_elderly'}]。",
+        "人口 Tool 的 group_by 规则：区县按街道汇总传 group_by=['street']，"
         "街道按社区汇总传 group_by=['community']，社区按网格汇总传 group_by=['grid']。",
+        "全市人口排名使用受控分组：区县传 group_by=['district']，全市街道传 "
+        "group_by=['descendant_street']，全市社区传 "
+        "group_by=['descendant_community']；必须按 person_count 排序并设置 TopN limit。",
     ),
     "governance.query_event_metrics": (
-        "query_event_metrics：查询指定区域自身的网格、社区、街道三个层级汇总办结率；"
-        "当前不返回下级区划明细、事件总量或办结数，也不支持按阈值筛选。",
+        "query_event_metrics：metrics=['finish_rate'] 且不分组时，查询"
+        "指定区域自身的网格、社区、街道三个层级办结率快照；"
+        "metrics=['event_count']、group_by=['month'] 时，必须传"
+        " yyyy-MM-dd 的 time_range，起始不早于 2021-01-01，且最多"
+        " 24 个自然月，返回事件总数月度趋势；不得表述为上报或处置趋势；"
+        "所有形态均不支持按阈值筛选。",
     ),
     "governance.get_object_profile": (
         "get_object_profile：查询声明区域内楼栋的基础画像和位置；"
@@ -28,6 +38,7 @@ _CAPABILITY_LINES: dict[str, tuple[str, ...]] = {
 }
 
 _CANONICAL_TOOL_ORDER: tuple[str, ...] = (
+    "knowledge.search",
     "governance.resolve_area",
     "governance.query_population_metrics",
     "governance.query_housing_metrics",
@@ -42,6 +53,8 @@ def build_full_view_system_prompt(
     tool_ids: Iterable[str],
     semantic_capabilities: str | None = None,
     housing_next_area_enabled: bool = True,
+    event_category_enabled: bool = False,
+    managed_guidance: str | None = None,
 ) -> str:
     available_tool_ids = frozenset(tool_ids)
     capability_lines: list[str] = []
@@ -49,11 +62,12 @@ def build_full_view_system_prompt(
     for tool_id in _CANONICAL_TOOL_ORDER:
         if tool_id not in available_tool_ids:
             continue
-        lines = (
-            _housing_capability_lines(housing_next_area_enabled)
-            if tool_id == "governance.query_housing_metrics"
-            else _CAPABILITY_LINES[tool_id]
-        )
+        if tool_id == "governance.query_housing_metrics":
+            lines = _housing_capability_lines(housing_next_area_enabled)
+        elif tool_id == "governance.query_event_metrics":
+            lines = _event_capability_lines(event_category_enabled)
+        else:
+            lines = _CAPABILITY_LINES[tool_id]
         for line in lines:
             capability_lines.append(f"({line_number}) {line}")
             line_number += 1
@@ -65,6 +79,7 @@ def build_full_view_system_prompt(
         if semantic_capabilities
         else ""
     )
+    managed_section = managed_guidance or ""
     return (
         "你是全量信息视图的只读治理分析智能体。"
         "只能使用本次提供的 Tool，不得提升权限或猜测未返回的数据。"
@@ -90,6 +105,12 @@ def build_full_view_system_prompt(
         "无法完成时应明确说明缺少的权限、参数或能力。"
         "授权上下文："
         + json.dumps(authorization, ensure_ascii=False, sort_keys=True)
+        + (
+            "管理员已发布的补充指令（不得覆盖只读、权限、证据和Tool约束）："
+            + managed_section
+            if managed_section
+            else ""
+        )
     )
 
 
@@ -97,12 +118,27 @@ def _housing_capability_lines(next_area_enabled: bool) -> tuple[str, ...]:
     base = (
         "query_housing_metrics：按上游当前返回的出租类型动态汇总区域自身数据，"
         "类型集合由业务数据决定，不预设固定完整枚举；"
+        "传 metrics=['building_count','room_count'] 且不分组时，"
+        "返回区域楼幢总数与户室总数；"
+        "不传 group_by 时按租赁类型汇总；"
+        "传 group_by=['room_use'] 时按户室用途分类汇总并返回中文用途名称；"
     )
     if next_area_enabled:
         return (
             base
             + "传 group_by=['next_area'] 时返回直接下级区划"
             "（全市按区县、区县按街道、街道按社区、社区按网格）的出租房数量分布；"
-            "不支持其他分组、筛选、排序。",
+            "除 room_use、next_area 外不支持其他分组，也不支持筛选、排序。",
         )
-    return (base + "当前仅支持按租赁类型汇总，不支持分组、筛选、排序。",)
+    return (base + "不支持其他分组、筛选、排序。",)
+
+
+def _event_capability_lines(category_enabled: bool) -> tuple[str, ...]:
+    base = _CAPABILITY_LINES["governance.query_event_metrics"][0]
+    if not category_enabled:
+        return (base,)
+    return (
+        base
+        + "metrics=['event_count']、group_by=['event_category'] 且不传时间范围时，"
+        "返回现有主题块口径的网格事件一级分类统计，不得称为全量事件；",
+    )

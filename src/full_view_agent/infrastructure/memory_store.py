@@ -52,6 +52,21 @@ def _same_result_identity(left: DataResult, right: DataResult) -> bool:
     return left.model_dump(exclude=excluded) == right.model_dump(exclude=excluded)
 
 
+def _owns_resource(
+    session: AgentSession | None,
+    *,
+    user_id: str,
+    tenant_id: str | None,
+    app_id: str | None,
+) -> bool:
+    return bool(
+        session is not None
+        and session.owner_user_id == user_id
+        and (tenant_id is None or session.owner_tenant_id == tenant_id)
+        and (app_id is None or session.app_id == app_id)
+    )
+
+
 class InMemoryAgentStore:
     def __init__(self) -> None:
         self._lock = asyncio.Lock()
@@ -74,17 +89,29 @@ class InMemoryAgentStore:
             return session
 
     async def get_session(
-        self, *, user_id: str, session_id: str
+        self,
+        *,
+        tenant_id: str = "legacy",
+        app_id: str = "full_information_view",
+        user_id: str,
+        session_id: str,
     ) -> AgentSession:
         async with self._lock:
             session = self.sessions.get(session_id)
-            if session is None or session.owner_user_id != user_id:
+            if (
+                session is None
+                or session.owner_tenant_id != tenant_id
+                or session.app_id != app_id
+                or session.owner_user_id != user_id
+            ):
                 raise ResourceNotFound("session not found")
             return session
 
     async def list_sessions(
         self,
         *,
+        tenant_id: str = "legacy",
+        app_id: str = "full_information_view",
         user_id: str,
         status: Literal["active", "archived"] | None = None,
     ) -> list[AgentSession]:
@@ -93,7 +120,9 @@ class InMemoryAgentStore:
                 (
                     session
                     for session in self.sessions.values()
-                    if session.owner_user_id == user_id
+                    if session.owner_tenant_id == tenant_id
+                    and session.app_id == app_id
+                    and session.owner_user_id == user_id
                     and (status is None or session.status == status)
                 ),
                 key=lambda session: (session.updated_at, session.session_id),
@@ -103,6 +132,8 @@ class InMemoryAgentStore:
     async def update_session(
         self,
         *,
+        tenant_id: str = "legacy",
+        app_id: str = "full_information_view",
         user_id: str,
         session_id: str,
         title: str | None = None,
@@ -110,7 +141,12 @@ class InMemoryAgentStore:
     ) -> AgentSession:
         async with self._lock:
             session = self.sessions.get(session_id)
-            if session is None or session.owner_user_id != user_id:
+            if (
+                session is None
+                or session.owner_tenant_id != tenant_id
+                or session.app_id != app_id
+                or session.owner_user_id != user_id
+            ):
                 raise ResourceNotFound("session not found")
             if status == "archived" and session.active_run_id is not None:
                 raise SessionActiveRunConflict(session.active_run_id)
@@ -157,11 +193,18 @@ class InMemoryAgentStore:
             return run
 
     async def list_messages(
-        self, *, user_id: str, session_id: str
+        self,
+        *,
+        user_id: str,
+        session_id: str,
+        tenant_id: str | None = None,
+        app_id: str | None = None,
     ) -> list[AgentMessage]:
         async with self._lock:
             session = self.sessions.get(session_id)
-            if session is None or session.owner_user_id != user_id:
+            if not _owns_resource(
+                session, user_id=user_id, tenant_id=tenant_id, app_id=app_id
+            ):
                 raise ResourceNotFound("session not found")
             return sorted(
                 (
@@ -217,13 +260,22 @@ class InMemoryAgentStore:
             self.runs[run_id] = running
             return running
 
-    async def get_run(self, *, user_id: str, run_id: str) -> AgentRun:
+    async def get_run(
+        self,
+        *,
+        user_id: str,
+        run_id: str,
+        tenant_id: str | None = None,
+        app_id: str | None = None,
+    ) -> AgentRun:
         async with self._lock:
             run = self.runs.get(run_id)
             if run is None:
                 raise ResourceNotFound("run not found")
             session = self.sessions.get(run.session_id)
-            if session is None or session.owner_user_id != user_id:
+            if not _owns_resource(
+                session, user_id=user_id, tenant_id=tenant_id, app_id=app_id
+            ):
                 raise ResourceNotFound("run not found")
             return run
 
@@ -334,9 +386,20 @@ class InMemoryAgentStore:
             return result, evidence, commands
 
     async def get_result_for_run(
-        self, *, user_id: str, run_id: str, result_id: str
+        self,
+        *,
+        user_id: str,
+        run_id: str,
+        result_id: str,
+        tenant_id: str | None = None,
+        app_id: str | None = None,
     ) -> DataResult:
-        result = await self.get_result(user_id=user_id, result_id=result_id)
+        result = await self.get_result(
+            user_id=user_id,
+            result_id=result_id,
+            tenant_id=tenant_id,
+            app_id=app_id,
+        )
         async with self._lock:
             if self.result_run_ids.get(result_id) != run_id:
                 raise ResourceNotFound("result not found")
@@ -347,6 +410,8 @@ class InMemoryAgentStore:
         *,
         user_id: str,
         result_id: str,
+        tenant_id: str | None = None,
+        app_id: str | None = None,
     ) -> DataResult:
         async with self._lock:
             result = self.results.get(result_id)
@@ -355,7 +420,9 @@ class InMemoryAgentStore:
                 raise ResourceNotFound("result not found")
             run = self.runs.get(run_id)
             session = self.sessions.get(run.session_id) if run is not None else None
-            if session is None or session.owner_user_id != user_id:
+            if not _owns_resource(
+                session, user_id=user_id, tenant_id=tenant_id, app_id=app_id
+            ):
                 raise ResourceNotFound("result not found")
             return result
 
@@ -381,7 +448,14 @@ class InMemoryAgentStore:
             self.evidence[evidence.evidence_id] = evidence
             return evidence
 
-    async def get_evidence(self, *, user_id: str, evidence_id: str) -> Evidence:
+    async def get_evidence(
+        self,
+        *,
+        user_id: str,
+        evidence_id: str,
+        tenant_id: str | None = None,
+        app_id: str | None = None,
+    ) -> Evidence:
         async with self._lock:
             evidence = self.evidence.get(evidence_id)
             run_id = (
@@ -391,14 +465,27 @@ class InMemoryAgentStore:
             )
             run = self.runs.get(run_id) if run_id is not None else None
             session = self.sessions.get(run.session_id) if run is not None else None
-            if evidence is None or session is None or session.owner_user_id != user_id:
+            if evidence is None or not _owns_resource(
+                session, user_id=user_id, tenant_id=tenant_id, app_id=app_id
+            ):
                 raise ResourceNotFound("evidence not found")
             return evidence
 
     async def get_evidence_for_run(
-        self, *, user_id: str, run_id: str, evidence_id: str
+        self,
+        *,
+        user_id: str,
+        run_id: str,
+        evidence_id: str,
+        tenant_id: str | None = None,
+        app_id: str | None = None,
     ) -> Evidence:
-        evidence = await self.get_evidence(user_id=user_id, evidence_id=evidence_id)
+        evidence = await self.get_evidence(
+            user_id=user_id,
+            evidence_id=evidence_id,
+            tenant_id=tenant_id,
+            app_id=app_id,
+        )
         async with self._lock:
             if self.result_run_ids.get(evidence.result_id) != run_id:
                 raise ResourceNotFound("evidence not found")

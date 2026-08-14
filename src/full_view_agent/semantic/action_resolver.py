@@ -38,6 +38,7 @@ from full_view_agent.domain.models import (
     ContractModel,
     EvidenceMetricDefinition,
     PolicyDecision,
+    SemanticFilterLineage,
     SemanticResultLineage,
 )
 from full_view_agent.semantic.authorization import SubjectAuthorization
@@ -323,7 +324,39 @@ class SemanticActionResolver:
                 )
                 for ref in plan.evidence.metric_definitions
             ],
+            filter_contexts=[
+                SemanticFilterLineage(
+                    field=item.field,
+                    operator=item.operator,
+                    value=item.value,
+                    display_label=self._filter_display_label(
+                        subject_id=spec.subject,
+                        field=item.field,
+                        value=item.value,
+                    ),
+                )
+                for item in spec.filters
+            ],
         )
+
+    def _filter_display_label(
+        self,
+        *,
+        subject_id: str,
+        field: str,
+        value: object,
+    ) -> str | None:
+        subject = self._catalog.require_subject(subject_id)
+        for definition in subject.filters:
+            if definition.field != field or not isinstance(value, str):
+                continue
+            display_label = definition.value_display_labels.get(value)
+            if display_label is not None:
+                return display_label
+            terms = definition.value_intent_terms.get(value, ())
+            if terms:
+                return terms[0]
+        return None
 
 
 def _output_label(output: Literal["table", "choropleth", "metric_card"]) -> str:

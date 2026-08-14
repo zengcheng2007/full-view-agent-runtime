@@ -29,11 +29,12 @@ class AnalysisSemanticSpecFactory:
             raise AnalysisSemanticSpecError(
                 f"analysis step {step.step_id} does not match its catalog binding"
             )
+        group_by = self._default_group_by(subject, step.scope_ref)
         return SemanticQuerySpec(
             subject=subject.subject_id,
-            metrics=[metric.metric_id for metric in subject.metrics],
+            metrics=self._default_metrics(subject, group_by),
             scope=step.scope_ref.scope,
-            group_by=self._default_group_by(subject, step.scope_ref),
+            group_by=group_by,
             filters=[
                 SemanticFilter(
                     field=required.field,
@@ -44,6 +45,24 @@ class AnalysisSemanticSpecFactory:
             ],
             output="table",
         )
+
+    @staticmethod
+    def _default_metrics(
+        subject: SubjectDefinition,
+        group_by: list[str],
+    ) -> list[str]:
+        requested_group_by = tuple(group_by)
+        matching_shapes = [
+            shape
+            for shape in subject.result_shapes
+            if shape.group_by_selection == requested_group_by
+        ]
+        # Catalog order is the deterministic default-shape order. Additional
+        # metric-specific shapes must not change the established first shape.
+        for shape in matching_shapes:
+            if shape.metric_selection is not None:
+                return list(shape.metric_selection)
+        return [metric.metric_id for metric in subject.metrics]
 
     @staticmethod
     def _default_group_by(

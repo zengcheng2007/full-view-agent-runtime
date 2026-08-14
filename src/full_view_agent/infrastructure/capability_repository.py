@@ -21,6 +21,7 @@ from full_view_agent.domain.capability import (
     CapabilityStatus,
     CapabilityType,
     Connector,
+    ConnectorAuditEvent,
     ModelConfig,
     SkillCapability,
     ToolCapability,
@@ -57,6 +58,16 @@ class CapabilityRepository(Protocol):
     async def save_connector(self, connector: Connector) -> None: ...
     async def list_connectors(self, *, active_only: bool = True) -> list[Connector]: ...
     async def get_connector(self, connector_id: str) -> Connector | None: ...
+    async def update_connector(
+        self,
+        connector: Connector,
+        *,
+        expected_etag: int,
+        event: ConnectorAuditEvent,
+    ) -> Connector: ...
+    async def list_connector_audit_events(
+        self, connector_id: str
+    ) -> list[ConnectorAuditEvent]: ...
 
 
 class ModelConfigRepository(Protocol):
@@ -77,6 +88,7 @@ class InMemoryCapabilityRepository:
         self._snapshots: dict[str, CapabilitySnapshot] = {}
         self._events: list[CapabilityLifecycleEvent] = []
         self._connectors: dict[str, Connector] = {}
+        self._connector_events: list[ConnectorAuditEvent] = []
         self._lock = asyncio.Lock()
 
     async def save_tool(self, tool: ToolCapability) -> ToolCapability:
@@ -182,6 +194,8 @@ class InMemoryCapabilityRepository:
 
     async def save_connector(self, connector: Connector) -> None:
         async with self._lock:
+            if connector.connector_id in self._connectors:
+                raise RunStateConflict("connector already exists")
             self._connectors[connector.connector_id] = connector
 
     async def list_connectors(
@@ -194,6 +208,32 @@ class InMemoryCapabilityRepository:
 
     async def get_connector(self, connector_id: str) -> Connector | None:
         return self._connectors.get(connector_id)
+
+    async def update_connector(
+        self,
+        connector: Connector,
+        *,
+        expected_etag: int,
+        event: ConnectorAuditEvent,
+    ) -> Connector:
+        async with self._lock:
+            existing = self._connectors.get(connector.connector_id)
+            if existing is None:
+                raise KeyError(connector.connector_id)
+            if existing.etag != expected_etag:
+                raise RunStateConflict("connector etag conflict")
+            self._connectors[connector.connector_id] = connector
+            self._connector_events.append(event)
+            return connector
+
+    async def list_connector_audit_events(
+        self, connector_id: str
+    ) -> list[ConnectorAuditEvent]:
+        return [
+            event
+            for event in self._connector_events
+            if event.connector_id == connector_id
+        ]
 
 
 class InMemoryModelConfigRepository:
@@ -543,21 +583,21 @@ class PostgresCapabilityRepository:
         import psycopg
 
         async with await psycopg.AsyncConnection.connect(self._dsn) as conn:
-            await conn.execute(
+            cursor = await conn.execute(
                 f"""
                 INSERT INTO {self._schema}.connectors (
                     connector_id, name, base_url, description,
                     allowed_path_prefixes, denied_hosts, is_active,
-                    credential_ref, timeout_ms, created_at, updated_at
+                    credential_ref, timeout_ms, created_by, updated_by, etag,
+                    created_at, updated_at
                 ) VALUES (
                     %(connector_id)s, %(name)s, %(base_url)s, %(description)s,
                     %(allowed_path_prefixes)s, %(denied_hosts)s, %(is_active)s,
-                    %(credential_ref)s, %(timeout_ms)s, %(created_at)s, %(updated_at)s
+                    %(credential_ref)s, %(timeout_ms)s, %(created_by)s,
+                    %(updated_by)s, %(etag)s, %(created_at)s, %(updated_at)s
                 )
-                ON CONFLICT (connector_id) DO UPDATE SET
-                    name = EXCLUDED.name, base_url = EXCLUDED.base_url,
-                    is_active = EXCLUDED.is_active,
-                    updated_at = EXCLUDED.updated_at
+                ON CONFLICT (connector_id) DO NOTHING
+                RETURNING connector_id
                 """,
                 {
                     "connector_id": connector.connector_id,
@@ -569,10 +609,15 @@ class PostgresCapabilityRepository:
                     "is_active": connector.is_active,
                     "credential_ref": connector.credential_ref,
                     "timeout_ms": connector.timeout_ms,
+                    "created_by": connector.created_by,
+                    "updated_by": connector.updated_by,
+                    "etag": connector.etag,
                     "created_at": connector.created_at,
                     "updated_at": connector.updated_at,
                 },
             )
+            if await cursor.fetchone() is None:
+                raise RunStateConflict("connector already exists")
 
     async def list_connectors(
         self, *, active_only: bool = True
@@ -583,7 +628,8 @@ class PostgresCapabilityRepository:
             query = (
                 f"SELECT connector_id, name, base_url, description,"
                 f"  allowed_path_prefixes, denied_hosts, is_active,"
-                f"  credential_ref, timeout_ms, created_at, updated_at"
+                f"  credential_ref, timeout_ms, created_by, updated_by, etag,"
+                f"  created_at, updated_at"
                 f" FROM {self._schema}.connectors"
             )
             if active_only:
@@ -602,8 +648,11 @@ class PostgresCapabilityRepository:
                 is_active=r[6],
                 credential_ref=r[7],
                 timeout_ms=r[8],
-                created_at=r[9],
-                updated_at=r[10],
+                created_by=r[9],
+                updated_by=r[10],
+                etag=r[11],
+                created_at=r[12],
+                updated_at=r[13],
             )
             for r in rows
         ]
@@ -616,7 +665,8 @@ class PostgresCapabilityRepository:
                 f"""
                 SELECT connector_id, name, base_url, description,
                        allowed_path_prefixes, denied_hosts, is_active,
-                       credential_ref, timeout_ms, created_at, updated_at
+                       credential_ref, timeout_ms, created_by, updated_by, etag,
+                       created_at, updated_at
                   FROM {self._schema}.connectors
                  WHERE connector_id = %s
                 """,
@@ -635,9 +685,92 @@ class PostgresCapabilityRepository:
             is_active=row[6],
             credential_ref=row[7],
             timeout_ms=row[8],
-            created_at=row[9],
-            updated_at=row[10],
+            created_by=row[9],
+            updated_by=row[10],
+            etag=row[11],
+            created_at=row[12],
+            updated_at=row[13],
         )
+
+    async def update_connector(
+        self,
+        connector: Connector,
+        *,
+        expected_etag: int,
+        event: ConnectorAuditEvent,
+    ) -> Connector:
+        import psycopg
+
+        async with await psycopg.AsyncConnection.connect(self._dsn) as conn:
+            cursor = await conn.execute(
+                f"""
+                UPDATE {self._schema}.connectors SET
+                    name=%(name)s, base_url=%(base_url)s,
+                    description=%(description)s,
+                    allowed_path_prefixes=%(allowed_path_prefixes)s,
+                    denied_hosts=%(denied_hosts)s, is_active=%(is_active)s,
+                    credential_ref=%(credential_ref)s, timeout_ms=%(timeout_ms)s,
+                    updated_by=%(updated_by)s, etag=%(etag)s,
+                    updated_at=%(updated_at)s
+                WHERE connector_id=%(connector_id)s AND etag=%(expected_etag)s
+                RETURNING connector_id
+                """,
+                {
+                    **_connector_params(connector),
+                    "expected_etag": expected_etag,
+                },
+            )
+            if await cursor.fetchone() is None:
+                exists = await conn.execute(
+                    f"SELECT 1 FROM {self._schema}.connectors WHERE connector_id=%s",
+                    (connector.connector_id,),
+                )
+                if await exists.fetchone() is None:
+                    raise KeyError(connector.connector_id)
+                raise RunStateConflict("connector etag conflict")
+            await conn.execute(
+                f"""
+                INSERT INTO {self._schema}.connector_audit_events (
+                    event_id, connector_id, action, actor, reason,
+                    previous_etag, new_etag, changed_fields,
+                    from_active, to_active, changed_at
+                ) VALUES (
+                    %(event_id)s, %(connector_id)s, %(action)s, %(actor)s,
+                    %(reason)s, %(previous_etag)s, %(new_etag)s,
+                    %(changed_fields)s, %(from_active)s, %(to_active)s,
+                    %(changed_at)s
+                )
+                """,
+                event.model_dump(mode="python"),
+            )
+        return connector
+
+    async def list_connector_audit_events(
+        self, connector_id: str
+    ) -> list[ConnectorAuditEvent]:
+        import psycopg
+
+        async with await psycopg.AsyncConnection.connect(self._dsn) as conn:
+            cursor = await conn.execute(
+                f"""
+                SELECT event_id, connector_id, action, actor, reason,
+                       previous_etag, new_etag, changed_fields,
+                       from_active, to_active, changed_at
+                FROM {self._schema}.connector_audit_events
+                WHERE connector_id=%s ORDER BY changed_at, event_id
+                """,
+                (connector_id,),
+            )
+            rows = await cursor.fetchall()
+        return [
+            ConnectorAuditEvent(
+                event_id=row[0], connector_id=row[1], action=row[2],
+                actor=row[3], reason=row[4], previous_etag=row[5],
+                new_etag=row[6], changed_fields=list(row[7] or []),
+                from_active=row[8], to_active=row[9], changed_at=row[10],
+            )
+            for row in rows
+        ]
 
 
 class PostgresModelConfigRepository:
@@ -813,6 +946,25 @@ def _tool_params(tool: ToolCapability) -> dict[str, object]:
         "etag": tool.etag,
         "created_at": tool.created_at,
         "updated_at": tool.updated_at,
+    }
+
+
+def _connector_params(connector: Connector) -> dict[str, object]:
+    return {
+        "connector_id": connector.connector_id,
+        "name": connector.name,
+        "base_url": connector.base_url,
+        "description": connector.description,
+        "allowed_path_prefixes": connector.allowed_path_prefixes,
+        "denied_hosts": connector.denied_hosts,
+        "is_active": connector.is_active,
+        "credential_ref": connector.credential_ref,
+        "timeout_ms": connector.timeout_ms,
+        "created_by": connector.created_by,
+        "updated_by": connector.updated_by,
+        "etag": connector.etag,
+        "created_at": connector.created_at,
+        "updated_at": connector.updated_at,
     }
 
 

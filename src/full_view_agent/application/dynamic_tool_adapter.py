@@ -12,6 +12,9 @@ from __future__ import annotations
 
 import logging
 from typing import TYPE_CHECKING
+from uuid import uuid4
+
+from jsonschema import SchemaError, ValidationError, validate
 
 from full_view_agent.application.errors import (
     UpstreamContractError,
@@ -19,12 +22,12 @@ from full_view_agent.application.errors import (
     UpstreamUnavailable,
 )
 from full_view_agent.domain.models import (
-    AreaCandidatesData,
-    AreaCandidatesResult,
     AuthContext,
     DataResult,
+    DynamicTableData,
     InternalToolManifest,
     PolicyDecision,
+    TableDataResult,
 )
 
 if TYPE_CHECKING:
@@ -99,9 +102,18 @@ class HttpDynamicToolAdapter:
         # Execute via HttpConnectorExecutor
         # The executor handles SSRF protection, credential injection, redirects, etc.
         try:
+            from full_view_agent.infrastructure.http_connector_executor import (
+                ConnectorCredentialScope,
+            )
+
             response_data = await self._http_executor.execute(
                 tool=tool,
                 arguments=arguments,
+                credential_scope=ConnectorCredentialScope(
+                    subject_user_id=auth_context.principal.user_id,
+                    app_id=auth_context.application.app_id,
+                    run_id=auth_context.run_id,
+                ),
             )
         except Exception as exc:
             # Re-raise our domain exceptions as-is
@@ -114,25 +126,47 @@ class HttpDynamicToolAdapter:
             logger.error(f"Dynamic tool execution failed: {exc}", exc_info=True)
             raise UpstreamUnavailable(f"HTTP execution failed: {exc}") from exc
 
-        # Wrap response in AreaCandidatesResult as a generic container
-        # We store the raw response in the 'data' field
+        if tool.output_schema:
+            try:
+                validate(instance=response_data, schema=tool.output_schema)
+            except (ValidationError, SchemaError) as exc:
+                raise UpstreamContractError(
+                    f"Tool {tool.capability_id} response violates output_schema: "
+                    f"{exc.message}"
+                ) from exc
+
         from full_view_agent.application.fingerprints import canonical_fingerprint
+
+        if tool.result_kind != "table":
+            raise UpstreamContractError(
+                f"Dynamic result_kind {tool.result_kind!r} is not supported yet"
+            )
+
+        raw_rows = response_data.get("rows")
+        if not isinstance(raw_rows, list):
+            raise UpstreamContractError(
+                f"Tool {tool.capability_id} table response must contain a rows array"
+            )
+        visible_rows = raw_rows[: tool.max_result_rows]
+        try:
+            data = DynamicTableData.model_validate({"rows": visible_rows})
+        except ValueError as exc:
+            raise UpstreamContractError(
+                f"Tool {tool.capability_id} returned invalid table rows"
+            ) from exc
 
         fingerprint = canonical_fingerprint(
             domain=f"dynamic-result:{tool.capability_id}:{tool.version}",
-            value=response_data,
+            value=data,
         )
-
-        # Create a minimal AreaCandidatesResult to wrap the data
-        # The actual response is stored in a custom way
-        return AreaCandidatesResult(
-            result_id=f"dynamic-{tool.capability_id}-{tool.version}",
-            data_schema_ref=f"schema://dynamic/{tool.capability_id}/{tool.version}",
-            result_fingerprint=fingerprint,
-            data=AreaCandidatesData(
-                resolved_area_code=None,
-                ambiguous=False,
-                candidates=[],
+        return TableDataResult(
+            result_id=f"dynamic-{uuid4().hex}",
+            data_schema_ref=(
+                tool.data_schema_ref
+                or f"schema://dynamic/{tool.capability_id}/{tool.version}"
             ),
-            candidate_count=0,
+            result_fingerprint=fingerprint,
+            data=data,
+            row_count=len(data.rows),
+            truncated=len(raw_rows) > len(data.rows),
         )

@@ -150,3 +150,38 @@ class PostgresModelConfigKeyStore:
             await conn.execute(query, (config_id,))  # pyright: ignore[reportArgumentType]
 
         logger.debug(f"Deleted API key for config {config_id}")
+
+    async def resolve_key_material(
+        self, *, config_id: str
+    ) -> tuple[bytes, bytes]:
+        """Return the raw (ciphertext, nonce) for ``config_id``.
+
+        This is used to capture an immutable snapshot of the encrypted
+        key at binding time — the plaintext is never materialised. The
+        snapshot is tied to the current row's version; later key
+        rotation writes new ciphertext to the source row but does not
+        affect already-captured snapshots (they live in
+        ``run_model_config_snapshots``).
+        """
+        import psycopg
+
+        async with await psycopg.AsyncConnection.connect(self._dsn) as conn:
+            query = (
+                f"SELECT api_key_ciphertext, api_key_nonce"
+                f" FROM {self._schema}.model_configs"
+                f" WHERE config_id = %s"
+            )
+            cur = await conn.execute(query, (config_id,))  # pyright: ignore[reportArgumentType]
+            row = await cur.fetchone()
+
+        if row is None:
+            raise ResourceNotFound(
+                f"api key for config {config_id} not found"
+            )
+
+        ciphertext, nonce = row
+        if not ciphertext or not nonce:
+            raise ResourceNotFound(
+                f"api key for config {config_id} not found"
+            )
+        return bytes(ciphertext), bytes(nonce)

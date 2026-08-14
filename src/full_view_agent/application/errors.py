@@ -34,6 +34,10 @@ class AuthenticationFailed(ApplicationError):
     code = "unauthenticated"
 
 
+class AuthorizationDenied(ApplicationError):
+    code = "forbidden"
+
+
 class IdentityProviderUnavailable(ApplicationError):
     code = "identity_provider_unavailable"
 
@@ -44,6 +48,10 @@ class WorkflowNotAvailable(ApplicationError):
 
 class AnalysisRequestRejected(ApplicationError):
     code = "analysis_request_rejected"
+
+
+class ConnectorConfigurationInvalid(ApplicationError, ValueError):
+    code = "connector_configuration_invalid"
 
 
 class AnalysisPlanningUnavailable(ApplicationError):

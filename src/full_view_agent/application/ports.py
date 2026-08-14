@@ -57,12 +57,19 @@ class AgentStore(Protocol):
     async def create_session(self, session: AgentSession) -> AgentSession: ...
 
     async def get_session(
-        self, *, user_id: str, session_id: str
+        self,
+        *,
+        tenant_id: str = "legacy",
+        app_id: str = "full_information_view",
+        user_id: str,
+        session_id: str,
     ) -> AgentSession: ...
 
     async def list_sessions(
         self,
         *,
+        tenant_id: str = "legacy",
+        app_id: str = "full_information_view",
         user_id: str,
         status: Literal["active", "archived"] | None = None,
     ) -> list[AgentSession]: ...
@@ -70,6 +77,8 @@ class AgentStore(Protocol):
     async def update_session(
         self,
         *,
+        tenant_id: str = "legacy",
+        app_id: str = "full_information_view",
         user_id: str,
         session_id: str,
         title: str | None = None,
@@ -86,7 +95,12 @@ class AgentStore(Protocol):
     ) -> AgentRun: ...
 
     async def list_messages(
-        self, *, user_id: str, session_id: str
+        self,
+        *,
+        user_id: str,
+        session_id: str,
+        tenant_id: str | None = None,
+        app_id: str | None = None,
     ) -> list[AgentMessage]: ...
 
     async def save_message(
@@ -95,7 +109,14 @@ class AgentStore(Protocol):
 
     async def start_run(self, *, user_id: str, run_id: str) -> AgentRun: ...
 
-    async def get_run(self, *, user_id: str, run_id: str) -> AgentRun: ...
+    async def get_run(
+        self,
+        *,
+        user_id: str,
+        run_id: str,
+        tenant_id: str | None = None,
+        app_id: str | None = None,
+    ) -> AgentRun: ...
 
     async def list_recoverable_runs(self) -> list[tuple[str, AgentRun]]: ...
 
@@ -114,21 +135,45 @@ class AgentStore(Protocol):
     ) -> tuple[DataResult, Evidence, tuple[FrontendCommand, ...]]: ...
 
     async def get_result(
-        self, *, user_id: str, result_id: str
+        self,
+        *,
+        user_id: str,
+        result_id: str,
+        tenant_id: str | None = None,
+        app_id: str | None = None,
     ) -> DataResult: ...
 
     async def get_result_for_run(
-        self, *, user_id: str, run_id: str, result_id: str
+        self,
+        *,
+        user_id: str,
+        run_id: str,
+        result_id: str,
+        tenant_id: str | None = None,
+        app_id: str | None = None,
     ) -> DataResult: ...
 
     async def save_evidence(
         self, *, user_id: str, run_id: str, evidence: Evidence
     ) -> Evidence: ...
 
-    async def get_evidence(self, *, user_id: str, evidence_id: str) -> Evidence: ...
+    async def get_evidence(
+        self,
+        *,
+        user_id: str,
+        evidence_id: str,
+        tenant_id: str | None = None,
+        app_id: str | None = None,
+    ) -> Evidence: ...
 
     async def get_evidence_for_run(
-        self, *, user_id: str, run_id: str, evidence_id: str
+        self,
+        *,
+        user_id: str,
+        run_id: str,
+        evidence_id: str,
+        tenant_id: str | None = None,
+        app_id: str | None = None,
     ) -> Evidence: ...
 
     async def save_frontend_command(
@@ -224,6 +269,7 @@ class RunAuthContextStore(Protocol):
     async def put(self, auth_context: AuthContext) -> AuthContext: ...
 
     async def get(self, *, user_id: str, run_id: str) -> AuthContext: ...
+    async def delete(self, *, run_id: str) -> None: ...
 
 
 class AnalysisOrchestratorPort(Protocol):

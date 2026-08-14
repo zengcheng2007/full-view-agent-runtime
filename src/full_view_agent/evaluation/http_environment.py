@@ -27,6 +27,7 @@ class HttpEvalEnvironment:
         p0_allowed_user_ids: set[str] | frozenset[str],
         client: httpx.AsyncClient | None = None,
         housing_next_area_enabled: bool = False,
+        event_category_enabled: bool = False,
     ) -> None:
         self._raw_token = raw_token
         self._client = client or httpx.AsyncClient(follow_redirects=False)
@@ -39,7 +40,8 @@ class HttpEvalEnvironment:
             client=self._client,
         )
         self._tool_registry = ToolRegistry.production_http(
-            housing_next_area_enabled=housing_next_area_enabled
+            housing_next_area_enabled=housing_next_area_enabled,
+            event_category_enabled=event_category_enabled,
         )
         self._credential_broker = InMemoryCredentialBroker()
         self._auth_context_store = InMemoryRunAuthContextStore()

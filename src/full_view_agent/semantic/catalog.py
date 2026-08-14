@@ -2,13 +2,14 @@
 
 Catalog 只声明当前生产 HTTP Adapter 已逐项验证的能力，证据来源：
 - ``infrastructure/governance_adapter.py`` 的真实端点映射与白名单校验
-  （``_validate_solitary_elderly_query`` / ``_validate_housing_next_area_query``）；
+  （``_validate_population_query`` / ``_validate_housing_next_area_query``）；
 - ``application/tool_registry.py`` 的生产 manifest（dataset、权限、adapter 绑定）；
 - ``tests/test_http_governance_adapter.py``、``tests/test_production_wiring.py``
   与 ``evals/cases`` 中的契约/接线用例。
 
 真实接口未验证的能力一律不声明：population 的 gender/age_band、housing 的
-筛选/排序、event 的时间范围/事件总量/办结数/下级区划明细/阈值筛选。
+筛选/任意排序（next_area 结果固有 dwelling_count desc 除外）、event 的
+时间范围/事件总量/办结数/下级区划明细/阈值筛选。
 
 模型可见能力视图（``model_capability_view``）由 Catalog 经权限过滤派生，
 只含业务语义；物理 adapter 绑定只存在于内部 ``CapabilityBinding``，
@@ -42,7 +43,7 @@ from full_view_agent.semantic.errors import UnknownSubjectError
 SEMANTIC_CATALOG_VERSION = "0.1.0-s0-candidate"
 SEMANTIC_SPEC_VERSIONS: tuple[str, ...] = ("s0.1",)
 
-OutputForm = Literal["table", "choropleth"]
+OutputForm = Literal["table", "choropleth", "metric_card"]
 
 _DEFAULT_RESULT_GRAIN_LABEL = "按所选查询维度返回结果"
 _UNSAFE_BUSINESS_LABEL = re.compile(
@@ -92,6 +93,10 @@ class FilterDefinition(ContractModel):
     label: str = Field(min_length=1, max_length=100)
     operators: tuple[str, ...] = Field(min_length=1)
     allowed_values: tuple[str, ...] = ()
+    value_intent_terms: dict[str, tuple[str, ...]] = Field(default_factory=dict)
+    # 展示名是 Catalog 事实，与用于识别原话的触发词分离；
+    # 它会进入可验证 lineage，不由模型自由声称口径映射。
+    value_display_labels: dict[str, str] = Field(default_factory=dict)
 
 
 class RequiredFilter(ContractModel):
@@ -126,6 +131,10 @@ class ResultShape(ContractModel):
     row_fields: tuple[str, ...] = Field(min_length=1)
     # None = 适用于该主题的所有合法 group_by；元组 = 精确匹配 group_by。
     group_by_selection: tuple[str, ...] | None = None
+    # None = 不限指标组合；非 None = 必须精确匹配该受控指标组合。
+    metric_selection: tuple[str, ...] | None = None
+    # None = 沿用主题输出形态；非 None = 该精确结果形状进一步收窄输出。
+    output_forms: tuple[OutputForm, ...] | None = None
 
     @field_validator("grain_label")
     @classmethod
@@ -135,8 +144,25 @@ class ResultShape(ContractModel):
         return _validated_business_label(value)
 
 
+class IntrinsicOrderRule(ContractModel):
+    """A result shape whose upstream contract already fixes one exact order."""
+
+    field: str = Field(min_length=1, max_length=64)
+    direction: Literal["asc", "desc"]
+    group_by_selection: tuple[str, ...] = Field(min_length=1)
+    output: OutputForm = "table"
+    label: str = Field(min_length=1, max_length=100)
+
+
 class SubjectDefinition(ContractModel):
-    subject_id: Literal["population", "housing", "event"]
+    subject_id: Literal[
+        "population",
+        "housing",
+        "event",
+        "enterprise",
+        "governance_overview",
+        "governance_power",
+    ]
     display_name: str = Field(min_length=1, max_length=100)
     logical_dataset_id: str = Field(min_length=1, max_length=64)
     required_entitlement: str = Field(min_length=1, max_length=128)
@@ -157,9 +183,14 @@ class SubjectDefinition(ContractModel):
     # broad request before asking the model to choose a Tool.
     trigger_user_terms: tuple[str, ...] = ()
     supports_order_by: bool = False
+    intrinsic_order_rules: tuple[IntrinsicOrderRule, ...] = ()
     supports_time_range: bool = False
     output_forms: tuple[OutputForm, ...] = ("table",)
     result_shapes: tuple[ResultShape, ...] = Field(min_length=1)
+    # Cross-domain snapshot capabilities remain available to semantic_query,
+    # but must not automatically become an extra step in the multi-subject
+    # regional analysis "overview" goal.
+    include_in_analysis_overview: bool = True
 
 
 class CapabilityBinding(ContractModel):
@@ -197,6 +228,7 @@ class ResultShapeSummary(ContractModel):
     """模型可见的安全结果粒度；不含 schema/adapter 等物理绑定。"""
 
     group_by_selection: tuple[str, ...] | None
+    metric_selection: tuple[str, ...] | None = None
     grain_label: str
 
 
@@ -213,6 +245,8 @@ class SubjectCapabilityView(ContractModel):
     required_filters: tuple[RequiredFilterSummary, ...] = ()
     required_user_terms: tuple[str, ...] = ()
     trigger_user_terms: tuple[str, ...] = ()
+    supports_order_by: bool = False
+    intrinsic_order_rules: tuple[IntrinsicOrderRule, ...] = ()
     output_forms: tuple[str, ...]
     result_shapes: tuple[ResultShapeSummary, ...]
 
@@ -226,16 +260,27 @@ class ModelCapabilityView(ContractModel):
 def _population() -> SubjectDefinition:
     return SubjectDefinition(
         subject_id="population",
-        display_name="独居老人指标",
+        display_name="人口聚合指标",
         logical_dataset_id="population",
         required_entitlement="governance.population.aggregate.read",
-        # 真实 Adapter 仅支持区县(6)/街道(9)/社区(12)三级 scope 的独居老人
-        # 直接下级聚合（governance_adapter._validate_solitary_elderly_query）。
-        scope_levels=(6, 9, 12),
+        # 上游只提供直接下级聚合。市级区县为单次聚合；市级街道/社区
+        # 由 Adapter 在一个 Tool 内执行有界、完整性优先的确定性下钻。
+        scope_levels=(4, 6, 9, 12),
         metrics=(
             MetricDefinition(metric_id="person_count", label="人数", unit="人"),
         ),
         group_by_rules=(
+            GroupByRule(value="district", label="全市区县", allowed_scope_levels=(4,)),
+            GroupByRule(
+                value="descendant_street",
+                label="全市街道",
+                allowed_scope_levels=(4,),
+            ),
+            GroupByRule(
+                value="descendant_community",
+                label="全市社区",
+                allowed_scope_levels=(4,),
+            ),
             GroupByRule(value="street", label="街道", allowed_scope_levels=(6,)),
             GroupByRule(value="community", label="社区", allowed_scope_levels=(9,)),
             GroupByRule(value="grid", label="网格", allowed_scope_levels=(12,)),
@@ -245,22 +290,22 @@ def _population() -> SubjectDefinition:
         filters=(
             FilterDefinition(
                 field="person_category",
-                label="人口类别",
+                label=(
+                    "人口类别（solitary_elderly 表示独居老人；用户明确询问"
+                    "空巢老人时也按此受控口径查询）"
+                ),
                 operators=("eq",),
                 allowed_values=("solitary_elderly",),
+                value_intent_terms={"solitary_elderly": ("独居老人", "空巢老人")},
+                value_display_labels={
+                    "solitary_elderly": "独居老人（空巢老人按此受控口径映射）"
+                },
             ),
         ),
-        # 真实 Adapter 白名单只接受 solitary_elderly 独居老人查询；
-        # 缺失该筛选时语义入口必须 fail closed（见 action_resolver）。
-        required_filters=(
-            RequiredFilter(
-                field="person_category",
-                operator="eq",
-                value="solitary_elderly",
-            ),
-        ),
-        required_user_terms=("独居老人",),
-        trigger_user_terms=("人口",),
+        required_filters=(),
+        required_user_terms=(),
+        trigger_user_terms=("人口", "独居老人"),
+        supports_order_by=True,
         output_forms=("table", "choropleth"),
         result_shapes=(
             ResultShape(
@@ -270,6 +315,30 @@ def _population() -> SubjectDefinition:
                 grain_label="按直接下级区划汇总",
                 row_fields=("area_code", "area_name", "person_count"),
             ),
+            ResultShape(
+                shape_id="population_ranking_table",
+                data_schema_ref="schema://data/population-ranking-table/1.0.0",
+                fingerprint_domain="data-result:population-ranking-table:1.0.0",
+                grain_label="按目标区划层级返回全市人口排名",
+                row_fields=("rank", "area_code", "area_name", "person_count"),
+                group_by_selection=("district",),
+            ),
+            ResultShape(
+                shape_id="population_descendant_street_ranking_table",
+                data_schema_ref="schema://data/population-ranking-table/1.0.0",
+                fingerprint_domain="data-result:population-ranking-table:1.0.0",
+                grain_label="按街道返回全市人口排名",
+                row_fields=("rank", "area_code", "area_name", "person_count"),
+                group_by_selection=("descendant_street",),
+            ),
+            ResultShape(
+                shape_id="population_descendant_community_ranking_table",
+                data_schema_ref="schema://data/population-ranking-table/1.0.0",
+                fingerprint_domain="data-result:population-ranking-table:1.0.0",
+                grain_label="按社区返回全市人口排名",
+                row_fields=("rank", "area_code", "area_name", "person_count"),
+                group_by_selection=("descendant_community",),
+            ),
         ),
     )
 
@@ -277,7 +346,7 @@ def _population() -> SubjectDefinition:
 def _housing(*, next_area_enabled: bool = False) -> SubjectDefinition:
     return SubjectDefinition(
         subject_id="housing",
-        display_name="出租房指标",
+        display_name="房屋聚合指标",
         logical_dataset_id="housing",
         required_entitlement="governance.housing.aggregate.read",
         # 租赁类型汇总走 /house/getRoomLeaseType；next_area 与人口共用
@@ -285,19 +354,56 @@ def _housing(*, next_area_enabled: bool = False) -> SubjectDefinition:
         # （governance_adapter._validate_housing_next_area_query）。
         scope_levels=(4, 6, 9, 12, 15),
         metrics=(
-            MetricDefinition(metric_id="dwelling_count", label="出租房数量", unit="套"),
+            MetricDefinition(metric_id="dwelling_count", label="房屋数量", unit="套"),
+            MetricDefinition(metric_id="building_count", label="楼幢总数", unit="栋"),
+            MetricDefinition(metric_id="room_count", label="户室总数", unit="间"),
         ),
         group_by_rules=(
             GroupByRule(
-                value="next_area",
-                label="直接下级区划",
-                allowed_scope_levels=(4, 6, 9, 12),
+                value="room_use",
+                label="户室用途",
+                allowed_scope_levels=(4, 6, 9, 12, 15),
             ),
         )
-        if next_area_enabled
-        else (),
+        + (
+            (
+                GroupByRule(
+                    value="next_area",
+                    label="直接下级区划",
+                    allowed_scope_levels=(4, 6, 9, 12),
+                ),
+                GroupByRule(
+                    value="descendant_street",
+                    label="全市所有街道",
+                    allowed_scope_levels=(4,),
+                ),
+            )
+            if next_area_enabled
+            else ()
+        ),
         min_group_by=0,
-        max_group_by=1 if next_area_enabled else 0,
+        max_group_by=1,
+        intrinsic_order_rules=(
+            (
+                IntrinsicOrderRule(
+                    field="dwelling_count",
+                    direction="desc",
+                    group_by_selection=("next_area",),
+                    output="table",
+                    label="按出租房数量从高到低返回",
+                ),
+                IntrinsicOrderRule(
+                    field="dwelling_count",
+                    direction="desc",
+                    group_by_selection=("descendant_street",),
+                    output="table",
+                    label="全市街道按出租房数量从高到低返回",
+                ),
+            )
+            if next_area_enabled
+            else ()
+        ),
+        trigger_user_terms=("房屋", "出租房", "户室用途", "房屋用途"),
         output_forms=("table",),
         result_shapes=(
             ResultShape(
@@ -307,6 +413,7 @@ def _housing(*, next_area_enabled: bool = False) -> SubjectDefinition:
                 grain_label="按租赁类型汇总",
                 row_fields=("lease_type", "dwelling_count"),
                 group_by_selection=(),
+                metric_selection=("dwelling_count",),
             ),
         )
         + (
@@ -315,31 +422,86 @@ def _housing(*, next_area_enabled: bool = False) -> SubjectDefinition:
                     shape_id="housing_area_group_table",
                     data_schema_ref="schema://data/housing-area-group-table/1.0.0",
                     fingerprint_domain="data-result:housing-area-group-table:1.0.0",
-                    grain_label="按直接下级区划汇总",
+                    grain_label=(
+                        "按直接下级区划汇总（结果按出租房数量从高到低返回）"
+                    ),
                     row_fields=("area_code", "area_name", "dwelling_count"),
                     group_by_selection=("next_area",),
+                    metric_selection=("dwelling_count",),
+                ),
+                ResultShape(
+                    shape_id="housing_descendant_street_table",
+                    data_schema_ref="schema://data/housing-area-group-table/1.0.0",
+                    fingerprint_domain="data-result:housing-area-group-table:1.0.0",
+                    grain_label=(
+                        "全市所有街道汇总（按出租房数量从高到低返回）"
+                    ),
+                    row_fields=("area_code", "area_name", "dwelling_count"),
+                    group_by_selection=("descendant_street",),
+                    metric_selection=("dwelling_count",),
                 ),
             )
             if next_area_enabled
             else ()
+        )
+        + (
+            ResultShape(
+                shape_id="housing_room_use_table",
+                data_schema_ref="schema://data/housing-room-use-table/1.0.0",
+                fingerprint_domain="data-result:housing-room-use-table:1.0.0",
+                grain_label="按户室用途分类汇总",
+                row_fields=("room_use", "dwelling_count"),
+                group_by_selection=("room_use",),
+                metric_selection=("dwelling_count",),
+            ),
+            ResultShape(
+                shape_id="housing_stock_overview",
+                data_schema_ref="schema://data/housing-stock-overview/1.0.0",
+                fingerprint_domain="data-result:housing-stock-overview:1.0.0",
+                grain_label="区域房屋存量总览（楼幢总数与户室总数）",
+                row_fields=("building_count", "room_count"),
+                group_by_selection=(),
+                metric_selection=("building_count", "room_count"),
+            ),
         ),
     )
 
 
-def _event() -> SubjectDefinition:
+def _event(*, category_enabled: bool = False) -> SubjectDefinition:
     return SubjectDefinition(
         subject_id="event",
         display_name="网格事件指标",
         logical_dataset_id="event",
         required_entitlement="governance.event.aggregate.read",
-        # 真实接口只返回区域自身的网格/社区/街道三层办结率快照：
-        # 无下级区划明细、无事件总量/办结数、无时间范围、无阈值筛选。
+        # 办结率保持无时间范围的三层快照；事件总数另有经验证的
+        # getEventCountByMonth 月聚合契约，仅允许显式时间范围与 month 维度。
         scope_levels=(4, 6, 9, 12, 15),
         metrics=(
             MetricDefinition(metric_id="finish_rate", label="办结率", unit="%"),
+            MetricDefinition(metric_id="event_count", label="事件总数", unit="件"),
+        ),
+        group_by_rules=(
+            GroupByRule(
+                value="month",
+                label="月份",
+                allowed_scope_levels=(4, 6, 9, 12, 15),
+            ),
+        )
+        + (
+            (
+                GroupByRule(
+                    value="event_category",
+                    label="网格事件一级分类",
+                    allowed_scope_levels=(4, 6, 9, 12, 15),
+                ),
+            )
+            if category_enabled
+            else ()
         ),
         min_group_by=0,
-        max_group_by=0,
+        max_group_by=1,
+        supports_time_range=True,
+        trigger_user_terms=("事件", "网格事件", "事件趋势"),
         output_forms=("table",),
         result_shapes=(
             ResultShape(
@@ -348,12 +510,228 @@ def _event() -> SubjectDefinition:
                 fingerprint_domain="data-result:event-metric-table:1.0.0",
                 grain_label="按网格、村社、镇街层级返回办结率快照",
                 row_fields=("level", "finish_rate"),
+                group_by_selection=(),
+                metric_selection=("finish_rate",),
             ),
+            ResultShape(
+                shape_id="event_trend_table",
+                data_schema_ref="schema://data/event-trend-table/1.0.0",
+                fingerprint_domain="data-result:event-trend-table:1.0.0",
+                grain_label="按月返回事件总数趋势（缺失月份按 0 补齐）",
+                row_fields=("month", "event_count"),
+                group_by_selection=("month",),
+                metric_selection=("event_count",),
+            ),
+        )
+        + (
+            (
+                ResultShape(
+                    shape_id="event_category_table",
+                    data_schema_ref="schema://data/event-category-table/1.0.0",
+                    fingerprint_domain="data-result:event-category-table:1.0.0",
+                    grain_label=(
+                        "按现有主题块口径返回网格事件一级分类，"
+                        "不代表所有来源的全量事件"
+                    ),
+                    row_fields=("category_code", "category_name", "event_count"),
+                    group_by_selection=("event_category",),
+                    metric_selection=("event_count",),
+                ),
+            )
+            if category_enabled
+            else ()
         ),
     )
 
 
+def _enterprise() -> SubjectDefinition:
+    return SubjectDefinition(
+        subject_id="enterprise",
+        display_name="企业聚合指标",
+        logical_dataset_id="enterprise",
+        required_entitlement="governance.enterprise.aggregate.read",
+        scope_levels=(4, 6, 9, 12, 15),
+        metrics=(
+            MetricDefinition(metric_id="enterprise_count", label="企业数量", unit="家"),
+        ),
+        group_by_rules=(
+            GroupByRule(
+                value="next_area",
+                label="直接下级区划",
+                allowed_scope_levels=(4, 6, 9, 12),
+            ),
+            GroupByRule(
+                value="enterprise_type",
+                label="企业类型",
+                allowed_scope_levels=(4, 6, 9, 12, 15),
+            ),
+            GroupByRule(
+                value="enterprise_scale",
+                label="企业规模（按从业人数）",
+                allowed_scope_levels=(4, 6, 9, 12, 15),
+            ),
+            GroupByRule(
+                value="industry_name",
+                label="行业名称",
+                allowed_scope_levels=(4, 6, 9, 12, 15),
+            ),
+        ),
+        min_group_by=1,
+        max_group_by=1,
+        trigger_user_terms=("企业", "市场主体"),
+        output_forms=("table", "choropleth"),
+        result_shapes=(
+            ResultShape(
+                shape_id="enterprise_metric_table",
+                data_schema_ref="schema://data/enterprise-metric-table/1.0.0",
+                fingerprint_domain="data-result:enterprise-metric-table:1.0.0",
+                grain_label="按直接下级区划汇总企业数量",
+                row_fields=("area_code", "area_name", "enterprise_count"),
+                group_by_selection=("next_area",),
+            ),
+            ResultShape(
+                shape_id="enterprise_type_distribution_table",
+                data_schema_ref=(
+                    "schema://data/enterprise-type-distribution-table/1.0.0"
+                ),
+                fingerprint_domain=(
+                    "data-result:enterprise-type-distribution-table:1.0.0"
+                ),
+                grain_label="按企业类型返回数量前八项（仅支持表格）",
+                row_fields=("enterprise_type", "enterprise_count"),
+                group_by_selection=("enterprise_type",),
+                output_forms=("table",),
+            ),
+            ResultShape(
+                shape_id="enterprise_scale_distribution_table",
+                data_schema_ref=(
+                    "schema://data/enterprise-scale-distribution-table/1.0.0"
+                ),
+                fingerprint_domain=(
+                    "data-result:enterprise-scale-distribution-table:1.0.0"
+                ),
+                grain_label=(
+                    "按从业人数返回五档企业规模（11-50人与51-100人为"
+                    "旧接口实际边界，仅支持表格）"
+                ),
+                row_fields=("enterprise_scale", "enterprise_count"),
+                group_by_selection=("enterprise_scale",),
+                output_forms=("table",),
+            ),
+            ResultShape(
+                shape_id="enterprise_industry_distribution_table",
+                data_schema_ref="schema://data/enterprise-industry-distribution-table/1.0.0",
+                fingerprint_domain="data-result:enterprise-industry-distribution-table:1.0.0",
+                grain_label="按行业名称返回数量前八项（仅支持表格）",
+                row_fields=("industry_name", "enterprise_count"),
+                group_by_selection=("industry_name",),
+                output_forms=("table",),
+            ),
+        ),
+        include_in_analysis_overview=False,
+    )
+
+
+def _governance_overview() -> SubjectDefinition:
+    return SubjectDefinition(
+        subject_id="governance_overview",
+        display_name="区域治理总览",
+        logical_dataset_id="governance_overview",
+        required_entitlement="governance.overview.aggregate.read",
+        scope_levels=(4, 6, 9, 12, 15),
+        metrics=(
+            MetricDefinition(
+                metric_id="governance_coverage_overview",
+                label="人房企事物治理关联覆盖总览",
+                unit="项",
+            ),
+        ),
+        min_group_by=0,
+        max_group_by=0,
+        trigger_user_terms=("治理总览", "人房企事物", "治理覆盖"),
+        output_forms=("table", "metric_card"),
+        result_shapes=(
+            ResultShape(
+                shape_id="governance_overview_table",
+                data_schema_ref="schema://data/governance-overview-table/1.0.0",
+                fingerprint_domain=(
+                    "data-result:governance-overview-table:1.0.0"
+                ),
+                grain_label="按人、房、企、事、物治理要素返回关联覆盖总览",
+                row_fields=(
+                    "subject",
+                    "subject_label",
+                    "related_count",
+                    "total_count",
+                    "coverage_rate",
+                ),
+            ),
+        ),
+        include_in_analysis_overview=False,
+    )
+
+
+def _governance_power() -> SubjectDefinition:
+    return SubjectDefinition(
+        subject_id="governance_power",
+        display_name="治理力量汇总",
+        logical_dataset_id="governance_power",
+        required_entitlement="governance.power.aggregate.read",
+        scope_levels=(4, 6, 9, 12, 15),
+        metrics=(
+            MetricDefinition(
+                metric_id="governance_power_count",
+                label="治理力量数量",
+                unit="个",
+            ),
+        ),
+        min_group_by=0,
+        max_group_by=0,
+        required_user_terms=("治理力量", "网格力量"),
+        trigger_user_terms=("治理力量", "网格力量"),
+        output_forms=("table",),
+        result_shapes=(
+            ResultShape(
+                shape_id="governance_power_metric_table",
+                data_schema_ref=(
+                    "schema://data/governance-power-metric-table/1.0.0"
+                ),
+                fingerprint_domain=(
+                    "data-result:governance-power-metric-table:1.0.0"
+                ),
+                grain_label="按治理力量类型返回汇总数量",
+                row_fields=("type_code", "type_name", "count"),
+            ),
+        ),
+        include_in_analysis_overview=False,
+    )
+
+
 _DEFAULT_BINDINGS: tuple[tuple[str, CapabilityBinding], ...] = (
+    (
+        "enterprise",
+        CapabilityBinding(
+            capability_id="governance.query_enterprise_metrics",
+            capability_version="1.0.0",
+            adapter_ref="adapter://geo-qxst/enterprise-metrics/1.0",
+        ),
+    ),
+    (
+        "governance_overview",
+        CapabilityBinding(
+            capability_id="governance.get_governance_overview",
+            capability_version="1.0.0",
+            adapter_ref="adapter://geo-qxst/governance-overview/1.0",
+        ),
+    ),
+    (
+        "governance_power",
+        CapabilityBinding(
+            capability_id="governance.query_governance_power_metrics",
+            capability_version="1.0.0",
+            adapter_ref="adapter://geo-qxst/governance-power-metrics/1.0",
+        ),
+    ),
     (
         "population",
         CapabilityBinding(
@@ -405,11 +783,19 @@ class SemanticCatalog:
 
     @classmethod
     def default(
-        cls, *, housing_next_area_enabled: bool = False
+        cls,
+        *,
+        housing_next_area_enabled: bool = False,
+        event_category_enabled: bool = False,
     ) -> "SemanticCatalog":
-        subjects = (_population(), _housing(
-            next_area_enabled=housing_next_area_enabled
-        ), _event())
+        subjects = (
+            _population(),
+            _housing(next_area_enabled=housing_next_area_enabled),
+            _event(category_enabled=event_category_enabled),
+            _enterprise(),
+            _governance_overview(),
+            _governance_power(),
+        )
         return cls(
             catalog_version=SEMANTIC_CATALOG_VERSION,
             supported_spec_versions=SEMANTIC_SPEC_VERSIONS,
@@ -472,6 +858,15 @@ class SemanticCatalog:
     def subject_ids(self) -> list[str]:
         return sorted(self._subjects)
 
+    def analysis_overview_subject_ids(self) -> list[str]:
+        """Subjects that the regional-analysis overview expands into."""
+
+        return sorted(
+            subject_id
+            for subject_id, subject in self._subjects.items()
+            if subject.include_in_analysis_overview
+        )
+
     def bindable_subject_ids(self) -> frozenset[str]:
         """可执行主题集合：由声明主题与已验证能力绑定取交集派生。
 
@@ -522,6 +917,14 @@ class SemanticCatalog:
         for area in authorization.area_scopes:
             level = len(area.area_code)
             if level in subject.scope_levels:
+                # The newly declared city-level population shapes all aggregate
+                # descendants; a city-self-only grant must not advertise them.
+                if (
+                    subject.subject_id == "population"
+                    and level == 4
+                    and not area.include_descendants
+                ):
+                    continue
                 return True
             if area.include_descendants and any(
                 supported > level for supported in subject.scope_levels
@@ -575,10 +978,13 @@ class SemanticCatalog:
                         ),
                         required_user_terms=subject.required_user_terms,
                         trigger_user_terms=subject.trigger_user_terms,
+                        supports_order_by=subject.supports_order_by,
+                        intrinsic_order_rules=subject.intrinsic_order_rules,
                         output_forms=tuple(subject.output_forms),
                         result_shapes=tuple(
                             ResultShapeSummary(
                                 group_by_selection=shape.group_by_selection,
+                                metric_selection=shape.metric_selection,
                                 grain_label=_safe_model_grain_label(
                                     shape.grain_label
                                 ),

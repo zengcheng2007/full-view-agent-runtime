@@ -142,21 +142,34 @@ class PostgresAgentPersistence:
         async with await psycopg.AsyncConnection.connect(self._dsn) as connection:
             await connection.execute(
                 f'INSERT INTO "{self._schema}".sessions '
-                "(session_id, owner_user_id, data_json) VALUES (%s, %s, %s)",
-                (session.session_id, session.owner_user_id, _session_json(session)),
+                "(session_id, owner_tenant_id, owner_user_id, app_id, data_json) "
+                "VALUES (%s, %s, %s, %s, %s)",
+                (
+                    session.session_id,
+                    session.owner_tenant_id,
+                    session.owner_user_id,
+                    session.app_id,
+                    _session_json(session),
+                ),
             )
         return session
 
     async def get_session(
-        self, *, user_id: str, session_id: str
+        self,
+        *,
+        tenant_id: str = "legacy",
+        app_id: str = "full_information_view",
+        user_id: str,
+        session_id: str,
     ) -> AgentSession:
         await self._ensure_initialized()
         async with await psycopg.AsyncConnection.connect(self._dsn) as connection:
             row = await (
                 await connection.execute(
                     f'SELECT data_json FROM "{self._schema}".sessions '
-                    "WHERE session_id = %s AND owner_user_id = %s",
-                    (session_id, user_id),
+                    "WHERE session_id = %s AND owner_tenant_id = %s "
+                    "AND owner_user_id = %s AND app_id = %s",
+                    (session_id, tenant_id, user_id, app_id),
                 )
             ).fetchone()
         if row is None:
@@ -166,6 +179,8 @@ class PostgresAgentPersistence:
     async def list_sessions(
         self,
         *,
+        tenant_id: str = "legacy",
+        app_id: str = "full_information_view",
         user_id: str,
         status: Literal["active", "archived"] | None = None,
     ) -> list[AgentSession]:
@@ -174,8 +189,8 @@ class PostgresAgentPersistence:
             rows = await (
                 await connection.execute(
                     f'SELECT data_json FROM "{self._schema}".sessions '
-                    "WHERE owner_user_id = %s",
-                    (user_id,),
+                    "WHERE owner_tenant_id = %s AND owner_user_id = %s AND app_id = %s",
+                    (tenant_id, user_id, app_id),
                 )
             ).fetchall()
         sessions = [AgentSession.model_validate_json(row[0]) for row in rows]
@@ -192,6 +207,8 @@ class PostgresAgentPersistence:
     async def update_session(
         self,
         *,
+        tenant_id: str = "legacy",
+        app_id: str = "full_information_view",
         user_id: str,
         session_id: str,
         title: str | None = None,
@@ -202,8 +219,9 @@ class PostgresAgentPersistence:
             row = await (
                 await connection.execute(
                     f'SELECT data_json FROM "{self._schema}".sessions '
-                    "WHERE session_id = %s AND owner_user_id = %s FOR UPDATE",
-                    (session_id, user_id),
+                    "WHERE session_id = %s AND owner_tenant_id = %s "
+                    "AND owner_user_id = %s AND app_id = %s FOR UPDATE",
+                    (session_id, tenant_id, user_id, app_id),
                 )
             ).fetchone()
             if row is None:
@@ -225,8 +243,9 @@ class PostgresAgentPersistence:
             updated = session.model_copy(update=changes)
             await connection.execute(
                 f'UPDATE "{self._schema}".sessions SET data_json = %s '
-                "WHERE session_id = %s",
-                (_session_json(updated), session_id),
+                "WHERE session_id = %s AND owner_tenant_id = %s "
+                "AND owner_user_id = %s AND app_id = %s",
+                (_session_json(updated), session_id, tenant_id, user_id, app_id),
             )
         return updated
 
@@ -289,18 +308,30 @@ class PostgresAgentPersistence:
         return run
 
     async def list_messages(
-        self, *, user_id: str, session_id: str
+        self,
+        *,
+        user_id: str,
+        session_id: str,
+        tenant_id: str | None = None,
+        app_id: str | None = None,
     ) -> list[AgentMessage]:
         await self._ensure_initialized()
         async with await psycopg.AsyncConnection.connect(self._dsn) as connection:
             session_row = await (
                 await connection.execute(
-                    f'SELECT owner_user_id FROM "{self._schema}".sessions '
+                    f'SELECT data_json FROM "{self._schema}".sessions '
                     "WHERE session_id = %s",
                     (session_id,),
                 )
             ).fetchone()
-            if session_row is None or session_row[0] != user_id:
+            session = (
+                AgentSession.model_validate_json(session_row[0])
+                if session_row is not None
+                else None
+            )
+            if not _owns_resource(
+                session, user_id=user_id, tenant_id=tenant_id, app_id=app_id
+            ):
                 raise ResourceNotFound("session not found")
             rows = await (
                 await connection.execute(
@@ -367,11 +398,22 @@ class PostgresAgentPersistence:
             await self._update_run(connection, running)
         return running
 
-    async def get_run(self, *, user_id: str, run_id: str) -> AgentRun:
+    async def get_run(
+        self,
+        *,
+        user_id: str,
+        run_id: str,
+        tenant_id: str | None = None,
+        app_id: str | None = None,
+    ) -> AgentRun:
         async with await self._owned_run_connection(
             user_id, run_id, for_update=False
         ) as owned:
-            _connection, run, _session = owned
+            _connection, run, session = owned
+            if not _owns_resource(
+                session, user_id=user_id, tenant_id=tenant_id, app_id=app_id
+            ):
+                raise ResourceNotFound("run not found")
             return run
 
     async def list_recoverable_runs(self) -> list[tuple[str, AgentRun]]:
@@ -538,7 +580,14 @@ class PostgresAgentPersistence:
                 )
         return result, evidence, commands
 
-    async def get_result(self, *, user_id: str, result_id: str) -> DataResult:
+    async def get_result(
+        self,
+        *,
+        user_id: str,
+        result_id: str,
+        tenant_id: str | None = None,
+        app_id: str | None = None,
+    ) -> DataResult:
         await self._ensure_initialized()
         async with await psycopg.AsyncConnection.connect(self._dsn) as connection:
             row = await (
@@ -551,12 +600,22 @@ class PostgresAgentPersistence:
                     (result_id,),
                 )
             ).fetchone()
-        if row is None or AgentSession.model_validate_json(row[2]).owner_user_id != user_id:
+        session = AgentSession.model_validate_json(row[2]) if row is not None else None
+        if not _owns_resource(
+            session, user_id=user_id, tenant_id=tenant_id, app_id=app_id
+        ):
             raise ResourceNotFound("result not found")
+        assert row is not None
         return _DATA_RESULT_ADAPTER.validate_json(row[0])
 
     async def get_result_for_run(
-        self, *, user_id: str, run_id: str, result_id: str
+        self,
+        *,
+        user_id: str,
+        run_id: str,
+        result_id: str,
+        tenant_id: str | None = None,
+        app_id: str | None = None,
     ) -> DataResult:
         await self._ensure_initialized()
         async with await psycopg.AsyncConnection.connect(self._dsn) as connection:
@@ -570,8 +629,12 @@ class PostgresAgentPersistence:
                     (result_id, run_id),
                 )
             ).fetchone()
-        if row is None or AgentSession.model_validate_json(row[1]).owner_user_id != user_id:
+        session = AgentSession.model_validate_json(row[1]) if row is not None else None
+        if not _owns_resource(
+            session, user_id=user_id, tenant_id=tenant_id, app_id=app_id
+        ):
             raise ResourceNotFound("result not found")
+        assert row is not None
         return _DATA_RESULT_ADAPTER.validate_json(row[0])
 
     async def save_evidence(
@@ -617,7 +680,14 @@ class PostgresAgentPersistence:
             )
         return evidence
 
-    async def get_evidence(self, *, user_id: str, evidence_id: str) -> Evidence:
+    async def get_evidence(
+        self,
+        *,
+        user_id: str,
+        evidence_id: str,
+        tenant_id: str | None = None,
+        app_id: str | None = None,
+    ) -> Evidence:
         await self._ensure_initialized()
         async with await psycopg.AsyncConnection.connect(self._dsn) as connection:
             row = await (
@@ -631,12 +701,22 @@ class PostgresAgentPersistence:
                     (evidence_id,),
                 )
             ).fetchone()
-        if row is None or AgentSession.model_validate_json(row[1]).owner_user_id != user_id:
+        session = AgentSession.model_validate_json(row[1]) if row is not None else None
+        if not _owns_resource(
+            session, user_id=user_id, tenant_id=tenant_id, app_id=app_id
+        ):
             raise ResourceNotFound("evidence not found")
+        assert row is not None
         return Evidence.model_validate_json(row[0])
 
     async def get_evidence_for_run(
-        self, *, user_id: str, run_id: str, evidence_id: str
+        self,
+        *,
+        user_id: str,
+        run_id: str,
+        evidence_id: str,
+        tenant_id: str | None = None,
+        app_id: str | None = None,
     ) -> Evidence:
         await self._ensure_initialized()
         async with await psycopg.AsyncConnection.connect(self._dsn) as connection:
@@ -651,8 +731,12 @@ class PostgresAgentPersistence:
                     (evidence_id, run_id),
                 )
             ).fetchone()
-        if row is None or AgentSession.model_validate_json(row[1]).owner_user_id != user_id:
+        session = AgentSession.model_validate_json(row[1]) if row is not None else None
+        if not _owns_resource(
+            session, user_id=user_id, tenant_id=tenant_id, app_id=app_id
+        ):
             raise ResourceNotFound("evidence not found")
+        assert row is not None
         return Evidence.model_validate_json(row[0])
 
     async def save_frontend_command(
@@ -1060,6 +1144,14 @@ class PostgresAgentPersistence:
             raise ResourceNotFound("auth context not found")
         return AuthContext.model_validate_json(row[1])
 
+    async def delete(self, *, run_id: str) -> None:
+        await self._ensure_initialized()
+        async with await psycopg.AsyncConnection.connect(self._dsn) as connection:
+            await connection.execute(
+                f'DELETE FROM "{self._schema}".auth_contexts WHERE run_id = %s',
+                (run_id,),
+            )
+
     async def publish(
         self,
         *,
@@ -1404,6 +1496,15 @@ class PostgresAgentPersistence:
                 await connection.execute(f'CREATE SCHEMA IF NOT EXISTS "{self._schema}"')
                 for statement in self._ddl_statements():
                     await connection.execute(statement)
+                # Apply capability/runtime migrations (V010+). These are applied
+                # idempotently (all use IF NOT EXISTS / ON CONFLICT DO
+                # NOTHING) so they're safe to re-run.
+                for migration_sql in self._p2_migration_statements():
+                    # Substitute the schema name.
+                    rendered = migration_sql.replace(
+                        "full_view_agent", self._schema
+                    )
+                    await connection.execute(rendered)
                 await connection.execute(
                     f'UPDATE "{self._schema}".events SET expires_at = %s '
                     "WHERE expires_at IS NULL",
@@ -1415,11 +1516,54 @@ class PostgresAgentPersistence:
                 )
             self._initialized = True
 
+    def _p2_migration_statements(self) -> tuple[str, ...]:
+        """Load V010+ migration SQL for in-process initialization.
+
+        Tests that call ``persistence.initialize()`` need a fully-set-up
+        schema including capability center + run-scoped binding tables.
+        The migration files are read once at first call and cached.
+        """
+        if getattr(self, "_p2_migrations_cache", None) is not None:
+            return self._p2_migrations_cache
+        import pathlib
+
+        migrations_dir = (
+            pathlib.Path(__file__).resolve().parent.parent.parent.parent
+            / "scripts"
+            / "migrations"
+        )
+        stmts: list[str] = []
+        for name in (
+            "V010_capability_center.sql",
+            "V011_seed_system_capabilities.sql",
+            "V012_run_scoped_bindings.sql",
+            "V013_application_registry.sql",
+            "V014_session_application_isolation.sql",
+            "V015_application_lifecycle.sql",
+            "V016_seed_full_view_capabilities.sql",
+            "V017_connector_management.sql",
+            "V018_event_trend_capability.sql",
+            "V019_event_category_capability.sql",
+            "V020_knowledge_bases.sql",
+            "V021_prompt_templates.sql",
+            "V022_seed_knowledge_search.sql",
+            "V023_enterprise_industry_distribution.sql",
+            "V024_application_agents.sql",
+            "V025_seed_governance_power.sql",
+        ):
+            path = migrations_dir / name
+            if path.exists():
+                stmts.append(path.read_text(encoding="utf-8"))
+        self._p2_migrations_cache = tuple(stmts)
+        return self._p2_migrations_cache
+
     def _ddl_statements(self) -> tuple[str, ...]:
         prefix = f'"{self._schema}".'
         return (
             f"CREATE TABLE IF NOT EXISTS {prefix}sessions ("
-            "session_id TEXT PRIMARY KEY, owner_user_id TEXT NOT NULL, data_json TEXT NOT NULL)",
+            "session_id TEXT PRIMARY KEY, owner_tenant_id TEXT NOT NULL DEFAULT 'legacy', "
+            "owner_user_id TEXT NOT NULL, app_id TEXT NOT NULL DEFAULT 'full_information_view', "
+            "data_json TEXT NOT NULL)",
             f"CREATE TABLE IF NOT EXISTS {prefix}runs ("
             "run_id TEXT PRIMARY KEY, session_id TEXT NOT NULL, data_json TEXT NOT NULL)",
             f"CREATE INDEX IF NOT EXISTS idx_fva_runs_session ON {prefix}runs(session_id)",
@@ -1463,6 +1607,11 @@ class PostgresAgentPersistence:
             "revoked_at TIMESTAMPTZ NULL)",
             f"CREATE INDEX IF NOT EXISTS idx_fva_credentials_subject "
             f"ON {prefix}credentials(subject_user_id)",
+            # V001-tracked migration version. Required by V010+ migrations
+            # which INSERT INTO schema_version.
+            f"CREATE TABLE IF NOT EXISTS {prefix}schema_version ("
+            "version INTEGER PRIMARY KEY, "
+            "applied_at TIMESTAMPTZ NOT NULL DEFAULT now())",
         )
 
     async def _owned_run_connection(
@@ -1593,5 +1742,21 @@ def _decode_idempotent_result(result_type: str, result_json: str) -> object:
 
 def _session_json(session: AgentSession) -> str:
     payload = session.model_dump(mode="json")
+    payload["owner_tenant_id"] = session.owner_tenant_id
     payload["owner_user_id"] = session.owner_user_id
     return json.dumps(payload, ensure_ascii=False, separators=(",", ":"))
+
+
+def _owns_resource(
+    session: AgentSession | None,
+    *,
+    user_id: str,
+    tenant_id: str | None,
+    app_id: str | None,
+) -> bool:
+    return bool(
+        session is not None
+        and session.owner_user_id == user_id
+        and (tenant_id is None or session.owner_tenant_id == tenant_id)
+        and (app_id is None or session.app_id == app_id)
+    )

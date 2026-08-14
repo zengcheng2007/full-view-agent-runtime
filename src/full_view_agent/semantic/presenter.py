@@ -39,6 +39,9 @@ class SemanticToolPresentation:
     server_arguments: dict[str, object]
     subject_intent_terms: dict[str, tuple[str, ...]]
     subject_trigger_terms: dict[str, tuple[str, ...]]
+    specialized_filter_intent_terms: dict[
+        str, dict[str, tuple[str, ...]]
+    ]
     # Canonical capabilities represented by this model-facing semantic Tool.
     # They remain executable internally but must not be advertised in parallel,
     # otherwise the model can bypass Catalog validation or execute twice.
@@ -110,6 +113,20 @@ class SemanticToolPresenter:
                 for item in required
                 if item not in {"catalog_version", "catalog_fingerprint"}
             ]
+        specialized_filter_intent_terms: dict[
+            str, dict[str, tuple[str, ...]]
+        ] = {}
+        for subject_view in bindable:
+            subject_definition = self._catalog.subject(subject_view.subject_id)
+            if subject_definition is None:
+                continue
+            rules = {
+                f"{filter_definition.field}:eq:{value}": terms
+                for filter_definition in subject_definition.filters
+                for value, terms in filter_definition.value_intent_terms.items()
+            }
+            if rules:
+                specialized_filter_intent_terms[subject_view.subject_id] = rules
         return SemanticToolPresentation(
             tool_id=SEMANTIC_QUERY_TOOL_ID,
             tool_version=SEMANTIC_QUERY_TOOL_VERSION,
@@ -129,6 +146,7 @@ class SemanticToolPresenter:
                 for subject in bindable
                 if subject.required_user_terms and subject.trigger_user_terms
             },
+            specialized_filter_intent_terms=specialized_filter_intent_terms,
             shadowed_tool_ids=self.shadowed_tool_ids,
         )
 
@@ -146,7 +164,12 @@ class SemanticToolPresenter:
             "区划编码长度即层级（" + _SCOPE_LEVEL_LEGEND + "）；scope.area_code"
             " 必须是授权范围内的标准区划编码。",
             "不得生成目录未声明的指标、维度、筛选字段、操作符或输出形态；"
-            "当前所有主题均不支持 order_by 与 time_range。用户要求目录未声明的"
+            "仅目录明确标记支持排序或声明固有排序规则的精确形态可使用 "
+            "order_by，所有主题均不支持 time_range。"
+            "可选专用筛选只有在当前用户原话明确命中该筛选声明的人群词时才可添加；"
+            "一般人口查询或综合研判中的人口维度必须保持 filters=[]，不得自行缩窄为"
+            "独居老人或空巢老人。"
+            "用户要求目录未声明的"
             "指标、维度或筛选时，不得改用更宽口径查询替代；应以 capability 完成"
             "并携带 limitations=['unsupported_requested_constraint']，由服务端明确"
             "说明当前能力边界。",
@@ -173,7 +196,8 @@ class SemanticToolPresenter:
         )
         filters = (
             "、".join(
-                f"{item.field}{list(item.operators)}{list(item.allowed_values)}"
+                f"{item.field}（{item.label}）"
+                f"{list(item.operators)}{list(item.allowed_values)}"
                 for item in subject.filters
             )
             or "无"
@@ -194,6 +218,19 @@ class SemanticToolPresenter:
             if subject.required_user_terms
             else ""
         )
+        if subject.supports_order_by:
+            order_by_description = "支持指标排序"
+        elif subject.intrinsic_order_rules:
+            order_by_description = "仅支持 " + "、".join(
+                (
+                    f"group_by={list(rule.group_by_selection)} 且 "
+                    f"output={rule.output} 时 "
+                    f"{rule.field} {rule.direction}（{rule.label}）"
+                )
+                for rule in subject.intrinsic_order_rules
+            )
+        else:
+            order_by_description = "不支持"
         return (
             f"- {subject.subject_id}（{subject.display_name}）："
             f"scope层级 {list(subject.scope_levels)}；"
@@ -202,6 +239,7 @@ class SemanticToolPresenter:
             f"filters {filters}；"
             f"{required_filter_description}"
             f"{required_intent_description}"
+            f"order_by {order_by_description}；"
             f"输出形态 {list(subject.output_forms)}；"
             f"结果粒度 {result_grains}。"
         )
@@ -215,6 +253,4 @@ class SemanticToolPresenter:
             group_by = "任一已声明 group_by"
         else:
             group_by = f"group_by={list(selection)}"
-        return (
-            f"{group_by} -> {shape.grain_label}"
-        )
+        return f"{group_by} -> {shape.grain_label}"

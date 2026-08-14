@@ -106,7 +106,7 @@ def assess_structured_finish(
     has_reference: bool = False,
 ) -> ClaimAssessment:
     available = {
-        result.data_result.result_id: result.data_result
+        result.data_result.result_id: (result.data_result, result.semantic_lineage)
         for result in results
         if result.status in {"success", "partial"} and result.data_result is not None
     }
@@ -127,9 +127,10 @@ def assess_structured_finish(
 
     rendered: list[str] = []
     for claim in finish.claims:
-        result = available.get(claim.result_id)
-        if result is None:
+        available_result = available.get(claim.result_id)
+        if available_result is None:
             return ClaimAssessment(False, "claim_result_not_found")
+        result, semantic_lineage = available_result
         if result.result_fingerprint != claim.result_fingerprint:
             return ClaimAssessment(False, "claim_fingerprint_mismatch")
         if (
@@ -160,7 +161,23 @@ def assess_structured_finish(
             return ClaimAssessment(False, "claim_operation_mismatch")
         if not _values_equal(computed, claim.value):
             return ClaimAssessment(False, "claim_value_mismatch")
-        rendered.append(_render_claim(claim, computed, selected_models))
+        context_labels = (
+            [
+                item.display_label
+                for item in semantic_lineage.filter_contexts
+                if item.display_label is not None
+            ]
+            if semantic_lineage is not None
+            else []
+        )
+        rendered.append(
+            _render_claim(
+                claim,
+                computed,
+                selected_models,
+                context_labels=context_labels,
+            )
+        )
     qualification = [_LIMITATION_TEXT[item] for item in finish.limitations]
     return ClaimAssessment(True, "grounded", "\n".join([*qualification, *rendered]))
 
@@ -259,13 +276,18 @@ def _render_claim(
     claim: AnswerClaim,
     value: object,
     selected_models: list[BaseModel],
+    *,
+    context_labels: list[str] | None = None,
 ) -> str:
     model = selected_models[0] if selected_models else None
-    subject = "、".join(
+    subject_parts = [
         _render_locator_value(model, field, item)
         for field, item in claim.row_locator.items()
-    )
-    prefix = f"{subject}的" if subject else ""
+    ]
+    subject = "、".join(dict.fromkeys(subject_parts))
+    context = "、".join(dict.fromkeys(context_labels or []))
+    context_prefix = f"{context}中，" if context else ""
+    prefix = f"{context_prefix}{subject}的" if subject else context_prefix
     field_label, unit = _field_display(model, claim.field)
     rendered_value = _render_value(value, unit=unit)
     if claim.operation == "sum":
@@ -310,6 +332,10 @@ def _render_locator_value(
     field: str,
     value: ClaimScalar,
 ) -> str:
+    if field == "area_code" and model is not None:
+        area_name = getattr(model, "area_name", None)
+        if isinstance(area_name, str) and area_name:
+            return area_name
     labels = _field_extra(model, field).get("value_labels")
     if isinstance(labels, dict):
         label = labels.get(value)

@@ -17,7 +17,10 @@ from full_view_agent.application.tool_registry import (
     ToolRegistry,
 )
 from full_view_agent.domain.models import (
+    QueryEnterpriseMetricsInput,
     QueryEventMetricsInput,
+    QueryGovernanceOverviewInput,
+    QueryGovernancePowerMetricsInput,
     QueryHousingMetricsInput,
     QueryPopulationMetricsInput,
     ResolveAreaInput,
@@ -39,6 +42,30 @@ class _CapabilityContract:
 
 
 _PRODUCTION_CONTRACTS: dict[str, _CapabilityContract] = {
+    "governance.query_governance_power_metrics": _CapabilityContract(
+        input_model=QueryGovernancePowerMetricsInput,
+        dataset_id="governance_power",
+        permission="governance.power.aggregate.read",
+        input_schema_ref="schema://tools/query-governance-power-metrics-input/1.0.0",
+        adapter_ref="adapter://geo-qxst/governance-power-metrics/1.0",
+        subject_id="governance_power",
+    ),
+    "governance.query_enterprise_metrics": _CapabilityContract(
+        input_model=QueryEnterpriseMetricsInput,
+        dataset_id="enterprise",
+        permission="governance.enterprise.aggregate.read",
+        input_schema_ref="schema://tools/query-enterprise-metrics-input/1.0.0",
+        adapter_ref="adapter://geo-qxst/enterprise-metrics/1.0",
+        subject_id="enterprise",
+    ),
+    "governance.get_governance_overview": _CapabilityContract(
+        input_model=QueryGovernanceOverviewInput,
+        dataset_id="governance_overview",
+        permission="governance.overview.aggregate.read",
+        input_schema_ref="schema://tools/query-governance-overview-input/1.0.0",
+        adapter_ref="adapter://geo-qxst/governance-overview/1.0",
+        subject_id="governance_overview",
+    ),
     "governance.resolve_area": _CapabilityContract(
         input_model=ResolveAreaInput,
         dataset_id="administrative_area",
@@ -116,6 +143,7 @@ def validate_production_http_capabilities(
     _validate_semantic_bindings(errors, registry=registry, catalog=catalog)
     _validate_population_surface(errors, registry=registry, catalog=catalog)
     _validate_housing_switch(errors, registry=registry, catalog=catalog)
+    _validate_event_category_switch(errors, registry=registry, catalog=catalog)
     if errors:
         details = "; ".join(sorted(set(errors)))
         raise CapabilityConsistencyError(f"production capability drift: {details}")
@@ -161,20 +189,14 @@ def _validate_population_surface(
 ) -> None:
     descriptor = registry.get_model_descriptor("governance.query_population_metrics")
     surface = f"{descriptor.name} {descriptor.description}"
-    for required in ("独居老人", "solitary_elderly"):
+    for required in ("一般人口", "独居老人", "solitary_elderly"):
         if required not in surface:
             errors.append(f"population model descriptor must state {required}")
-    for overclaim in ("查询人口指标", "查询人口聚合指标"):
-        if overclaim in surface:
-            errors.append(f"population model descriptor overclaims generic capability: {overclaim}")
     subject = catalog.require_subject("population")
-    required_filters = {
-        (item.field, item.operator, item.value) for item in subject.required_filters
-    }
-    if ("person_category", "eq", "solitary_elderly") not in required_filters:
-        errors.append("population Catalog lacks mandatory solitary_elderly filter")
-    if "独居老人" not in subject.required_user_terms:
-        errors.append("population Catalog does not require explicit solitary-elderly intent")
+    if subject.required_filters:
+        errors.append("population Catalog incorrectly requires a specialized filter")
+    if subject.required_user_terms:
+        errors.append("population Catalog incorrectly requires specialized intent terms")
     if "人口" not in subject.trigger_user_terms:
         errors.append("population Catalog cannot detect broad population requests")
 
@@ -205,6 +227,59 @@ def _validate_housing_switch(
             errors.append("housing next_area is enabled but not reachable across all surfaces")
     elif subject_exposes_next_area or any("next_area" in item for item in surfaces):
         errors.append("housing next_area is disabled but remains reachable")
+
+
+def _validate_event_category_switch(
+    errors: list[str], *, registry: ToolRegistry, catalog: SemanticCatalog
+) -> None:
+    enabled = registry.event_category_enabled
+    subject = catalog.require_subject("event")
+    descriptor = registry.get_model_descriptor("governance.query_event_metrics")
+    schema_text = json.dumps(
+        registry.get_input_schema("governance.query_event_metrics"),
+        ensure_ascii=False,
+        sort_keys=True,
+    )
+    descriptor_text = json.dumps(
+        descriptor.model_dump(mode="json"), ensure_ascii=False
+    )
+    prompt = build_full_view_system_prompt(
+        {},
+        tool_ids=("governance.query_event_metrics",),
+        event_category_enabled=enabled,
+    )
+    result_schema_text = json.dumps(
+        [
+            item.data_schema_ref
+            for item in registry.get_manifest(
+                "governance.query_event_metrics"
+            ).result_schemas
+        ],
+        ensure_ascii=False,
+    )
+    catalog_exposes = any(
+        rule.value == "event_category" for rule in subject.group_by_rules
+    ) or any(
+        shape.group_by_selection == ("event_category",)
+        for shape in subject.result_shapes
+    )
+    if enabled:
+        if (
+            not catalog_exposes
+            or "event_category" not in schema_text
+            or "一级分类" not in descriptor_text
+            or "event_category" not in prompt
+            or "event-category" not in result_schema_text
+        ):
+            errors.append("event category is enabled but not reachable across all surfaces")
+    elif (
+        catalog_exposes
+        or "event_category" in schema_text
+        or "一级分类" in descriptor_text
+        or "event_category" in prompt
+        or "event-category" in result_schema_text
+    ):
+        errors.append("event category is disabled but remains reachable")
 
 
 def _expect_equal(errors: list[str], label: str, actual: object, expected: object) -> None:

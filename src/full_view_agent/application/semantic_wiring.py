@@ -16,6 +16,7 @@ from full_view_agent.application.capability_service import (
     CapabilityService,
     DenialLedger,
     DynamicToolAdapter,
+    PolicyEvaluator,
     ToolAdapter,
 )
 from full_view_agent.application.harness import (
@@ -44,6 +45,8 @@ class SemanticCapabilityStack:
     executor: SemanticToolExecutor
     fingerprinter: SemanticToolCallFingerprinter
     presenter: SemanticToolPresenter
+    policy: PolicyEvaluator
+    denial_ledger: DenialLedger | None = None
 
     def build_harness(self) -> AgentHarness:
         """生产 Harness：语义执行器 + 规范动作循环指纹。"""
@@ -52,6 +55,43 @@ class SemanticCapabilityStack:
             validator=DeterministicCompletionValidator(),
             call_fingerprinter=self.fingerprinter,
         )
+
+    def for_registry(self, registry: ToolRegistry) -> "SemanticCapabilityStack":
+        """Rebind the complete semantic execution pipeline to one Run registry."""
+
+        capability = self.capability.for_registry(registry)
+        resolver = SemanticActionResolver(
+            catalog=self.catalog,
+            registry=registry,
+            policy=self.policy,
+        )
+        denial_recorder = (
+            SemanticDenialRecorder(
+                catalog=self.catalog,
+                registry=registry,
+                policy=self.policy,
+                ledger=self.denial_ledger,
+            )
+            if self.denial_ledger is not None
+            else None
+        )
+        return SemanticCapabilityStack(
+            catalog=self.catalog,
+            resolver=resolver,
+            capability=capability,
+            executor=SemanticToolExecutor(
+                inner=capability,
+                resolver=resolver,
+                denial_recorder=denial_recorder,
+            ),
+            fingerprinter=SemanticToolCallFingerprinter(resolver=resolver),
+            presenter=SemanticToolPresenter(catalog=self.catalog),
+            policy=self.policy,
+            denial_ledger=self.denial_ledger,
+        )
+
+    def build_harness_for_registry(self, registry: ToolRegistry) -> AgentHarness:
+        return self.for_registry(registry).build_harness()
 
 
 def build_semantic_capability_stack(
@@ -66,7 +106,8 @@ def build_semantic_capability_stack(
 ) -> SemanticCapabilityStack:
     effective_policy = policy or MinimalPolicyAdapter()
     effective_catalog = catalog or SemanticCatalog.default(
-        housing_next_area_enabled=registry.housing_next_area_enabled
+        housing_next_area_enabled=registry.housing_next_area_enabled,
+        event_category_enabled=registry.event_category_enabled,
     )
     capability = CapabilityService(
         registry=registry,
@@ -102,4 +143,6 @@ def build_semantic_capability_stack(
         ),
         fingerprinter=SemanticToolCallFingerprinter(resolver=resolver),
         presenter=SemanticToolPresenter(catalog=effective_catalog),
+        policy=effective_policy,
+        denial_ledger=denial_ledger,
     )

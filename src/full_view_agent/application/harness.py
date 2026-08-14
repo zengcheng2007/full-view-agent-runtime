@@ -41,6 +41,66 @@ MODEL_PROVIDER_UNAVAILABLE_WITH_RESULTS_SUMMARY = (
     "查询工具已经执行完成，但模型服务暂时不可用。已保留可查看的验证结果。"
 )
 
+_DEGRADED_SUBJECT_LABELS = (
+    ("population", "人口"),
+    ("housing", "出租房"),
+    ("event", "事件治理"),
+)
+
+
+def build_degraded_completion_summary(
+    *,
+    base: str,
+    results: tuple[ToolResult, ...] | list[ToolResult],
+) -> str:
+    """Describe only business dimensions proven by successful semantic lineage."""
+
+    verified_subjects = {
+        result.semantic_lineage.subject
+        for result in results
+        if result.status in {"success", "partial"}
+        and result.semantic_lineage is not None
+    }
+    labels = [
+        label
+        for subject, label in _DEGRADED_SUBJECT_LABELS
+        if subject in verified_subjects
+    ]
+    if not labels:
+        return base
+    return (
+        base
+        + " 已完成并保留可验证结果的业务维度："
+        + "、".join(labels)
+        + "。"
+    )
+
+
+def build_verified_dimensions_completion_summary(
+    results: tuple[ToolResult, ...] | list[ToolResult],
+) -> str | None:
+    """Return a number-free fallback only for a genuine multi-domain result set."""
+
+    verified_subjects = {
+        result.semantic_lineage.subject
+        for result in results
+        if result.status in {"success", "partial"}
+        and result.semantic_lineage is not None
+    }
+    labels = [
+        label
+        for subject, label in _DEGRADED_SUBJECT_LABELS
+        if subject in verified_subjects
+    ]
+    if len(labels) < 2:
+        return None
+    return (
+        "查询工具已执行完成，模型未能生成通过事实核验的综合说明。"
+        "已保留可验证结果的业务维度："
+        + "、".join(labels)
+        + "。请查看数据结果和证据链。"
+    )
+
 
 @dataclass(frozen=True)
 class HarnessLimits:
@@ -296,7 +356,7 @@ class DeterministicCompletionValidator:
         failed_results = [r for r in state.tool_results if r.status == "failed"]
 
         if action.degraded_reason_code is not None:
-            expected_summary = {
+            base_summary = {
                 "model_timeout_with_results": MODEL_TIMEOUT_WITH_RESULTS_SUMMARY,
                 "model_token_budget_with_results": (
                     MODEL_TOKEN_BUDGET_WITH_RESULTS_SUMMARY
@@ -305,6 +365,14 @@ class DeterministicCompletionValidator:
                     MODEL_PROVIDER_UNAVAILABLE_WITH_RESULTS_SUMMARY
                 ),
             }.get(action.degraded_reason_code)
+            expected_summary = (
+                build_degraded_completion_summary(
+                    base=base_summary,
+                    results=success_results,
+                )
+                if base_summary is not None
+                else None
+            )
             accepted = bool(
                 action.server_authored
                 and expected_summary is not None
@@ -553,6 +621,18 @@ class AgentHarness:
 
         return self._limits.max_model_turns
 
+    def with_tool_executor(self, tool_executor: HarnessToolExecutor) -> "AgentHarness":
+        """Clone controller policy while binding execution to one Run context."""
+
+        return AgentHarness(
+            tool_executor=tool_executor,
+            limits=self._limits,
+            validator=self._validator,
+            clock=self._clock,
+            tool_call_id_factory=self._tool_call_id_factory,
+            call_fingerprinter=self._call_fingerprinter,
+        )
+
     def begin(
         self,
         *,
@@ -570,7 +650,27 @@ class AgentHarness:
     async def plan_action_once(
         self, *, planner: Planner, control: HarnessControl
     ) -> tuple[HarnessControl, HarnessAction]:
-        self._guard_time(control.started_at)
+        try:
+            self._guard_time(control.started_at)
+        except BudgetExceeded as exc:
+            verified_results = tuple(
+                result
+                for result in control.state.tool_results
+                if result.status in {"success", "partial"}
+            )
+            if str(exc) != "maximum elapsed time exceeded" or not verified_results:
+                raise
+            action = FinishAction(
+                summary=build_degraded_completion_summary(
+                    base=MODEL_TIMEOUT_WITH_RESULTS_SUMMARY,
+                    results=verified_results,
+                ),
+                legacy=True,
+                server_authored=True,
+                degraded_reason_code="model_timeout_with_results",
+            )
+            state = replace(control.state, model_turns=control.state.model_turns + 1)
+            return replace(control, state=state), action
         if control.state.model_turns >= self._limits.max_model_turns:
             raise BudgetExceeded("maximum model turns exceeded")
         try:
@@ -588,13 +688,17 @@ class AgentHarness:
                 raise
             token_budget_exhausted = isinstance(exc, BudgetExceeded)
             provider_unavailable = isinstance(exc, ModelProviderUnavailable)
+            base_summary = (
+                MODEL_TOKEN_BUDGET_WITH_RESULTS_SUMMARY
+                if token_budget_exhausted
+                else MODEL_PROVIDER_UNAVAILABLE_WITH_RESULTS_SUMMARY
+                if provider_unavailable
+                else MODEL_TIMEOUT_WITH_RESULTS_SUMMARY
+            )
             action = FinishAction(
-                summary=(
-                    MODEL_TOKEN_BUDGET_WITH_RESULTS_SUMMARY
-                    if token_budget_exhausted
-                    else MODEL_PROVIDER_UNAVAILABLE_WITH_RESULTS_SUMMARY
-                    if provider_unavailable
-                    else MODEL_TIMEOUT_WITH_RESULTS_SUMMARY
+                summary=build_degraded_completion_summary(
+                    base=base_summary,
+                    results=control.state.tool_results,
                 ),
                 legacy=True,
                 server_authored=True,
@@ -648,6 +752,13 @@ class AgentHarness:
                     )
                     if safe_assessment.status == "accept":
                         return control, assessment.safe_summary
+                verified_dimensions_summary = (
+                    build_verified_dimensions_completion_summary(
+                        list(control.state.tool_results)
+                    )
+                )
+                if verified_dimensions_summary is not None:
+                    return control, verified_dimensions_summary
                 return control, DeterministicCompletionValidator._SAFE_STOP_SUMMARY
             state = replace(
                 control.state,

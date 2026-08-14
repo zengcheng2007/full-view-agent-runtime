@@ -38,6 +38,7 @@ class RunAuthContextRefresher:
             raw_token=raw_token,
             session_id=auth_context.session_id,
             run_id=auth_context.run_id,
+            app_id=auth_context.application.app_id,
         )
         await self._credential_broker.revoke(
             credential_ref=auth_context.credential_ref,

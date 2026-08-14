@@ -6,8 +6,10 @@ passes acceptance and becomes the default.
 """
 
 import asyncio
+import inspect
 import logging
-from typing import Protocol
+from collections.abc import Awaitable, Callable
+from typing import Protocol, cast
 
 from full_view_agent.application.capability_service import (
     AuthContextRefresher,
@@ -22,6 +24,7 @@ from full_view_agent.application.errors import (
     ModelProviderUnavailable,
     ReauthenticationRequired,
     ResourceNotFound,
+    WorkflowNotAvailable,
 )
 from full_view_agent.application.harness import (
     AgentHarness,
@@ -36,12 +39,17 @@ from full_view_agent.application.ports import AgentStore, EventPublisher, Orches
 from full_view_agent.application.run_capability_snapshot import (
     RunCapabilitySnapshotService,
 )
+from full_view_agent.application.runtime_skill_registry import RuntimeSkillRegistry
+from full_view_agent.application.runtime_workflow_registry import (
+    RuntimeWorkflowRegistry,
+)
 from full_view_agent.application.session_run_service import SessionRunService, new_id
 from full_view_agent.application.tool_observation_service import (
     PersistedToolObservation,
     ToolObservationPort,
     ToolObservationService,
     action_area_codes,
+    result_reference_label,
 )
 from full_view_agent.application.tool_registry import ToolRegistry
 from full_view_agent.domain.models import (
@@ -87,13 +95,7 @@ class PopulationQueryPlanner:
                 "query": {
                     "metrics": ["person_count"],
                     "scope": {"area_code": "330106"},
-                    "filters": [
-                        {
-                            "field": "person_category",
-                            "operator": "eq",
-                            "value": "solitary_elderly",
-                        }
-                    ],
+                    "filters": [],
                     "group_by": ["street"],
                 }
             },
@@ -117,6 +119,8 @@ class NativeOrchestrator(OrchestrationPort):
         evidence_source_system: str = "in_memory_fixture",
         observation_service: ToolObservationPort | None = None,
         snapshot_service: RunCapabilitySnapshotService | None = None,
+        run_harness_factory: Callable[[ToolRegistry], AgentHarness] | None = None,
+        runtime_workflow_registry: RuntimeWorkflowRegistry | None = None,
     ) -> None:
         self._service = service
         self._store = store
@@ -149,6 +153,8 @@ class NativeOrchestrator(OrchestrationPort):
             evidence_source_system=evidence_source_system,
         )
         self._snapshot_service = snapshot_service
+        self._run_harness_factory = run_harness_factory
+        self._runtime_workflow_registry = runtime_workflow_registry
         self._run_tasks: dict[str, asyncio.Task[None]] = {}
         self._task_failures: list[str] = []
 
@@ -159,6 +165,8 @@ class NativeOrchestrator(OrchestrationPort):
             logger.exception("unexpected run execution failure", extra={"run_id": run_id})
             current = await self._store.get_run(user_id=user_id, run_id=run_id)
             if current.status != "running":
+                # Already terminal (e.g. completed during the race) — the
+                # snapshot was released at the transition site.
                 return
             failed = await self._service.fail_run(
                 user_id=user_id,
@@ -175,6 +183,7 @@ class NativeOrchestrator(OrchestrationPort):
                     "message": "运行时发生未预期错误。",
                 },
             )
+            await self._release_terminal_snapshot(run_id)
 
     async def _execute(self, *, user_id: str, run_id: str) -> None:
         current = await self._store.get_run(user_id=user_id, run_id=run_id)
@@ -183,49 +192,129 @@ class NativeOrchestrator(OrchestrationPort):
         ):
             return  # terminal – must not resume or start tools
 
-        # P2-2: Create immutable capability snapshot for this run.
-        # The snapshot captures the state of published dynamic tools at the
-        # moment the run starts, ensuring that later publish/deactivate/
-        # rollback operations do not affect this in-flight run.
-        snapshot_created = False
+        # P2-2: Obtain an immutable capability snapshot for this run.
+        # The snapshot captures the state of published dynamic tools at
+        # the moment the run starts, ensuring that later publish /
+        # deactivate / rollback operations do not affect this in-flight
+        # run. ``create_snapshot_for_run`` is idempotent within a process
+        # — the ``RunCapabilitySnapshotService`` returns the cached
+        # snapshot when the run has already been pinned (e.g. after a
+        # waiting-for-reauth resume) — so repeated calls for the same
+        # run_id yield the exact same registry.
+        #
+        # Snapshot creation MUST fail closed: if the snapshot service
+        # raises, the run is failed rather than silently continuing
+        # against the live base registry, because silently continuing
+        # would break the Run-pinned-capability semantic.
+        run_registry = self._registry
+        run_skill_registry: RuntimeSkillRegistry | None = None
+        run_workflow_registry = self._runtime_workflow_registry
+        run_prompt_snapshot = None
         if self._snapshot_service is not None:
-            try:
-                await self._snapshot_service.create_snapshot_for_run(
-                    run_id=run_id,
-                    base_registry=self._registry,
-                )
-                snapshot_created = True
-                logger.info(
-                    "Created capability snapshot for run %s", run_id,
-                )
-            except Exception:
-                logger.warning(
-                    "Failed to create capability snapshot for run %s; "
-                    "continuing without snapshot.",
-                    run_id,
-                    exc_info=True,
-                )
+            snapshot_auth_context = await self._auth_context_provider.get(
+                user_id=user_id,
+                run_id=run_id,
+            )
+            snapshot = await self._snapshot_service.create_snapshot_for_run(
+                run_id=run_id,
+                base_registry=self._registry,
+                app_id=snapshot_auth_context.application.app_id,
+            )
+            run_registry = snapshot.tool_registry
+            run_skill_registry = snapshot.runtime_skill_registry
+            run_workflow_registry = snapshot.runtime_workflow_registry
+            run_prompt_snapshot = snapshot.runtime_prompt_snapshot
+            logger.info(
+                "Using capability snapshot for run %s (created_at=%s)",
+                run_id,
+                snapshot.created_at.isoformat(),
+            )
 
         try:
-            await self._execute_run(user_id=user_id, run_id=run_id, current=current)
+            await self._execute_run(
+                user_id=user_id,
+                run_id=run_id,
+                current=current,
+                run_registry=run_registry,
+                run_skill_registry=run_skill_registry,
+                run_workflow_registry=run_workflow_registry,
+                run_prompt_snapshot=run_prompt_snapshot,
+            )
         finally:
-            # P2-2: Always clean up the snapshot, even if the run fails.
-            if snapshot_created and self._snapshot_service is not None:
-                try:
-                    self._snapshot_service.remove_snapshot(run_id)
-                    logger.debug(
-                        "Removed capability snapshot for run %s", run_id,
-                    )
-                except Exception:
-                    logger.warning(
-                        "Failed to remove capability snapshot for run %s",
-                        run_id,
-                        exc_info=True,
-                    )
+            # P2-2 / S1-B snapshot lifecycle: snapshots must survive the
+            # "waiting for reauthentication" transition and the rest of the
+            # Run's active window so that resume() sees the same pinned
+            # registry. Only a truly terminal Run (completed / failed /
+            # cancelled / expired) releases its snapshot, and that happens
+            # explicitly via ``_release_terminal_snapshot`` below — not here.
+            # A process restart rebuilds the snapshot from the capability
+            # repository via ``create_snapshot_for_run`` (the snapshot
+            # service is idempotent and returns the cached snapshot when
+            # the run has already been pinned).
+            pass
 
     async def _execute_run(
-        self, *, user_id: str, run_id: str, current: AgentRun,
+        self,
+        *,
+        user_id: str,
+        run_id: str,
+        current: AgentRun,
+        run_registry: ToolRegistry | None = None,
+        run_skill_registry: RuntimeSkillRegistry | None = None,
+        run_workflow_registry: RuntimeWorkflowRegistry | None = None,
+        run_prompt_snapshot=None,
     ) -> None:
+        effective_registry = run_registry or self._registry
+        run_harness = self._harness
+        run_observation_service = self._observation_service
+        run_planner_factory = self._planner_factory
+        if effective_registry is not self._registry:
+            if self._run_harness_factory is not None:
+                run_harness = self._run_harness_factory(effective_registry)
+            else:
+                bind_capability = getattr(self._capability, "for_registry", None)
+                if callable(bind_capability):
+                    run_harness = self._harness.with_tool_executor(
+                        cast(CapabilityExecutor, bind_capability(effective_registry))
+                    )
+            bind_observation = getattr(self._observation_service, "for_registry", None)
+            if callable(bind_observation):
+                run_observation_service = cast(
+                    ToolObservationPort,
+                    bind_observation(effective_registry),
+                )
+            bind_planner = getattr(self._planner_factory, "for_registry", None)
+            if callable(bind_planner):
+                run_planner_factory = cast(
+                    RunPlannerFactory,
+                    bind_planner(effective_registry),
+                )
+        bind_planner_for_run = getattr(self._planner_factory, "for_run", None)
+        if callable(bind_planner_for_run):
+            run_binding = bind_planner_for_run(
+                run_id=run_id,
+                registry=effective_registry,
+            )
+            if inspect.isawaitable(run_binding):
+                run_binding = await cast(
+                    Awaitable[RunPlannerFactory],
+                    run_binding,
+                )
+            run_planner_factory = cast(RunPlannerFactory, run_binding)
+        if run_skill_registry is not None and run_planner_factory is not None:
+            bind_skills = getattr(run_planner_factory, "for_skill_registry", None)
+            if callable(bind_skills):
+                run_planner_factory = cast(
+                    RunPlannerFactory,
+                    bind_skills(run_skill_registry),
+                )
+        if run_planner_factory is not None:
+            bind_prompt = getattr(run_planner_factory, "for_prompt_snapshot", None)
+            if callable(bind_prompt):
+                run_planner_factory = cast(
+                    RunPlannerFactory,
+                    bind_prompt(run_prompt_snapshot),
+                )
         was_queued = current.status == "queued"
         running = (
             await self._service.start_run(user_id=user_id, run_id=run_id)
@@ -262,7 +351,14 @@ class NativeOrchestrator(OrchestrationPort):
             await self._publish(
                 running,
                 "tool.started",
-                {"tool_call_id": tool_call_id, "tool_id": action.tool_id},
+                {
+                    "tool_call_id": tool_call_id,
+                    "tool_id": action.tool_id,
+                    "display": {
+                        "label": _tool_display_label(effective_registry, action.tool_id),
+                        "status_label": "执行中",
+                    },
+                },
             )
 
         async def after_tool_call(result: ToolResult) -> None:
@@ -272,14 +368,23 @@ class NativeOrchestrator(OrchestrationPort):
             await self._publish(
                 latest,
                 "tool.failed" if result.status == "failed" else "tool.completed",
-                {"tool_result": result.model_dump(mode="json")},
+                {
+                    "tool_result": result.model_dump(mode="json"),
+                    "display": {
+                        "label": _tool_display_label(
+                            effective_registry, result.tool_id
+                        ),
+                        "status_label": _tool_status_label(result.status),
+                        "summary": result.summary,
+                    },
+                },
             )
             if result.status in {"success", "partial"}:
                 action = tool_actions.get(result.tool_call_id)
                 if action is None:
                     raise RuntimeError("completed tool call is missing its action")
                 persisted_observations[result.tool_call_id] = (
-                    await self._observation_service.persist(
+                    await run_observation_service.persist(
                         user_id=user_id,
                         run=latest,
                         action=action,
@@ -288,14 +393,25 @@ class NativeOrchestrator(OrchestrationPort):
                 )
 
         try:
-            planner = (
-                self._planner_factory.create(
-                    user_id=user_id,
-                    auth_context=auth_context,
+            if running.mode == "workflow":
+                if running.workflow_ref is None:
+                    raise WorkflowNotAvailable("workflow Run has no workflow_ref")
+                if run_workflow_registry is None:
+                    raise WorkflowNotAvailable("workflow runtime is not configured")
+                planner = run_workflow_registry.create_planner(
+                    running.workflow_ref,
+                    tool_registry=effective_registry,
+                    skill_registry=run_skill_registry,
                 )
-                if self._planner_factory is not None
-                else PopulationQueryPlanner()
-            )
+            else:
+                planner = (
+                    run_planner_factory.create(
+                        user_id=user_id,
+                        auth_context=auth_context,
+                    )
+                    if run_planner_factory is not None
+                    else PopulationQueryPlanner()
+                )
             harness_result = await self._run_harness(
                 user_id=user_id,
                 run_id=run_id,
@@ -306,8 +422,32 @@ class NativeOrchestrator(OrchestrationPort):
                 after_tool_call=after_tool_call,
                 inherited_result_ids=inherited_result_ids,
                 inherited_evidence_ids=inherited_evidence_ids,
+                harness=run_harness,
             )
-        except ReauthenticationRequired:
+        except ReauthenticationRequired as exc:
+            if running.mode == "workflow":
+                # Native execution does not persist Harness state. Resuming a
+                # multi-node Workflow would begin at its first Tool again and
+                # could repeat an already completed side effect. Until Native
+                # has a durable Harness checkpoint, fail closed instead.
+                error_code = "native_workflow_resume_unsupported"
+                failed = await self._service.fail_run(
+                    user_id=user_id,
+                    run_id=run_id,
+                    completion_reason_code=error_code,
+                )
+                await self._publish(
+                    failed,
+                    "run.failed",
+                    {
+                        "status": failed.status,
+                        "outcome": failed.outcome,
+                        "error_code": error_code,
+                        "message": str(exc),
+                    },
+                )
+                await self._release_terminal_snapshot(run_id)
+                return
             waiting, input_request = await self._service.wait_for_reauthentication(
                 user_id=user_id,
                 run_id=run_id,
@@ -335,6 +475,7 @@ class NativeOrchestrator(OrchestrationPort):
             ModelContractError,
             ModelProviderTimeout,
             ModelProviderUnavailable,
+            WorkflowNotAvailable,
         ) as exc:
             error_code = (
                 exc.root_cause_code
@@ -361,6 +502,7 @@ class NativeOrchestrator(OrchestrationPort):
                     "message": error_message,
                 },
             )
+            await self._release_terminal_snapshot(run_id)
             return
         current = await self._store.get_run(user_id=user_id, run_id=run_id)
         if current.status != "running":
@@ -402,6 +544,7 @@ class NativeOrchestrator(OrchestrationPort):
                 evidence_ids=list(inherited_evidence_ids),
                 warning_count=0,
             )
+            await self._release_terminal_snapshot(run_id)
             return
         tool_result = tool_results[-1]
         if harness_result.outcome != "partial" and tool_result.status == "failed":
@@ -421,6 +564,7 @@ class NativeOrchestrator(OrchestrationPort):
                     "message": tool_result.summary,
                 },
             )
+            await self._release_terminal_snapshot(run_id)
             return
         if harness_result.outcome != "partial" and tool_result.status == "denied":
             completed = await self._service.complete_run(
@@ -442,6 +586,7 @@ class NativeOrchestrator(OrchestrationPort):
                     "completion_reason_code": completed.completion_reason_code,
                 },
             )
+            await self._release_terminal_snapshot(run_id)
             return
         result_references: list[ResultReferenceContent] = []
         evidence_ids: list[str] = []
@@ -450,7 +595,7 @@ class NativeOrchestrator(OrchestrationPort):
                 continue
             observation = persisted_observations.get(observed_result.tool_call_id)
             if observation is None:
-                observation = await self._observation_service.persist(
+                observation = await run_observation_service.persist(
                     user_id=user_id,
                     run=running,
                     action=tool_actions[observed_result.tool_call_id],
@@ -460,7 +605,10 @@ class NativeOrchestrator(OrchestrationPort):
                 ResultReferenceContent(
                     type="result_reference",
                     result_id=observation.data_result.result_id,
-                    label=observed_result.summary,
+                    label=result_reference_label(
+                        observation.data_result,
+                        fallback=observed_result.summary,
+                    ),
                 )
             )
             evidence_ids.append(observation.evidence.evidence_id)
@@ -474,6 +622,11 @@ class NativeOrchestrator(OrchestrationPort):
             outcome=harness_result.outcome,
             completion_reason_code=harness_result.completion_reason_code,
         )
+        # Release the capability snapshot now that the Run has reached a
+        # terminal state (completed / failed / denied). The waiting-for-reauth
+        # path (line 385) returns early and does NOT reach this point, so
+        # the snapshot survives the pause for resume().
+        await self._release_terminal_snapshot(run_id)
 
     async def _run_harness(
         self,
@@ -487,10 +640,12 @@ class NativeOrchestrator(OrchestrationPort):
         after_tool_call,
         inherited_result_ids: tuple[str, ...] = (),
         inherited_evidence_ids: tuple[str, ...] = (),
+        harness: AgentHarness | None = None,
     ):
         """Native fallback: the Harness owns the loop directly."""
         del user_id, run_id, session_id
-        return await self._harness.run(
+        effective_harness = harness or self._harness
+        return await effective_harness.run(
             planner=planner,
             auth_context=auth_context,
             before_tool_call=before_tool_call,
@@ -617,6 +772,32 @@ class NativeOrchestrator(OrchestrationPort):
             data=data,
         )
 
+    async def _release_terminal_snapshot(self, run_id: str) -> None:
+        """Release the Run's capability snapshot only when the Run has
+        reached a terminal state (completed / failed / cancelled / expired).
+
+        This is called explicitly from each terminal transition path. The
+        non-terminal paths (waiting-for-reauth, steer, resume) must NOT
+        call this — the snapshot must survive so that resume() reuses the
+        same pinned registry. Process restart drops the in-memory cache;
+        the ``RunCapabilitySnapshotService`` consults the persistent
+        ``RunCapabilitySnapshotStore`` (when configured) to rebuild the
+        snapshot from persisted (tool_id -> version) triples.
+        """
+        if self._snapshot_service is None:
+            return
+        try:
+            await self._snapshot_service.remove_snapshot(run_id)
+            logger.debug(
+                "Released capability snapshot for terminal run %s", run_id,
+            )
+        except Exception:
+            logger.warning(
+                "Failed to release capability snapshot for run %s",
+                run_id,
+                exc_info=True,
+            )
+
     # ------------------------------------------------------------------
     # OrchestrationPort lifecycle methods
     # ------------------------------------------------------------------
@@ -677,6 +858,7 @@ class NativeOrchestrator(OrchestrationPort):
                 "completion_reason_code": run.completion_reason_code,
             },
         )
+        await self._release_terminal_snapshot(run_id)
 
     async def resume(
         self,
@@ -737,6 +919,22 @@ class NativeOrchestrator(OrchestrationPort):
 
 def _action_area_codes(action: ToolAction) -> list[str]:
     return action_area_codes(action)
+
+
+def _tool_display_label(registry: ToolRegistry, tool_id: str) -> str:
+    try:
+        return registry.get_model_descriptor(tool_id).name
+    except ResourceNotFound:
+        return "执行业务能力"
+
+
+def _tool_status_label(status: str) -> str:
+    return {
+        "success": "执行成功",
+        "partial": "部分完成",
+        "denied": "无权执行",
+        "failed": "执行失败",
+    }.get(status, "已处理")
 
 
 class MockRunExecutor(NativeOrchestrator):

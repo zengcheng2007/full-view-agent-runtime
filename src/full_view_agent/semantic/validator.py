@@ -12,7 +12,9 @@ Validator 与生产 Policy 复核，不得各自复制一套。
 
 from enum import StrEnum
 
-from full_view_agent.domain.models import ContractModel
+from pydantic import ValidationError
+
+from full_view_agent.domain.models import ContractModel, EventMetricTimeRange
 from full_view_agent.semantic.authorization import SubjectAuthorization
 from full_view_agent.semantic.catalog import (
     SemanticCatalog,
@@ -25,6 +27,7 @@ from full_view_agent.semantic.query_spec import SemanticQuerySpec
 class ViolationCode(StrEnum):
     UNKNOWN_SUBJECT = "UNKNOWN_SUBJECT"
     UNKNOWN_METRIC = "UNKNOWN_METRIC"
+    INVALID_RESULT_SHAPE = "INVALID_RESULT_SHAPE"
     INVALID_GROUP_BY = "INVALID_GROUP_BY"
     GROUP_BY_SCOPE_MISMATCH = "GROUP_BY_SCOPE_MISMATCH"
     SCOPE_LEVEL_UNSUPPORTED = "SCOPE_LEVEL_UNSUPPORTED"
@@ -33,6 +36,8 @@ class ViolationCode(StrEnum):
     INVALID_FILTER_VALUE = "INVALID_FILTER_VALUE"
     INVALID_ORDER_BY = "INVALID_ORDER_BY"
     TIME_RANGE_UNSUPPORTED = "TIME_RANGE_UNSUPPORTED"
+    TIME_RANGE_REQUIRED = "TIME_RANGE_REQUIRED"
+    INVALID_TIME_RANGE = "INVALID_TIME_RANGE"
     INVALID_OUTPUT = "INVALID_OUTPUT"
     CATALOG_VERSION_INCOMPATIBLE = "CATALOG_VERSION_INCOMPATIBLE"
     SUBJECT_NOT_ENTITLED = "SUBJECT_NOT_ENTITLED"
@@ -100,18 +105,72 @@ class SemanticValidator:
         violations.extend(self._metric_violations(spec, subject))
         violations.extend(self._scope_violations(spec, subject))
         violations.extend(self._group_by_violations(spec, subject))
+        violations.extend(self._result_shape_violations(spec, subject))
         violations.extend(self._filter_violations(spec, subject))
-        if spec.order_by and not subject.supports_order_by:
+        if spec.order_by:
+            metric_ids = {metric.metric_id for metric in subject.metrics}
+            intrinsic_order_matches = any(
+                len(spec.order_by) == 1
+                and spec.order_by[0].field == rule.field
+                and spec.order_by[0].direction == rule.direction
+                and tuple(spec.group_by) == rule.group_by_selection
+                and spec.output == rule.output
+                and not spec.filters
+                and spec.metrics == [rule.field]
+                for rule in subject.intrinsic_order_rules
+            )
+            if not subject.supports_order_by and not intrinsic_order_matches:
+                violations.append(
+                    Violation(
+                        code=ViolationCode.INVALID_ORDER_BY,
+                        message=(
+                            f"主题 {subject.subject_id} 当前真实数据源未验证任何排序能力。"
+                        ),
+                        path="order_by",
+                    )
+                )
+            elif any(order.field not in metric_ids for order in spec.order_by):
+                violations.append(
+                    Violation(
+                        code=ViolationCode.INVALID_ORDER_BY,
+                        message=(
+                            f"主题 {subject.subject_id} 仅支持按已声明指标排序。"
+                        ),
+                        path="order_by",
+                    )
+                )
+        is_event_trend = (
+            subject.subject_id == "event"
+            and spec.metrics == ["event_count"]
+            and spec.group_by == ["month"]
+        )
+        if is_event_trend and spec.time_range is None:
             violations.append(
                 Violation(
-                    code=ViolationCode.INVALID_ORDER_BY,
-                    message=(
-                        f"主题 {subject.subject_id} 当前真实数据源未验证任何排序能力。"
-                    ),
-                    path="order_by",
+                    code=ViolationCode.TIME_RANGE_REQUIRED,
+                    message="事件总数月度趋势必须指定开始和结束日期。",
+                    path="time_range",
                 )
             )
-        if spec.time_range is not None and not subject.supports_time_range:
+        elif is_event_trend and spec.time_range is not None:
+            try:
+                EventMetricTimeRange.model_validate(
+                    spec.time_range.model_dump(mode="json")
+                )
+            except ValidationError:
+                violations.append(
+                    Violation(
+                        code=ViolationCode.INVALID_TIME_RANGE,
+                        message=(
+                            "事件趋势日期必须为 yyyy-MM-dd，起始不早于"
+                            " 2021-01-01，且最多覆盖 24 个自然月。"
+                        ),
+                        path="time_range",
+                    )
+                )
+        elif spec.time_range is not None and (
+            not subject.supports_time_range or subject.subject_id == "event"
+        ):
             violations.append(
                 Violation(
                     code=ViolationCode.TIME_RANGE_UNSUPPORTED,
@@ -132,6 +191,40 @@ class SemanticValidator:
                     path="output",
                 )
             )
+        else:
+            requested_group_by = tuple(spec.group_by)
+            requested_metrics = tuple(spec.metrics)
+            matching_shape = next(
+                (
+                    shape
+                    for shape in subject.result_shapes
+                    if (
+                        shape.group_by_selection is None
+                        or shape.group_by_selection == requested_group_by
+                    )
+                    and (
+                        shape.metric_selection is None
+                        or shape.metric_selection == requested_metrics
+                    )
+                ),
+                None,
+            )
+            if (
+                matching_shape is not None
+                and matching_shape.output_forms is not None
+                and spec.output not in matching_shape.output_forms
+            ):
+                violations.append(
+                    Violation(
+                        code=ViolationCode.INVALID_OUTPUT,
+                        message=(
+                            f"主题 {subject.subject_id} 的当前结果形状不支持输出"
+                            f" {spec.output}；可用："
+                            f"{list(matching_shape.output_forms)}。"
+                        ),
+                        path="output",
+                    )
+                )
         return ValidationReport(violations=tuple(violations))
 
     @staticmethod
@@ -202,6 +295,30 @@ class SemanticValidator:
             )
             for metric in spec.metrics
             if metric not in registered
+        ]
+
+    @staticmethod
+    def _result_shape_violations(
+        spec: SemanticQuerySpec,
+        subject: SubjectDefinition,
+    ) -> list[Violation]:
+        requested_group_by = tuple(spec.group_by)
+        requested_metrics = tuple(spec.metrics)
+        if any(
+            (shape.group_by_selection is None or shape.group_by_selection == requested_group_by)
+            and (shape.metric_selection is None or shape.metric_selection == requested_metrics)
+            for shape in subject.result_shapes
+        ):
+            return []
+        return [
+            Violation(
+                code=ViolationCode.INVALID_RESULT_SHAPE,
+                message=(
+                    f"主题 {subject.subject_id} 不支持指标 {list(requested_metrics)} "
+                    f"与分组 {list(requested_group_by)} 的组合。"
+                ),
+                path="metrics",
+            )
         ]
 
     @staticmethod

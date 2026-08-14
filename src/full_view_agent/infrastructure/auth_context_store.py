@@ -23,3 +23,7 @@ class InMemoryRunAuthContextStore:
             ):
                 raise ResourceNotFound("auth context not found")
             return auth_context
+
+    async def delete(self, *, run_id: str) -> None:
+        async with self._lock:
+            self._contexts.pop(run_id, None)

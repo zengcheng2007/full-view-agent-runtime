@@ -12,6 +12,10 @@ from __future__ import annotations
 import logging
 from typing import TYPE_CHECKING
 
+from full_view_agent.application.tool_registry import (
+    PRODUCTION_HTTP_TOOL_IDS,
+    ToolRegistry,
+)
 from full_view_agent.domain.capability import ToolCapability
 from full_view_agent.domain.models import (
     InternalToolManifest,
@@ -30,6 +34,8 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
+BUILT_IN_TOOL_IDS = frozenset((*PRODUCTION_HTTP_TOOL_IDS, "knowledge.search"))
+
 
 def convert_tool_capability_to_manifest(
     tool: ToolCapability,
@@ -40,6 +46,9 @@ def convert_tool_capability_to_manifest(
     adapter_ref points to a dynamic connector executor that will use the
     connector_ref and resource_path from the ToolCapability.
     """
+    if tool.capability_id in BUILT_IN_TOOL_IDS:
+        return ToolRegistry.default().get_manifest(tool.capability_id)
+
     # Build result schema binding from result_kind
     result_schemas = [
         ToolResultSchemaBinding(
@@ -108,6 +117,9 @@ def convert_tool_capability_to_descriptor(
 
     This creates a descriptor that the model can understand for tool selection.
     """
+    if tool.capability_id in BUILT_IN_TOOL_IDS:
+        return ToolRegistry.default().get_model_descriptor(tool.capability_id)
+
     return ModelToolDescriptor(
         tool_id=tool.capability_id,
         tool_version=tool.version,
@@ -141,6 +153,8 @@ async def load_published_tools(
 
 def build_dynamic_tool_registry_entries(
     tools: list[ToolCapability],
+    *,
+    base_registry: ToolRegistry | None = None,
 ) -> tuple[list[InternalToolManifest], list[ModelToolDescriptor]]:
     """Convert a list of published ToolCapability to registry entries.
 
@@ -150,10 +164,15 @@ def build_dynamic_tool_registry_entries(
     manifests = []
     descriptors = []
 
+    canonical_registry = base_registry or ToolRegistry.default()
     for tool in tools:
         try:
-            manifest = convert_tool_capability_to_manifest(tool)
-            descriptor = convert_tool_capability_to_descriptor(tool)
+            if tool.capability_id in BUILT_IN_TOOL_IDS:
+                manifest = canonical_registry.get_manifest(tool.capability_id)
+                descriptor = canonical_registry.get_model_descriptor(tool.capability_id)
+            else:
+                manifest = convert_tool_capability_to_manifest(tool)
+                descriptor = convert_tool_capability_to_descriptor(tool)
             manifests.append(manifest)
             descriptors.append(descriptor)
         except Exception as e:
@@ -161,3 +180,15 @@ def build_dynamic_tool_registry_entries(
             continue
 
     return manifests, descriptors
+
+
+def build_dynamic_input_schemas(
+    tools: list[ToolCapability],
+) -> dict[str, dict[str, object]]:
+    """Return custom schemas only for genuinely dynamic connector tools."""
+
+    return {
+        tool.capability_id: tool.input_schema
+        for tool in tools
+        if tool.capability_id not in BUILT_IN_TOOL_IDS and tool.input_schema
+    }
