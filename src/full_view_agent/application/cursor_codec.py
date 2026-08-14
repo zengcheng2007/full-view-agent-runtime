@@ -70,6 +70,64 @@ class SignedCursorCodec:
             raise InvalidCursor("cursor is invalid or expired")
         return claims["offset"]
 
+    def encode_keyset(
+        self,
+        *,
+        user_id: str,
+        resource_id: str,
+        keyset: dict[str, str],
+        limit: int,
+    ) -> str:
+        if not keyset or not all(
+            isinstance(key, str) and isinstance(value, str) for key, value in keyset.items()
+        ):
+            raise ValueError("cursor keyset must contain string fields")
+        payload = json.dumps(
+            {
+                "user_id": user_id,
+                "resource_id": resource_id,
+                "keyset": keyset,
+                "limit": limit,
+                "expires_at": int((datetime.now(UTC) + self._ttl).timestamp()),
+            },
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode("utf-8")
+        signature = hmac.new(self._signing_key, payload, hashlib.sha256).digest()
+        return f"{_encode(payload)}.{_encode(signature)}"
+
+    def decode_keyset(
+        self,
+        cursor: str,
+        *,
+        user_id: str,
+        resource_id: str,
+        limit: int,
+        fields: frozenset[str],
+    ) -> dict[str, str]:
+        try:
+            payload_part, signature_part = cursor.split(".", 1)
+            payload = _decode(payload_part)
+            supplied_signature = _decode(signature_part)
+            expected_signature = hmac.new(self._signing_key, payload, hashlib.sha256).digest()
+            claims = json.loads(payload)
+        except (ValueError, UnicodeDecodeError, json.JSONDecodeError) as exc:
+            raise InvalidCursor("cursor is invalid or expired") from exc
+        keyset = claims.get("keyset")
+        if (
+            not hmac.compare_digest(supplied_signature, expected_signature)
+            or claims.get("user_id") != user_id
+            or claims.get("resource_id") != resource_id
+            or claims.get("limit") != limit
+            or not isinstance(keyset, dict)
+            or set(keyset) != fields
+            or not all(isinstance(value, str) for value in keyset.values())
+            or not isinstance(claims.get("expires_at"), int)
+            or claims.get("expires_at") <= int(datetime.now(UTC).timestamp())
+        ):
+            raise InvalidCursor("cursor is invalid or expired")
+        return keyset
+
 
 def _encode(value: bytes) -> str:
     return base64.urlsafe_b64encode(value).rstrip(b"=").decode("ascii")

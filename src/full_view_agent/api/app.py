@@ -31,6 +31,9 @@ from full_view_agent.api.agent_routes import create_agent_router
 from full_view_agent.api.capability_routes import create_capability_router
 from full_view_agent.api.knowledge_routes import create_knowledge_router
 from full_view_agent.api.prompt_routes import create_prompt_router
+from full_view_agent.api.runtime_observability_routes import (
+    create_runtime_observability_router,
+)
 from full_view_agent.application.agent_management_service import (
     AgentManagementService,
     AgentRepository,
@@ -465,6 +468,7 @@ class _ProjectedCapabilityRepository:
 
 @dataclass
 class RuntimeContainer:
+    started_at: datetime = field(default_factory=lambda: datetime.now(UTC), init=False)
     store: AgentStore | None = None
     events: EventStore | None = None
     idempotency: IdempotencyStore | None = None
@@ -1704,6 +1708,7 @@ def create_app(runtime: RuntimeContainer | None = None) -> FastAPI:
             validate_runtime_rollback=runtime.validate_runtime_capability_rollback,
         )
         app.include_router(capability_router)
+        app.include_router(create_runtime_observability_router(runtime))
     if runtime.agent_management_service is not None:
         app.include_router(create_agent_router(runtime.agent_management_service))
     if runtime.prompt_template_service is not None:
