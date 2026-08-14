@@ -1,0 +1,22 @@
+# 开放式评测用例 —— 变体问法：用"事件处理"替代"事件办结率"
+schema_version: "1.0"
+case_id: open-event-variant-phrase
+description: "开放式：变体问法'事件处理情况'查询办结率"
+user_message: 西湖区的事件治理情况怎么样？各层级办结率分别是多少？
+auth:
+  area_codes: ["3301"]
+  datasets: [administrative_area, event]
+  entitlements: [governance.area.read, governance.event.aggregate.read]
+  field_policy_set: governance_analyst_v1
+model_steps: []
+expected:
+  terminal_status: completed
+  outcome: success
+  completion_reason_code: goal_completed
+  required_tool_ids: [governance.semantic_query]
+  forbidden_tool_ids: [governance.query_event_metrics]
+  max_tool_calls: 4
+  min_evidence_count: 1
+  required_event_types: [tool.completed, result.available, evidence.available, run.completed]
+  required_answer_substrings: ["办结率"]
+  forbidden_answer_substrings: ["无法完成", "没有可用工具"]

@@ -1,0 +1,33 @@
+schema_version: "1.0"
+case_id: planning-event-category-http-success
+description: 显式开启事件分类门禁后，解析区划并按现有主题块统计口径查询网格事件一级分类
+user_message: 查询西湖区网格事件一级分类分布
+auth:
+  area_codes: ["3301"]
+  datasets: [administrative_area, event]
+  entitlements: [governance.area.read, governance.event.aggregate.read]
+  field_policy_set: governance_analyst_v1
+model_steps:
+  - type: tool_call
+    tool_id: governance.resolve_area
+    arguments: {query: 西湖区}
+    total_tokens: 100
+  - type: tool_call
+    tool_id: governance.semantic_query
+    arguments:
+      spec:
+        subject: event
+        metrics: [event_count]
+        scope: {area_code: "330106", include_descendants: true}
+        group_by: [event_category]
+    total_tokens: 120
+  - type: finish
+    content: 西湖区网格事件一级分类统计已完成。
+    total_tokens: 30
+expected:
+  terminal_status: completed
+  outcome: success
+  completion_reason_code: goal_completed
+  tool_ids: [governance.resolve_area, governance.semantic_query]
+  min_evidence_count: 2
+  required_event_types: [tool.completed, result.available, evidence.available, run.completed]

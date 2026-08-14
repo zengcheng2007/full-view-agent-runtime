@@ -1,0 +1,22 @@
+# 开放式评测：真实模型自主选择区划解析与治理总览能力。
+schema_version: "1.0"
+case_id: open-governance-overview-xihu
+description: "开放式：查询西湖区人房企事物治理覆盖总览"
+user_message: 帮我看看西湖区人、房、企业、事件和物的治理关联覆盖情况
+auth:
+  area_codes: ["3301"]
+  datasets: [administrative_area, governance_overview]
+  entitlements: [governance.area.read, governance.overview.aggregate.read]
+  field_policy_set: governance_analyst_v1
+model_steps: []
+expected:
+  terminal_status: completed
+  outcome: success
+  completion_reason_code: goal_completed
+  required_tool_ids: [governance.semantic_query]
+  forbidden_tool_ids: [governance.get_governance_overview]
+  max_tool_calls: 4
+  min_evidence_count: 1
+  required_event_types: [tool.completed, result.available, evidence.available, run.completed]
+  required_answer_substrings: ["治理"]
+  forbidden_answer_substrings: ["无法完成", "没有可用工具"]

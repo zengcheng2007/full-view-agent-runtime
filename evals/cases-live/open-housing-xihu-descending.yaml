@@ -1,0 +1,22 @@
+# 真实模型开放式评测：验证已开启的 housing next_area 固有降序能力。
+schema_version: "1.0"
+case_id: open-housing-xihu-descending
+description: "开放式：西湖区出租房按街道汇总并从高到低返回"
+user_message: 西湖区哪些街道出租房比较多？按街道汇总并从高到低排序。
+auth:
+  area_codes: ["330106"]
+  datasets: [administrative_area, housing]
+  entitlements: [governance.area.read, governance.housing.aggregate.read]
+  field_policy_set: governance_analyst_v1
+model_steps: []
+expected:
+  terminal_status: completed
+  outcome: success
+  completion_reason_code: goal_completed
+  required_tool_ids: [governance.semantic_query]
+  forbidden_tool_ids: [governance.query_housing_metrics]
+  max_tool_calls: 4
+  min_evidence_count: 1
+  required_event_types: [tool.completed, result.available, evidence.available, run.completed]
+  required_answer_any_substrings: ["出租房", "租赁", "住房"]
+  forbidden_answer_substrings: ["无法完成", "没有可用工具"]

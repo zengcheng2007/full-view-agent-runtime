@@ -1,0 +1,22 @@
+# 真实模型开放式评测：一般人口查询不得被替换为独居老人专用口径。
+schema_version: "1.0"
+case_id: open-population-general-ranking
+description: "开放式：查询西湖区一般人口并按街道降序汇总"
+user_message: 查询西湖区人口按街道汇总，按人数从高到低排序
+auth:
+  area_codes: ["3301"]
+  datasets: [administrative_area, population]
+  entitlements: [governance.area.read, governance.population.aggregate.read]
+  field_policy_set: governance_analyst_v1
+model_steps: []
+expected:
+  terminal_status: completed
+  outcome: success
+  completion_reason_code: goal_completed
+  required_tool_ids: [governance.semantic_query]
+  forbidden_tool_ids: [governance.query_population_metrics]
+  max_tool_calls: 4
+  min_evidence_count: 1
+  required_event_types: [tool.completed, result.available, evidence.available, run.completed]
+  required_answer_substrings: [人口]
+  forbidden_answer_substrings: [独居老人, 无法完成, 没有可用工具]

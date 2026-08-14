@@ -1,0 +1,22 @@
+# 开放式评测用例 —— 同义词变体：用"空巢老人"查询独居老人
+schema_version: "1.0"
+case_id: open-population-synonym-empty-elderly
+description: "开放式：同义词'空巢老人'查询独居老人并按街道汇总"
+user_message: 帮我看看西湖区空巢老人有多少，按街道分一下。
+auth:
+  area_codes: ["3301"]
+  datasets: [administrative_area, population]
+  entitlements: [governance.area.read, governance.population.aggregate.read]
+  field_policy_set: governance_analyst_v1
+model_steps: []
+expected:
+  terminal_status: completed
+  outcome: success
+  completion_reason_code: goal_completed
+  required_tool_ids: [governance.semantic_query]
+  forbidden_tool_ids: [governance.query_population_metrics]
+  max_tool_calls: 4
+  min_evidence_count: 1
+  required_event_types: [tool.completed, result.available, evidence.available, run.completed]
+  required_answer_any_substrings: ["独居老人", "空巢老人", "老人"]
+  forbidden_answer_substrings: ["无法完成", "没有可用工具"]

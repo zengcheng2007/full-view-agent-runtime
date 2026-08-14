@@ -1,0 +1,21 @@
+schema_version: "1.0"
+case_id: open-enterprise-next-area-xihu
+description: "开放式：查询西湖区企业按街道分布"
+user_message: 西湖区各街道企业有多少？给我按街道展示并联动地图
+auth:
+  area_codes: ["3301"]
+  datasets: [administrative_area, enterprise]
+  entitlements: [governance.area.read, governance.enterprise.aggregate.read]
+  field_policy_set: governance_analyst_v1
+model_steps: []
+expected:
+  terminal_status: completed
+  outcome: success
+  completion_reason_code: goal_completed
+  required_tool_ids: [governance.semantic_query]
+  forbidden_tool_ids: [governance.query_enterprise_metrics]
+  max_tool_calls: 4
+  min_evidence_count: 1
+  required_event_types: [tool.completed, result.available, evidence.available, run.completed]
+  required_answer_substrings: ["企业"]
+  forbidden_answer_substrings: ["无法完成", "没有可用工具"]

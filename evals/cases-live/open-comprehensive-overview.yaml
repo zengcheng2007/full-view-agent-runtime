@@ -1,0 +1,32 @@
+# 开放式评测用例 —— 区域综合研判：人口+出租房+事件联合查询
+schema_version: "1.0"
+case_id: open-comprehensive-overview
+description: "开放式：区域综合研判 —— 人口、出租房、事件三维度总览"
+user_message: 给我一份西湖区的综合研判报告，涵盖人口、出租房和事件治理三个维度。
+auth:
+  area_codes: ["3301"]
+  datasets: [administrative_area, population, housing, event]
+  entitlements:
+    - governance.area.read
+    - governance.population.aggregate.read
+    - governance.housing.aggregate.read
+    - governance.event.aggregate.read
+  field_policy_set: governance_analyst_v1
+model_steps: []
+expected:
+  terminal_status: completed
+  outcome: success
+  completion_reason_code: goal_completed
+  # 综合研判需要多次 semantic_query（人口/出租房/事件各一次）
+  required_tool_ids: [governance.semantic_query]
+  forbidden_tool_ids:
+    - governance.query_population_metrics
+    - governance.query_housing_metrics
+    - governance.query_event_metrics
+  max_tool_calls: 8
+  # 区划解析 + 人口/出租房/事件三个数据结果，不允许只查一两个维度就宣称综合研判完成。
+  min_evidence_count: 4
+  required_event_types: [tool.completed, result.available, evidence.available, run.completed]
+  # 三个维度都必须出现；any 只会验证命中任意一项，不足以约束综合研判。
+  required_answer_substrings: ["人口", "出租", "事件"]
+  forbidden_answer_substrings: ["无法完成", "没有可用工具"]

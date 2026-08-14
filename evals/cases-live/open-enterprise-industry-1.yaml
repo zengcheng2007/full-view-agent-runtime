@@ -1,0 +1,8 @@
+case_id: open-enterprise-industry-1
+user_message: 西湖区主要有哪些行业？按企业数量给我看看前八项
+model_steps: []
+expected:
+  terminal_status: completed
+  outcome: success
+  required_answer_substrings: [企业, 行业]
+  forbidden_answer_substrings: [无法完成]

@@ -1,0 +1,8 @@
+case_id: open-enterprise-industry-2
+user_message: 看一下西湖区企业的行业分布，只要现有接口返回的前八类
+model_steps: []
+expected:
+  terminal_status: completed
+  outcome: success
+  required_answer_substrings: [行业]
+  forbidden_answer_substrings: [无法完成]

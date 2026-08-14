@@ -1,0 +1,34 @@
+schema_version: "1.0"
+case_id: planning-enterprise-industry-http-success
+description: 解析区划并通过正式 HTTP Adapter 查询西湖区企业行业分布
+user_message: 查询西湖区企业行业分布，列出返回的前八个行业
+auth:
+  area_codes: ["3301"]
+  datasets: [administrative_area, enterprise]
+  entitlements: [governance.area.read, governance.enterprise.aggregate.read]
+  field_policy_set: governance_analyst_v1
+model_steps:
+  - type: tool_call
+    tool_id: governance.resolve_area
+    arguments: {query: 西湖区}
+    total_tokens: 100
+  - type: tool_call
+    tool_id: governance.semantic_query
+    arguments:
+      spec:
+        subject: enterprise
+        metrics: [enterprise_count]
+        scope: {area_code: "330106", include_descendants: true}
+        group_by: [industry_name]
+        output: table
+    total_tokens: 120
+  - type: finish
+    content: 西湖区企业行业分布查询已完成。
+    total_tokens: 30
+expected:
+  terminal_status: completed
+  outcome: success
+  completion_reason_code: goal_completed
+  tool_ids: [governance.resolve_area, governance.semantic_query]
+  min_evidence_count: 2
+  required_event_types: [tool.completed, result.available, evidence.available, run.completed]

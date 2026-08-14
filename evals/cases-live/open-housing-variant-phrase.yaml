@@ -1,0 +1,22 @@
+# 开放式评测用例 —— 变体问法：用"租房"替代"出租房"
+schema_version: "1.0"
+case_id: open-housing-variant-phrase
+description: "开放式：变体问法'租房'查询租赁类型汇总"
+user_message: 翠苑街道这边租房情况怎么样？帮我按类型分一下。
+auth:
+  area_codes: ["330106"]
+  datasets: [administrative_area, housing]
+  entitlements: [governance.area.read, governance.housing.aggregate.read]
+  field_policy_set: governance_analyst_v1
+model_steps: []
+expected:
+  terminal_status: completed
+  outcome: success
+  completion_reason_code: goal_completed
+  required_tool_ids: [governance.semantic_query]
+  forbidden_tool_ids: [governance.query_housing_metrics]
+  max_tool_calls: 4
+  min_evidence_count: 1
+  required_event_types: [tool.completed, result.available, evidence.available, run.completed]
+  required_answer_any_substrings: ["出租", "租房", "租赁"]
+  forbidden_answer_substrings: ["无法完成", "没有可用工具"]
