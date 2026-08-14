@@ -1,3 +1,5 @@
+from datetime import UTC, datetime
+
 import pytest
 from pydantic import ValidationError
 
@@ -6,8 +8,15 @@ from full_view_agent.domain.models import (
     AgentRun,
     FrontendCommand,
     FrontendCommandPreconditions,
+    FrontendCommandReceipt,
+    LayerClearPayload,
+    MapHighlightAreaPayload,
     MapRenderChoroplethPayload,
+    MapRenderHolographicPayload,
+    MapZoomToPayload,
+    PanelShowSummaryPayload,
     PanelShowTablePayload,
+    RouteNavigatePayload,
     RunCreateRequest,
     RunInputBody,
     ToolResult,
@@ -49,6 +58,111 @@ def test_frontend_command_rejects_a_payload_that_does_not_match_its_type() -> No
             ),
             payload=PanelShowTablePayload(result_id="result-invalid-map-01"),
         )
+
+
+@pytest.mark.parametrize(
+    ("command_type", "target", "capability", "payload"),
+    [
+        (
+            "map.zoom_to",
+            "map_panel",
+            "map.zoom_to@1.0",
+            MapZoomToPayload(center=(120.15, 30.28), zoom=14),
+        ),
+        (
+            "map.highlight_area",
+            "map_panel",
+            "map.highlight_area@1.0",
+            MapHighlightAreaPayload(area_code="330106"),
+        ),
+        (
+            "layer.clear",
+            "map_panel",
+            "layer.clear@1.0",
+            LayerClearPayload(clear_data_only=True),
+        ),
+        (
+            "panel.show_summary",
+            "summary_panel",
+            "panel.show_summary@1.0",
+            PanelShowSummaryPayload(
+                title="区域摘要",
+                items=[{"label": "总人口", "value": 100, "unit": "人"}],
+            ),
+        ),
+        (
+            "route.navigate",
+            "app_router",
+            "route.navigate@1.0",
+            RouteNavigatePayload(path="/eleOverview/people"),
+        ),
+    ],
+)
+def test_frontend_command_contract_accepts_the_full_view_command_pack(
+    command_type, target, capability, payload
+) -> None:
+    command = FrontendCommand(
+        command_id=f"cmd-{command_type}",
+        run_id="run-command-pack",
+        target_client_instance_id="agent-web-client",
+        type=command_type,
+        target=target,
+        preconditions=FrontendCommandPreconditions(
+            session_id="session-command-pack",
+            area_code="330106",
+            required_client_capability=capability,
+        ),
+        payload=payload,
+    )
+
+    assert command.type == command_type
+
+
+@pytest.mark.parametrize(
+    "command_type",
+    ["map.render_points", "map.render_cluster", "map.render_heatmap"],
+)
+def test_frontend_command_contract_accepts_explicit_holographic_result_fields(
+    command_type: str,
+) -> None:
+    command = FrontendCommand.model_validate(
+        {
+            "command_id": f"cmd-{command_type}",
+            "run_id": "run-holographic",
+            "target_client_instance_id": "agent-web-client",
+            "type": command_type,
+            "target": "map_panel",
+            "preconditions": {
+                "session_id": "session-holographic",
+                "area_code": "330106",
+                "required_client_capability": f"{command_type}@1.0",
+            },
+            "payload": {
+                "result_id": "result-holographic",
+                "lng_field": "longitude",
+                "lat_field": "latitude",
+                "label_field": "name",
+                "weight_field": "count",
+            },
+        }
+    )
+
+    assert command.type == command_type
+    assert isinstance(command.payload, MapRenderHolographicPayload)
+    assert command.payload.result_id == "result-holographic"
+
+
+def test_frontend_command_receipt_accepts_protocol_rejection() -> None:
+    receipt = FrontendCommandReceipt(
+        command_id="cmd-invalid-payload",
+        client_instance_id="agent-web-client",
+        status="rejected_protocol",
+        received_at=datetime.now(UTC),
+        completed_at=datetime.now(UTC),
+        error={"code": "payload_invalid", "message": "payload is invalid"},
+    )
+
+    assert receipt.status == "rejected_protocol"
 
 
 def test_run_create_request_rejects_unknown_fields() -> None:

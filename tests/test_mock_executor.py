@@ -314,7 +314,7 @@ async def test_mock_executor_requests_a_choropleth_for_supported_population_resu
         "metric_field": "person_count",
         "label_field": "area_name",
         "area_code_field": "area_code",
-        "legend_title": "独居老人数量",
+        "legend_title": "人口数量",
         "palette": "sequential_blue_5",
         "fit_bounds": True,
     }

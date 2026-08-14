@@ -241,7 +241,7 @@ def test_area_outside_authorization_forms_omission(planner: AnalysisPlanner) -> 
     assert {code for code in omission_map(plan).values()} == {"AREA_NOT_AUTHORIZED"}
 
 
-def test_scope_level_unsupported_forms_subject_omission(
+def test_city_scope_includes_controlled_population_ranking(
     planner: AnalysisPlanner,
 ) -> None:
     # ???4 ??? housing/event ????????? population ?
@@ -251,8 +251,8 @@ def test_scope_level_unsupported_forms_subject_omission(
         authorization=FULL_AUTH,
     )
 
-    assert [step.subject for step in plan.steps] == ["event", "housing"]
-    assert omission_map(plan) == {"population": "SCOPE_LEVEL_UNSUPPORTED"}
+    assert [step.subject for step in plan.steps] == ["event", "housing", "population"]
+    assert omission_map(plan) == {}
 
 
 def test_unbindable_subject_forms_omission(catalog: SemanticCatalog) -> None:

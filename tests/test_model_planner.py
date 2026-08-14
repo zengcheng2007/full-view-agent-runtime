@@ -5,7 +5,12 @@ from full_view_agent.application.answer_claims import (
     AnswerClaim,
 )
 from full_view_agent.application.errors import BudgetExceeded, ModelContractError
-from full_view_agent.application.harness import FinishAction, HarnessState, ToolAction
+from full_view_agent.application.harness import (
+    DeterministicCompletionValidator,
+    FinishAction,
+    HarnessState,
+    ToolAction,
+)
 from full_view_agent.application.model_planner import ModelPlanner
 from full_view_agent.application.model_provider import (
     ModelMessage,
@@ -15,7 +20,21 @@ from full_view_agent.application.model_provider import (
     ModelToolDefinition,
     ModelUsage,
 )
+from full_view_agent.application.runtime_skill_registry import SKILL_INVOKE_TOOL_ID
+from full_view_agent.domain.models import (
+    AreaCandidate,
+    AreaCandidatesData,
+    HousingAreaGroupRow,
+    HousingAreaGroupTable,
+    PopulationRankingRow,
+    PopulationRankingTable,
+    TableDataResult,
+    ToolResult,
+)
+from full_view_agent.semantic.catalog import SemanticCatalog
+from full_view_agent.semantic.presenter import SemanticToolPresenter
 
+from .test_harness import successful_area_result, successful_housing_result
 from .test_policy import population_auth_context
 
 
@@ -68,6 +87,875 @@ class QueueModelProvider:
     async def complete(self, request: ModelRequest) -> ModelResponse:
         self.requests.append(request)
         return self.responses.pop(0)
+
+
+@pytest.mark.asyncio
+async def test_model_planner_finishes_housing_total_with_sum_not_one_lease_type() -> None:
+    class ContextBuilder:
+        async def build(self, **_kwargs) -> ModelRequest:
+            return ModelRequest(
+                messages=(ModelMessage(role="user", content="上城区总共有多少出租房"),),
+                tools=(
+                    ModelToolDefinition(
+                        tool_id="governance.semantic_query",
+                        description="housing 按租赁类型汇总出租房数量",
+                        input_schema={"type": "object"},
+                    ),
+                ),
+            )
+
+    provider = QueueModelProvider()
+    result = successful_housing_result()
+    action = await ModelPlanner(
+        provider=provider,
+        context_builder=ContextBuilder(),
+        user_id="user-01",
+        auth_context=population_auth_context(),
+    ).decide(HarnessState(tool_results=(successful_area_result(), result)))
+
+    assert isinstance(action, FinishAction)
+    assert action.server_authored is True
+    assert action.structured_finish is not None
+    assert action.structured_finish.claims == [
+        AnswerClaim(
+            claim_id="housing-total",
+            result_id="res-housing",
+            result_fingerprint="sha256:housing",
+            collection="rows",
+            row_locator={},
+            field="dwelling_count",
+            operation="sum",
+            value=4420,
+        )
+    ]
+    assert provider.requests == []
+
+
+@pytest.mark.asyncio
+async def test_model_planner_routes_city_wide_street_ranking_as_one_bounded_query() -> None:
+    semantic_tool = ModelToolDefinition(
+        tool_id="governance.semantic_query",
+        description=(
+            "housing group_by=['descendant_street'] -> 全市街道汇总，"
+            "结果按出租房数量从高到低返回"
+        ),
+        input_schema={"type": "object"},
+        server_arguments={"catalog_version": "catalog-v1"},
+    )
+
+    class ContextBuilder:
+        async def build(self, **_kwargs) -> ModelRequest:
+            return ModelRequest(
+                messages=(
+                    ModelMessage(role="user", content="找出全杭州出租房最多的街道"),
+                ),
+                tools=(semantic_tool,),
+            )
+
+    area = successful_area_result().model_copy(deep=True)
+    assert area.data_result is not None
+    area.data_result = area.data_result.model_copy(
+        update={
+            "data": AreaCandidatesData(
+                candidates=[
+                    AreaCandidate(area_code="3301", area_name="杭州市", level="city")
+                ],
+                ambiguous=False,
+                resolved_area_code="3301",
+            )
+        }
+    )
+    provider = QueueModelProvider()
+    action = await ModelPlanner(
+        provider=provider,
+        context_builder=ContextBuilder(),
+        user_id="user-01",
+        auth_context=population_auth_context(),
+    ).decide(HarnessState(tool_results=(area,)))
+
+    assert action == ToolAction(
+        tool_id="governance.semantic_query",
+        arguments={
+            "catalog_version": "catalog-v1",
+            "spec": {
+                "subject": "housing",
+                "metrics": ["dwelling_count"],
+                "scope": {"area_code": "3301"},
+                "group_by": ["descendant_street"],
+                "filters": [],
+                "output": "table",
+            },
+        },
+    )
+    assert provider.requests == []
+
+
+@pytest.mark.asyncio
+async def test_model_planner_routes_city_population_community_max_deterministically() -> None:
+    semantic_tool = ModelToolDefinition(
+        tool_id="governance.semantic_query",
+        description=(
+            "population group_by=['district']；"
+            "group_by=['descendant_street']；"
+            "group_by=['descendant_community']"
+        ),
+        input_schema={"type": "object"},
+        server_arguments={"catalog_version": "catalog-v1"},
+    )
+
+    class ContextBuilder:
+        async def build(self, **_kwargs) -> ModelRequest:
+            return ModelRequest(
+                messages=(
+                    ModelMessage(role="user", content="杭州市哪个社区人最多"),
+                ),
+                tools=(semantic_tool,),
+            )
+
+    area = successful_area_result().model_copy(deep=True)
+    assert area.data_result is not None
+    area.data_result = area.data_result.model_copy(
+        update={
+            "data": AreaCandidatesData(
+                candidates=[
+                    AreaCandidate(area_code="3301", area_name="杭州市", level="city")
+                ],
+                ambiguous=False,
+                resolved_area_code="3301",
+            )
+        }
+    )
+    provider = QueueModelProvider()
+    action = await ModelPlanner(
+        provider=provider,
+        context_builder=ContextBuilder(),
+        user_id="user-01",
+        auth_context=population_auth_context(),
+    ).decide(HarnessState(tool_results=(area,)))
+
+    assert action == ToolAction(
+        tool_id="governance.semantic_query",
+        arguments={
+            "catalog_version": "catalog-v1",
+            "spec": {
+                "subject": "population",
+                "metrics": ["person_count"],
+                "scope": {"area_code": "3301"},
+                "group_by": ["descendant_community"],
+                "filters": [],
+                "order_by": [{"field": "person_count", "direction": "desc"}],
+                "limit": 1,
+                "output": "table",
+            },
+        },
+    )
+    assert provider.requests == []
+
+
+@pytest.mark.asyncio
+async def test_model_planner_finishes_city_wide_street_max_from_complete_result() -> None:
+    class ContextBuilder:
+        async def build(self, **_kwargs) -> ModelRequest:
+            return ModelRequest(
+                messages=(
+                    ModelMessage(role="user", content="找出全杭州出租房最多的街道"),
+                ),
+                tools=(
+                    ModelToolDefinition(
+                        tool_id="governance.semantic_query",
+                        description="housing group_by=['descendant_street']",
+                        input_schema={"type": "object"},
+                    ),
+                ),
+            )
+
+    data = HousingAreaGroupTable(
+        rows=[
+            HousingAreaGroupRow(
+                area_code="330102002", area_name="丁兰街道", dwelling_count=520
+            ),
+            HousingAreaGroupRow(
+                area_code="330106001", area_name="翠苑街道", dwelling_count=486
+            ),
+        ]
+    )
+    result = ToolResult(
+        tool_call_id="tc-city-streets",
+        tool_id="governance.query_housing_metrics",
+        tool_version="1.0.0",
+        status="success",
+        summary="查询成功",
+        data_result=TableDataResult(
+            result_id="res-city-streets",
+            data_schema_ref="schema://data/housing-area-group-table/1.0.0",
+            result_fingerprint="sha256:city-streets",
+            data=data,
+            row_count=2,
+            truncated=False,
+        ),
+    )
+    provider = QueueModelProvider()
+    action = await ModelPlanner(
+        provider=provider,
+        context_builder=ContextBuilder(),
+        user_id="user-01",
+        auth_context=population_auth_context(),
+    ).decide(HarnessState(tool_results=(successful_area_result(), result)))
+
+    assert isinstance(action, FinishAction)
+    assert action.server_authored is True
+    assert action.structured_finish is not None
+    assert action.structured_finish.claims == [
+        AnswerClaim(
+            claim_id="housing-city-street-max",
+            result_id="res-city-streets",
+            result_fingerprint="sha256:city-streets",
+            collection="rows",
+            row_locator={"area_name": "丁兰街道"},
+            field="dwelling_count",
+            operation="is_max",
+            value=520,
+        )
+    ]
+    assert provider.requests == []
+
+
+@pytest.mark.asyncio
+async def test_model_planner_finishes_city_population_street_max_from_ranked_result() -> None:
+    class ContextBuilder:
+        async def build(self, **_kwargs) -> ModelRequest:
+            return ModelRequest(
+                messages=(ModelMessage(role="user", content="杭州市哪个街道人最多"),),
+                tools=(
+                    ModelToolDefinition(
+                        tool_id="governance.semantic_query",
+                        description="population group_by=['descendant_street']",
+                        input_schema={"type": "object"},
+                    ),
+                ),
+            )
+
+    data = PopulationRankingTable(
+        rows=[
+            PopulationRankingRow(
+                rank=1,
+                area_code="330109113",
+                area_name="瓜沥镇",
+                person_count=2920,
+            ),
+            PopulationRankingRow(
+                rank=2,
+                area_code="330111001",
+                area_name="富春街道",
+                person_count=1920,
+            ),
+        ]
+    )
+    result = ToolResult(
+        tool_call_id="tc-population-city-streets",
+        tool_id="governance.query_population_metrics",
+        tool_version="1.0.0",
+        status="success",
+        summary="查询成功",
+        data_result=TableDataResult(
+            result_id="res-population-city-streets",
+            data_schema_ref="schema://data/population-ranking-table/1.0.0",
+            result_fingerprint="sha256:population-city-streets",
+            data=data,
+            row_count=2,
+            truncated=True,
+        ),
+    )
+    provider = QueueModelProvider()
+    action = await ModelPlanner(
+        provider=provider,
+        context_builder=ContextBuilder(),
+        user_id="user-01",
+        auth_context=population_auth_context(),
+    ).decide(HarnessState(tool_results=(successful_area_result(), result)))
+
+    assert isinstance(action, FinishAction)
+    assert action.server_authored is True
+    assert action.structured_finish is not None
+    assert action.structured_finish.claims == [
+        AnswerClaim(
+            claim_id="population-city-street-rank",
+            result_id="res-population-city-streets",
+            result_fingerprint="sha256:population-city-streets",
+            collection="rows",
+            row_locator={"area_code": "330109113"},
+            field="rank",
+            operation="value",
+            value=1,
+        ),
+        AnswerClaim(
+            claim_id="population-city-street-count",
+            result_id="res-population-city-streets",
+            result_fingerprint="sha256:population-city-streets",
+            collection="rows",
+            row_locator={"area_code": "330109113"},
+            field="person_count",
+            operation="value",
+            value=2920,
+        ),
+    ]
+    assessment = await DeterministicCompletionValidator().assess(
+        HarnessState(tool_results=(successful_area_result(), result)), action
+    )
+    assert assessment.status == "accept"
+    assert assessment.safe_summary == "瓜沥镇的排名为1。\n瓜沥镇的人口数为2920人。"
+    assert provider.requests == []
+
+
+@pytest.mark.parametrize("wrapped_by_skill", [False, True])
+@pytest.mark.parametrize(
+    "prompt",
+    [
+        "查询西湖区楼幢总数和户室总数。",
+        "查询西湖区房屋存量总览。",
+    ],
+)
+@pytest.mark.asyncio
+async def test_model_planner_routes_verified_housing_stock_after_area_without_model_retry(
+    wrapped_by_skill: bool,
+    prompt: str,
+) -> None:
+    semantic_tool = ModelToolDefinition(
+        tool_id="governance.semantic_query",
+        description=(
+            "housing（房屋聚合指标）：指标 "
+            "['dwelling_count', 'building_count', 'room_count']；"
+            "结果粒度 group_by=[]（不传 group_by） -> "
+            "区域房屋存量总览（楼幢总数与户室总数）"
+        ),
+        input_schema={"type": "object"},
+        server_arguments={
+            "catalog_version": "catalog-v1",
+            "catalog_fingerprint": "sha256:catalog",
+        },
+    )
+    advertised = semantic_tool
+    if wrapped_by_skill:
+        advertised = ModelToolDefinition(
+            tool_id=SKILL_INVOKE_TOOL_ID,
+            description="技能入口",
+            input_schema={"type": "object"},
+            skill_tool_allowlists={"housing-analysis": (semantic_tool.tool_id,)},
+            wrapped_tool_definitions={semantic_tool.tool_id: semantic_tool},
+        )
+
+    class ContextBuilder:
+        async def build(self, **_kwargs) -> ModelRequest:
+            return ModelRequest(
+                messages=(ModelMessage(role="user", content=prompt),),
+                tools=(advertised,),
+            )
+
+    provider = QueueModelProvider()
+    action = await ModelPlanner(
+        provider=provider,
+        context_builder=ContextBuilder(),
+        user_id="user-01",
+        auth_context=population_auth_context(),
+    ).decide(HarnessState(tool_results=(successful_area_result(),)))
+
+    assert action == ToolAction(
+        tool_id="governance.semantic_query",
+        arguments={
+            "catalog_version": "catalog-v1",
+            "catalog_fingerprint": "sha256:catalog",
+            "spec": {
+                "subject": "housing",
+                "metrics": ["building_count", "room_count"],
+                "scope": {"area_code": "330106"},
+                "group_by": [],
+                "filters": [],
+                "output": "table",
+            },
+        },
+    )
+    assert provider.requests == []
+
+
+@pytest.mark.asyncio
+async def test_model_planner_routes_stock_from_current_authorized_catalog_description(
+) -> None:
+    base_auth = population_auth_context()
+    housing_auth = base_auth.model_copy(
+        update={
+            "entitlements": ["governance.housing.aggregate.read"],
+            "data_scopes": base_auth.data_scopes.model_copy(
+                update={"datasets": ["housing"]}
+            ),
+        }
+    )
+    presentation = SemanticToolPresenter(
+        catalog=SemanticCatalog.default()
+    ).present(auth_context=housing_auth)
+    assert presentation is not None
+    semantic_tool = ModelToolDefinition(
+        tool_id=presentation.tool_id,
+        description=presentation.description,
+        input_schema=presentation.input_schema,
+        server_arguments=presentation.server_arguments,
+    )
+
+    class ContextBuilder:
+        async def build(self, **_kwargs) -> ModelRequest:
+            return ModelRequest(
+                messages=(
+                    ModelMessage(
+                        role="user",
+                        content="查询西湖区楼幢总数和户室总数。",
+                    ),
+                ),
+                tools=(semantic_tool,),
+            )
+
+    provider = QueueModelProvider()
+    action = await ModelPlanner(
+        provider=provider,
+        context_builder=ContextBuilder(),
+        user_id="user-01",
+        auth_context=housing_auth,
+    ).decide(HarnessState(tool_results=(successful_area_result(),)))
+
+    assert isinstance(action, ToolAction)
+    assert action.arguments["spec"] == {
+        "subject": "housing",
+        "metrics": ["building_count", "room_count"],
+        "scope": {"area_code": "330106"},
+        "group_by": [],
+        "filters": [],
+        "output": "table",
+    }
+    assert provider.requests == []
+
+
+@pytest.mark.parametrize(
+    "prompt",
+    [
+        "查询西湖区楼幢总数。",
+        "查询西湖区户室总数。",
+        "查询西湖区楼幢总数和户室总数，按街道汇总。",
+        "查询西湖区楼幢总数和户室总数，按用途分类。",
+        "查询西湖区今年的楼幢总数和户室总数。",
+        "查询西湖区近一年的楼幢总数和户室总数。",
+        "查询西湖区仅住宅的楼幢总数和户室总数。",
+        "查询西湖区楼幢总数和户室总数，从高到低排序。",
+        "查询西湖区出租房分布。",
+        "查询西湖区户室用途分类。",
+        "综合分析西湖区人口、房屋和事件治理情况。",
+    ],
+)
+@pytest.mark.asyncio
+async def test_model_planner_does_not_force_housing_stock_for_broader_intents(
+    prompt: str,
+) -> None:
+    semantic_tool = ModelToolDefinition(
+        tool_id="governance.semantic_query",
+        description=(
+            "housing（房屋聚合指标）：指标 "
+            "['dwelling_count', 'building_count', 'room_count']；"
+            "结果粒度 group_by=[]（不传 group_by） -> "
+            "区域房屋存量总览（楼幢总数与户室总数）"
+        ),
+        input_schema={"type": "object"},
+    )
+
+    class ContextBuilder:
+        async def build(self, **_kwargs) -> ModelRequest:
+            return ModelRequest(
+                messages=(ModelMessage(role="user", content=prompt),),
+                tools=(semantic_tool,),
+            )
+
+    provider = QueueModelProvider(
+        ModelResponse(
+            content="需要由模型继续判断。",
+            tool_calls=(),
+            finish_reason="stop",
+        )
+    )
+    action = await ModelPlanner(
+        provider=provider,
+        context_builder=ContextBuilder(),
+        user_id="user-01",
+        auth_context=population_auth_context(),
+        allow_legacy_finish=True,
+    ).decide(HarnessState(tool_results=(successful_area_result(),)))
+
+    assert isinstance(action, FinishAction)
+    assert len(provider.requests) == 1
+
+
+@pytest.mark.parametrize(
+    "tool_results",
+    [
+        (successful_area_result().model_copy(update={"status": "partial"}),),
+        (successful_area_result(), successful_area_result(tool_call_id="tc-2")),
+    ],
+)
+@pytest.mark.asyncio
+async def test_model_planner_requires_exactly_one_successful_area_before_stock_route(
+    tool_results: tuple[ToolResult, ...],
+) -> None:
+    semantic_tool = ModelToolDefinition(
+        tool_id="governance.semantic_query",
+        description=(
+            "housing（房屋聚合指标）：指标 "
+            "['dwelling_count', 'building_count', 'room_count']；"
+            "结果粒度 group_by=[]（不传 group_by） -> "
+            "区域房屋存量总览（楼幢总数与户室总数）"
+        ),
+        input_schema={"type": "object"},
+    )
+
+    class ContextBuilder:
+        async def build(self, **_kwargs) -> ModelRequest:
+            return ModelRequest(
+                messages=(
+                    ModelMessage(
+                        role="user",
+                        content="查询西湖区楼幢总数和户室总数。",
+                    ),
+                ),
+                tools=(semantic_tool,),
+            )
+
+    provider = QueueModelProvider(
+        ModelResponse(
+            content="需要由模型继续判断。",
+            tool_calls=(),
+            finish_reason="stop",
+        )
+    )
+    action = await ModelPlanner(
+        provider=provider,
+        context_builder=ContextBuilder(),
+        user_id="user-01",
+        auth_context=population_auth_context(),
+        allow_legacy_finish=True,
+    ).decide(HarnessState(tool_results=tool_results))
+
+    assert isinstance(action, FinishAction)
+    assert len(provider.requests) == 1
+
+
+@pytest.mark.asyncio
+async def test_model_planner_does_not_force_housing_stock_when_catalog_shape_is_hidden(
+) -> None:
+    class ContextBuilder:
+        async def build(self, **_kwargs) -> ModelRequest:
+            return ModelRequest(
+                messages=(
+                    ModelMessage(
+                        role="user",
+                        content="查询西湖区楼幢总数和户室总数。",
+                    ),
+                ),
+                tools=(
+                    ModelToolDefinition(
+                        tool_id="governance.semantic_query",
+                        description="housing：当前仅声明出租房和户室用途能力",
+                        input_schema={"type": "object"},
+                    ),
+                ),
+            )
+
+    provider = QueueModelProvider(
+        ModelResponse(
+            content="当前能力合同未声明房屋存量形状。",
+            tool_calls=(),
+            finish_reason="stop",
+        )
+    )
+    action = await ModelPlanner(
+        provider=provider,
+        context_builder=ContextBuilder(),
+        user_id="user-01",
+        auth_context=population_auth_context(),
+        allow_legacy_finish=True,
+    ).decide(HarnessState(tool_results=(successful_area_result(),)))
+
+    assert isinstance(action, FinishAction)
+    assert len(provider.requests) == 1
+
+
+@pytest.mark.parametrize("wrapped_by_skill", [False, True])
+@pytest.mark.asyncio
+async def test_model_planner_routes_verified_housing_next_area_descending_request_without_model(
+    wrapped_by_skill: bool,
+) -> None:
+    semantic_tool = ModelToolDefinition(
+        tool_id="governance.semantic_query",
+        description=(
+            "housing group_by=['next_area'] 返回直接下级区划，"
+            "结果按出租房数量从高到低返回"
+        ),
+        input_schema={"type": "object"},
+        server_arguments={
+            "catalog_version": "catalog-v1",
+            "catalog_fingerprint": "sha256:catalog",
+        },
+    )
+    advertised = semantic_tool
+    if wrapped_by_skill:
+        advertised = ModelToolDefinition(
+            tool_id=SKILL_INVOKE_TOOL_ID,
+            description="技能入口",
+            input_schema={"type": "object"},
+            skill_tool_allowlists={"housing-analysis": (semantic_tool.tool_id,)},
+            wrapped_tool_definitions={semantic_tool.tool_id: semantic_tool},
+        )
+
+    class ContextBuilder:
+        async def build(self, **_kwargs) -> ModelRequest:
+            return ModelRequest(
+                messages=(
+                    ModelMessage(
+                        role="user",
+                        content="西湖区哪些街道出租房比较多？按街道汇总并从高到低排序。",
+                    ),
+                ),
+                tools=(advertised,),
+            )
+
+    provider = QueueModelProvider()
+    action = await ModelPlanner(
+        provider=provider,
+        context_builder=ContextBuilder(),
+        user_id="user-01",
+        auth_context=population_auth_context(),
+    ).decide(HarnessState(tool_results=(successful_area_result(),)))
+
+    assert action == ToolAction(
+        tool_id="governance.semantic_query",
+        arguments={
+            "catalog_version": "catalog-v1",
+            "catalog_fingerprint": "sha256:catalog",
+            "spec": {
+                "subject": "housing",
+                "metrics": ["dwelling_count"],
+                "scope": {"area_code": "330106"},
+                "group_by": ["next_area"],
+                "filters": [],
+                "output": "table",
+            },
+        },
+    )
+    assert provider.requests == []
+
+
+@pytest.mark.parametrize(
+    ("prompt", "description"),
+    [
+        (
+            "西湖区出租房按街道从低到高排序。",
+            "housing group_by=['next_area'] 结果按出租房数量从高到低返回",
+        ),
+        (
+            "西湖区出租房按租赁类型汇总并从高到低排序。",
+            "housing group_by=['next_area'] 结果按出租房数量从高到低返回",
+        ),
+        (
+            "西湖区各街道住宅出租房从高到低排序。",
+            "housing group_by=['next_area'] 结果按出租房数量从高到低返回",
+        ),
+        (
+            "西湖区哪些街道出租房比较多？按街道汇总并从高到低排序。",
+            "housing 仅支持按租赁类型汇总，group_by=['next_area'] 未开启",
+        ),
+    ],
+)
+@pytest.mark.asyncio
+async def test_model_planner_does_not_force_housing_next_area_outside_proven_contract(
+    prompt: str,
+    description: str,
+) -> None:
+    semantic_tool = ModelToolDefinition(
+        tool_id="governance.semantic_query",
+        description=description,
+        input_schema={"type": "object"},
+    )
+
+    class ContextBuilder:
+        async def build(self, **_kwargs) -> ModelRequest:
+            return ModelRequest(
+                messages=(ModelMessage(role="user", content=prompt),),
+                tools=(semantic_tool,),
+            )
+
+    provider = QueueModelProvider(
+        ModelResponse(
+            content="需要按当前能力边界进一步判断。",
+            tool_calls=(),
+            finish_reason="stop",
+        )
+    )
+    action = await ModelPlanner(
+        provider=provider,
+        context_builder=ContextBuilder(),
+        user_id="user-01",
+        auth_context=population_auth_context(),
+        allow_legacy_finish=True,
+    ).decide(HarnessState(tool_results=(successful_area_result(),)))
+
+    assert isinstance(action, FinishAction)
+    assert len(provider.requests) == 1
+
+
+@pytest.mark.parametrize("wrapped_by_skill", [False, True])
+@pytest.mark.asyncio
+async def test_model_planner_routes_verified_event_finish_rate_without_second_model(
+    wrapped_by_skill: bool,
+) -> None:
+    semantic_tool = ModelToolDefinition(
+        tool_id="governance.semantic_query",
+        description=(
+            "event（网格事件指标）：指标 ['finish_rate']；group_by 无；"
+            "结果粒度 group_by=[]（不传 group_by） -> "
+            "按网格、村社、镇街层级返回办结率快照"
+        ),
+        input_schema={"type": "object"},
+        server_arguments={
+            "catalog_version": "catalog-v1",
+            "catalog_fingerprint": "sha256:catalog",
+        },
+    )
+    advertised = semantic_tool
+    if wrapped_by_skill:
+        advertised = ModelToolDefinition(
+            tool_id=SKILL_INVOKE_TOOL_ID,
+            description="技能入口",
+            input_schema={"type": "object"},
+            skill_tool_allowlists={"event-analysis": (semantic_tool.tool_id,)},
+            wrapped_tool_definitions={semantic_tool.tool_id: semantic_tool},
+        )
+
+    class ContextBuilder:
+        async def build(self, **_kwargs) -> ModelRequest:
+            return ModelRequest(
+                messages=(
+                    ModelMessage(
+                        role="user",
+                        content="看一下西湖区事件治理办结率，按网格、社区、街道三个层级说明。",
+                    ),
+                ),
+                tools=(advertised,),
+            )
+
+    provider = QueueModelProvider()
+    action = await ModelPlanner(
+        provider=provider,
+        context_builder=ContextBuilder(),
+        user_id="user-01",
+        auth_context=population_auth_context(),
+    ).decide(HarnessState(tool_results=(successful_area_result(),)))
+
+    assert action == ToolAction(
+        tool_id="governance.semantic_query",
+        arguments={
+            "catalog_version": "catalog-v1",
+            "catalog_fingerprint": "sha256:catalog",
+            "spec": {
+                "subject": "event",
+                "metrics": ["finish_rate"],
+                "scope": {"area_code": "330106"},
+                "group_by": [],
+                "filters": [],
+                "output": "table",
+            },
+        },
+    )
+    assert provider.requests == []
+
+
+@pytest.mark.parametrize(
+    "prompt",
+    [
+        "看一下西湖区今年事件办结率，按三个层级说明。",
+        "看一下西湖区民生类型事件办结率，按三个层级说明。",
+        "看一下西湖区事件数量和办结率，按三个层级说明。",
+        "看一下西湖区事件办结率。",
+    ],
+)
+@pytest.mark.asyncio
+async def test_model_planner_does_not_force_event_route_with_unsupported_constraints(
+    prompt: str,
+) -> None:
+    semantic_tool = ModelToolDefinition(
+        tool_id="governance.semantic_query",
+        description=(
+            "event（网格事件指标）：指标 ['finish_rate']；"
+            "按网格、村社、镇街层级返回办结率快照"
+        ),
+        input_schema={"type": "object"},
+    )
+
+    class ContextBuilder:
+        async def build(self, **_kwargs) -> ModelRequest:
+            return ModelRequest(
+                messages=(ModelMessage(role="user", content=prompt),),
+                tools=(semantic_tool,),
+            )
+
+    provider = QueueModelProvider(
+        ModelResponse(
+            content="需要按当前能力边界进一步判断。",
+            tool_calls=(),
+            finish_reason="stop",
+        )
+    )
+    action = await ModelPlanner(
+        provider=provider,
+        context_builder=ContextBuilder(),
+        user_id="user-01",
+        auth_context=population_auth_context(),
+        allow_legacy_finish=True,
+    ).decide(HarnessState(tool_results=(successful_area_result(),)))
+
+    assert isinstance(action, FinishAction)
+    assert len(provider.requests) == 1
+
+
+@pytest.mark.asyncio
+async def test_model_planner_does_not_force_event_route_when_contract_is_not_visible() -> None:
+    class ContextBuilder:
+        async def build(self, **_kwargs) -> ModelRequest:
+            return ModelRequest(
+                messages=(
+                    ModelMessage(
+                        role="user",
+                        content="看一下西湖区事件治理办结率，按三个层级说明。",
+                    ),
+                ),
+                tools=(
+                    ModelToolDefinition(
+                        tool_id="governance.semantic_query",
+                        description="当前未声明 event finish_rate 三层快照能力",
+                        input_schema={"type": "object"},
+                    ),
+                ),
+            )
+
+    provider = QueueModelProvider(
+        ModelResponse(
+            content="当前能力合同不可见。",
+            tool_calls=(),
+            finish_reason="stop",
+        )
+    )
+    action = await ModelPlanner(
+        provider=provider,
+        context_builder=ContextBuilder(),
+        user_id="user-01",
+        auth_context=population_auth_context(),
+        allow_legacy_finish=True,
+    ).decide(HarnessState(tool_results=(successful_area_result(),)))
+
+    assert isinstance(action, FinishAction)
+    assert len(provider.requests) == 1
 
 
 def tool_response(*, tool_id: str, tokens: int = 10) -> ModelResponse:
@@ -275,6 +1163,232 @@ async def test_model_planner_allows_specialized_semantic_subject_for_explicit_us
     assert isinstance(action, ToolAction)
     assert action.tool_id == "governance.semantic_query"
     assert action.arguments["catalog_version"] == "catalog-v1"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "message", ["查询西湖区治理力量汇总", "西湖区网格力量构成"]
+)
+async def test_model_planner_routes_governance_power_aggregate_expressions(
+    message: str,
+) -> None:
+    presentation = SemanticToolPresenter(
+        catalog=SemanticCatalog.default()
+    ).present(
+        auth_context=population_auth_context().model_copy(
+            update={
+                "entitlements": ["governance.power.aggregate.read"],
+                "data_scopes": population_auth_context().data_scopes.model_copy(
+                    update={"datasets": ["governance_power"]}
+                ),
+            }
+        )
+    )
+    assert presentation is not None
+
+    class ContextBuilder:
+        async def build(self, **_kwargs) -> ModelRequest:
+            return ModelRequest(
+                messages=(ModelMessage(role="user", content=message),),
+                tools=(
+                    ModelToolDefinition(
+                        tool_id=presentation.tool_id,
+                        description=presentation.description,
+                        input_schema=presentation.input_schema,
+                        server_arguments=presentation.server_arguments,
+                        subject_intent_terms=presentation.subject_intent_terms,
+                        subject_trigger_terms=presentation.subject_trigger_terms,
+                    ),
+                ),
+            )
+
+    provider = QueueModelProvider(
+        ModelResponse(
+            content=None,
+            tool_calls=(
+                ModelToolCall(
+                    tool_id="governance.semantic_query",
+                    arguments={
+                        "spec": {
+                            "subject": "governance_power",
+                            "metrics": ["governance_power_count"],
+                            "scope": {"area_code": "330106"},
+                            "group_by": [],
+                            "filters": [],
+                            "output": "table",
+                        }
+                    },
+                ),
+            ),
+            finish_reason="tool_calls",
+        )
+    )
+    action = await ModelPlanner(
+        provider=provider,
+        context_builder=ContextBuilder(),
+        user_id="user-01",
+        auth_context=population_auth_context(),
+    ).decide(HarnessState())
+
+    assert isinstance(action, ToolAction)
+    assert action.tool_id == "governance.semantic_query"
+    assert action.arguments["spec"]["subject"] == "governance_power"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "message", [
+        "查询西湖区治理力量人员明细",
+        "给我网格力量人员姓名和电话",
+    ],
+)
+async def test_model_planner_rejects_governance_power_personal_details(
+    message: str,
+) -> None:
+    class ContextBuilder:
+        async def build(self, **_kwargs) -> ModelRequest:
+            return ModelRequest(
+                messages=(ModelMessage(role="user", content=message),),
+                tools=(
+                    ModelToolDefinition(
+                        tool_id="governance.semantic_query",
+                        description="受控语义查询",
+                        input_schema={"type": "object"},
+                    ),
+                ),
+            )
+
+    provider = QueueModelProvider()
+    action = await ModelPlanner(
+        provider=provider,
+        context_builder=ContextBuilder(),
+        user_id="user-01",
+        auth_context=population_auth_context(),
+    ).decide(HarnessState())
+
+    assert isinstance(action, FinishAction)
+    assert action.server_authored is True
+    assert action.structured_finish is not None
+    assert action.structured_finish.limitations == [
+        "unsupported_requested_constraint"
+    ]
+    assert "仅支持治理力量分类汇总" in action.summary
+    assert provider.requests == []
+
+
+@pytest.mark.asyncio
+async def test_model_planner_removes_specialized_filter_not_requested_by_user() -> None:
+    semantic_tool = ModelToolDefinition(
+        tool_id="governance.semantic_query",
+        description="人口聚合查询",
+        input_schema={"type": "object"},
+        specialized_filter_intent_terms={
+            "population": {
+                "person_category:eq:solitary_elderly": ("独居老人",),
+            }
+        },
+    )
+
+    class ContextBuilder:
+        async def build(self, **_kwargs) -> ModelRequest:
+            return ModelRequest(
+                messages=(ModelMessage(role="user", content="西湖区人口按街道汇总"),),
+                tools=(semantic_tool,),
+            )
+
+    provider = QueueModelProvider(
+        ModelResponse(
+            content=None,
+            tool_calls=(
+                ModelToolCall(
+                    tool_id="governance.semantic_query",
+                    arguments={
+                        "spec": {
+                            "subject": "population",
+                            "metrics": ["person_count"],
+                            "scope": {"area_code": "330106"},
+                            "group_by": ["street"],
+                            "filters": [
+                                {
+                                    "field": "person_category",
+                                    "operator": "eq",
+                                    "value": "solitary_elderly",
+                                }
+                            ],
+                        }
+                    },
+                ),
+            ),
+            finish_reason="tool_calls",
+        )
+    )
+
+    action = await ModelPlanner(
+        provider=provider,
+        context_builder=ContextBuilder(),
+        user_id="user-01",
+        auth_context=population_auth_context(),
+    ).decide(HarnessState())
+
+    assert isinstance(action, ToolAction)
+    assert action.arguments["spec"]["filters"] == []
+
+
+@pytest.mark.asyncio
+async def test_model_planner_keeps_specialized_filter_when_explicitly_requested() -> None:
+    semantic_tool = ModelToolDefinition(
+        tool_id="governance.semantic_query",
+        description="人口聚合查询",
+        input_schema={"type": "object"},
+        specialized_filter_intent_terms={
+            "population": {
+                "person_category:eq:solitary_elderly": ("独居老人",),
+            }
+        },
+    )
+
+    class ContextBuilder:
+        async def build(self, **_kwargs) -> ModelRequest:
+            return ModelRequest(
+                messages=(ModelMessage(role="user", content="西湖区独居老人按街道汇总"),),
+                tools=(semantic_tool,),
+            )
+
+    specialized_filter = {
+        "field": "person_category",
+        "operator": "eq",
+        "value": "solitary_elderly",
+    }
+    provider = QueueModelProvider(
+        ModelResponse(
+            content=None,
+            tool_calls=(
+                ModelToolCall(
+                    tool_id="governance.semantic_query",
+                    arguments={
+                        "spec": {
+                            "subject": "population",
+                            "metrics": ["person_count"],
+                            "scope": {"area_code": "330106"},
+                            "group_by": ["street"],
+                            "filters": [specialized_filter],
+                        }
+                    },
+                ),
+            ),
+            finish_reason="tool_calls",
+        )
+    )
+
+    action = await ModelPlanner(
+        provider=provider,
+        context_builder=ContextBuilder(),
+        user_id="user-01",
+        auth_context=population_auth_context(),
+    ).decide(HarnessState())
+
+    assert isinstance(action, ToolAction)
+    assert action.arguments["spec"]["filters"] == [specialized_filter]
 
 
 @pytest.mark.asyncio

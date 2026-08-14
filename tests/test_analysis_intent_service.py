@@ -429,19 +429,16 @@ async def test_compilation_never_expands_goals_to_overview() -> None:
     assert len(repository._records) == 1
 
 
-async def test_intent_compiling_to_no_steps_fails_closed() -> None:
+async def test_city_population_intent_compiles_after_city_ranking_is_declared() -> None:
     service, repository = build_service()
 
-    # 3301 为市级（4 位），population 仅支持 6/9/12 级：
-    # 意图只能编译出全 omission 计划，必须 fail closed 而非落库空计划。
-    with pytest.raises(AnalysisIntentRejected) as exc_info:
-        await service.compile_intent(
-            named_intent("population", area_query="杭州市"),
-            auth_context=make_auth_context(),
-        )
+    plan = await service.compile_intent(
+        named_intent("population", area_query="杭州市"),
+        auth_context=make_auth_context(),
+    )
 
-    assert exc_info.value.code == "NO_EXECUTABLE_GOALS"
-    assert repository._records == {}
+    assert [step.subject for step in plan.steps] == ["population"]
+    assert len(repository._records) == 1
 
 
 # ---------------------------------------------------------------------------

@@ -455,6 +455,7 @@ def test_fingerprinter_semantic_call_matches_equivalent_direct_call() -> None:
                     }
                 ],
                 "group_by": ["street"],
+                "order_by": [],
                 "limit": 200,
                 "presentation_hint": "table",
             }

@@ -142,6 +142,7 @@ async def test_create_analysis_plan_is_server_authored_persisted_and_idempotent(
 
 
 @pytest.mark.asyncio
+@pytest.mark.db
 async def test_create_analysis_plan_persists_through_real_postgres_api_path() -> None:
     dsn = os.getenv("FULL_VIEW_TEST_DATABASE_URL")
     if not dsn:

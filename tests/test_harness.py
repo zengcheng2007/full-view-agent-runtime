@@ -5,12 +5,16 @@ import pytest
 from full_view_agent.application.answer_grounding import build_fact_ledger
 from full_view_agent.application.errors import BudgetExceeded, LoopDetected
 from full_view_agent.application.harness import (
+    MODEL_TIMEOUT_WITH_RESULTS_SUMMARY,
     AgentHarness,
     DeterministicCompletionValidator,
     FinishAction,
+    HarnessControl,
     HarnessLimits,
     HarnessState,
     ToolAction,
+    build_degraded_completion_summary,
+    build_verified_dimensions_completion_summary,
 )
 from full_view_agent.domain.models import (
     AreaCandidate,
@@ -23,6 +27,7 @@ from full_view_agent.domain.models import (
     ObjectProfileData,
     ObjectProfileField,
     ObjectProfileResult,
+    SemanticResultLineage,
     TableDataResult,
     ToolResult,
 )
@@ -147,6 +152,146 @@ def successful_housing_result(
             data=HousingLeaseTypeTable(rows=rows),
             row_count=len(rows),
         ),
+    )
+
+
+def _semantic_result(subject: str, index: int) -> ToolResult:
+    canonical = {
+        "population": "governance.query_population_metrics",
+        "housing": "governance.query_housing_metrics",
+        "event": "governance.query_event_metrics",
+    }[subject]
+    result = successful_housing_result(tool_call_id=f"tc-{subject}")
+    assert result.data_result is not None
+    return result.model_copy(
+        update={
+            "tool_id": "governance.semantic_query",
+            "data_result": result.data_result.model_copy(
+                update={
+                    "result_id": f"res-{index}",
+                    "result_fingerprint": f"sha256:{index}",
+                }
+            ),
+            "semantic_lineage": SemanticResultLineage(
+                virtual_tool_id="governance.semantic_query",
+                virtual_tool_version="1.0.0",
+                spec_version="s0.1",
+                catalog_version="catalog-v1",
+                subject=subject,
+                logical_dataset_id=subject,
+                canonical_tool_id=canonical,
+                canonical_tool_version="1.0.0",
+                spec_fingerprint=f"sha256:spec-{index}",
+                plan_fingerprint=f"sha256:plan-{index}",
+                area_code="330106",
+                output="table",
+            ),
+        }
+    )
+
+
+def test_degraded_summary_lists_only_verified_semantic_business_dimensions() -> None:
+    summary = build_degraded_completion_summary(
+        base=MODEL_TIMEOUT_WITH_RESULTS_SUMMARY,
+        results=(
+            successful_area_result(),
+            _semantic_result("population", 1),
+            _semantic_result("housing", 2),
+            _semantic_result("event", 3),
+        ),
+    )
+
+    assert summary == (
+        MODEL_TIMEOUT_WITH_RESULTS_SUMMARY
+        + " 已完成并保留可验证结果的业务维度：人口、出租房、事件治理。"
+    )
+    assert not any(character.isdigit() for character in summary)
+
+
+def test_verified_dimensions_fallback_requires_multiple_semantic_subjects() -> None:
+    assert build_verified_dimensions_completion_summary(
+        (_semantic_result("population", 1),)
+    ) is None
+
+    summary = build_verified_dimensions_completion_summary(
+        (
+            successful_area_result(),
+            _semantic_result("population", 1),
+            _semantic_result("housing", 2),
+            _semantic_result("event", 3),
+        )
+    )
+
+    assert summary == (
+        "查询工具已执行完成，模型未能生成通过事实核验的综合说明。"
+        "已保留可验证结果的业务维度：人口、出租房、事件治理。"
+        "请查看数据结果和证据链。"
+    )
+    assert not any(character.isdigit() for character in summary)
+
+
+@pytest.mark.asyncio
+async def test_second_failed_multi_domain_revision_returns_verified_dimension_summary() -> None:
+    harness = AgentHarness(
+        tool_executor=DeniedToolExecutor(),
+        validator=DeterministicCompletionValidator(),
+    )
+    control = HarnessControl(
+        state=HarnessState(
+            tool_results=(
+                _semantic_result("population", 1),
+                _semantic_result("housing", 2),
+                _semantic_result("event", 3),
+            ),
+            completion_revision_count=1,
+        ),
+        started_at=0.0,
+    )
+
+    _, summary = await harness.validate_once(
+        action=FinishAction(summary="未经结构化绑定的综合结论", legacy=False),
+        control=control,
+    )
+
+    assert summary is not None
+    assert "人口、出租房、事件治理" in summary
+
+
+@pytest.mark.asyncio
+async def test_elapsed_budget_degrades_after_verified_business_results() -> None:
+    class PlannerMustNotRun:
+        async def decide(self, state: HarnessState):
+            del state
+            raise AssertionError("elapsed fallback must not call the model again")
+
+    results = (
+        _semantic_result("population", 1),
+        _semantic_result("housing", 2),
+        _semantic_result("event", 3),
+    )
+    harness = AgentHarness(
+        tool_executor=DeniedToolExecutor(),
+        limits=HarnessLimits(max_elapsed_seconds=120.0),
+        clock=lambda: 121.0,
+    )
+
+    next_control, action = await harness.plan_action_once(
+        planner=PlannerMustNotRun(),
+        control=HarnessControl(
+            state=HarnessState(tool_results=results),
+            started_at=0.0,
+        ),
+    )
+
+    assert next_control.state.model_turns == 1
+    assert action == FinishAction(
+        summary=build_degraded_completion_summary(
+            base=MODEL_TIMEOUT_WITH_RESULTS_SUMMARY,
+            results=results,
+        ),
+        legacy=True,
+        server_authored=True,
+        degraded_reason_code="model_timeout_with_results",
     )
 
 

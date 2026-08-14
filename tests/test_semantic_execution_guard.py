@@ -317,7 +317,7 @@ def test_guard_rejects_unknown_plan_subject(
 ) -> None:
     auth_context = _full_governance_auth_context()
     plan = compiler.compile(_population_spec(), authorization=_auth_view(auth_context))
-    tampered = plan.model_copy(update={"subject": "enterprise"})
+    tampered = plan.model_copy(update={"subject": "traffic"})
 
     recheck = guard.recheck(tampered, auth_context=auth_context)
 

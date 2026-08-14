@@ -97,7 +97,10 @@ async def test_capability_normalizes_stringified_json_for_typed_object_field() -
         tool_call_id="tcl-stringified-object-01",
         tool_id="governance.query_population_metrics",
         raw_arguments={
-            "query": '{"metrics":["person_count"],"scope":{"area_code":"330106"}}'
+            "query": (
+                '{"metrics":["person_count"],"scope":{"area_code":"330106"},'
+                '"group_by":["street"]}'
+            )
         },
         auth_context=population_auth_context(),
     )

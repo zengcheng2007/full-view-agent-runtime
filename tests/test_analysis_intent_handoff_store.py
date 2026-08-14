@@ -271,6 +271,7 @@ def test_handoff_contract_rejects_untrusted_or_inconsistent_state() -> None:
             AnalysisIntentHandoff.model_validate(payload)
 
 
+@pytest.mark.db
 async def test_postgres_store_lifecycle_and_owner_isolation() -> None:
     schema = f"test_handoff_{uuid4().hex[:10]}"
     store = PostgresAnalysisIntentHandoffStore(dsn=postgres_dsn(), schema=schema)
@@ -309,6 +310,7 @@ async def test_postgres_store_lifecycle_and_owner_isolation() -> None:
         await store.drop_schema()
 
 
+@pytest.mark.db
 async def test_postgres_corrupted_payload_fails_closed() -> None:
     schema = f"test_handoff_{uuid4().hex[:10]}"
     dsn = postgres_dsn()
@@ -330,6 +332,7 @@ async def test_postgres_corrupted_payload_fails_closed() -> None:
         await store.drop_schema()
 
 
+@pytest.mark.db
 @pytest.mark.parametrize("tampered_column", ["intent_json", "intent_fingerprint"])
 async def test_postgres_tampered_intent_authority_fails_closed(
     tampered_column: str,

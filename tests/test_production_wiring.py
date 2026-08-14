@@ -64,7 +64,10 @@ def _full_governance_auth_context() -> models.AuthContext:
             "entitlements": [
                 "governance.area.read",
                 "governance.event.aggregate.read",
+                "governance.enterprise.aggregate.read",
                 "governance.housing.aggregate.read",
+                "governance.overview.aggregate.read",
+                "governance.power.aggregate.read",
                 "governance.population.aggregate.read",
             ],
             "data_scopes": context.data_scopes.model_copy(
@@ -77,6 +80,9 @@ def _full_governance_auth_context() -> models.AuthContext:
                     "datasets": [
                         "administrative_area",
                         "event",
+                        "enterprise",
+                        "governance_overview",
+                        "governance_power",
                         "housing",
                         "population",
                     ],
@@ -119,7 +125,9 @@ def _http_runtime_container(
 def test_production_http_registry_subset_matches_wired_capabilities() -> None:
     container = _http_runtime_container()
 
-    assert container.tool_registry.list_tool_ids() == list(PRODUCTION_HTTP_TOOL_IDS)
+    assert container.tool_registry.list_tool_ids() == sorted(
+        (*PRODUCTION_HTTP_TOOL_IDS, "knowledge.search")
+    )
 
 
 @pytest.mark.asyncio
@@ -146,10 +154,11 @@ async def test_production_context_advertises_wired_aggregate_tools() -> None:
         state=HarnessState(),
     )
 
-    assert [tool.tool_id for tool in request.tools] == list(PRODUCTION_HTTP_TOOL_IDS)
+    assert set(tool.tool_id for tool in request.tools) == set(PRODUCTION_HTTP_TOOL_IDS)
     prompt = request.messages[0].content
     assert "query_housing_metrics" in prompt
     assert "按租赁类型" in prompt
+    assert "room_use" in prompt
     assert "next_area" not in prompt
     housing_tool = next(
         tool
@@ -164,16 +173,20 @@ async def test_production_context_advertises_wired_aggregate_tools() -> None:
         ensure_ascii=False,
     )
     assert "query_event_metrics" in prompt
+    assert "事件总数月度趋势" in prompt
+    assert "不得表述为上报或处置趋势" in prompt
     assert "不支持按阈值筛选" in prompt
     assert "get_object_profile" not in prompt
     assert "base_room_lease" not in prompt
     assert "getNextSiteData" not in prompt
     assert "getRoomLeaseType" not in prompt
     housing_subject = container.semantic_stack.catalog.require_subject("housing")
-    assert housing_subject.max_group_by == 0
-    assert housing_subject.group_by_rules == ()
+    assert housing_subject.max_group_by == 1
+    assert [rule.value for rule in housing_subject.group_by_rules] == ["room_use"]
     assert [shape.shape_id for shape in housing_subject.result_shapes] == [
-        "housing_lease_type_table"
+        "housing_lease_type_table",
+        "housing_room_use_table",
+        "housing_stock_overview",
     ]
 
 
@@ -223,6 +236,43 @@ async def test_production_context_exposes_next_area_only_when_explicitly_enabled
     ).max_group_by == 1
 
 
+def test_production_event_category_defaults_closed(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.delenv("FULL_VIEW_EVENT_CATEGORY_ENABLED", raising=False)
+    container = _http_runtime_container()
+
+    assert container.tool_registry.event_category_enabled is False
+    assert "event_category" not in json.dumps(
+        container.tool_registry.get_input_schema(
+            "governance.query_event_metrics"
+        ),
+        ensure_ascii=False,
+    )
+    event = container.semantic_stack.catalog.require_subject("event")
+    assert [rule.value for rule in event.group_by_rules] == ["month"]
+
+
+def test_production_event_category_requires_explicit_enable(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("FULL_VIEW_EVENT_CATEGORY_ENABLED", "true")
+    container = _http_runtime_container()
+
+    assert container.tool_registry.event_category_enabled is True
+    assert "event_category" in json.dumps(
+        container.tool_registry.get_input_schema(
+            "governance.query_event_metrics"
+        ),
+        ensure_ascii=False,
+    )
+    event = container.semantic_stack.catalog.require_subject("event")
+    assert [rule.value for rule in event.group_by_rules] == [
+        "month",
+        "event_category",
+    ]
+
+
 def test_runtime_rejects_http_adapter_flag_mismatch() -> None:
     adapter = HttpGovernanceAdapter(
         base_url="http://legacy.test/geo-qxst",
@@ -241,7 +291,7 @@ def test_runtime_rejects_http_adapter_flag_mismatch() -> None:
 
 
 def test_prompt_only_lists_registered_and_authorized_capabilities() -> None:
-    assert FULL_VIEW_SYSTEM_PROMPT_VERSION == "full-view-governance-readonly-v15"
+    assert FULL_VIEW_SYSTEM_PROMPT_VERSION == "full-view-governance-readonly-v20"
 
     population_only = build_full_view_system_prompt(
         {}, tool_ids=("governance.query_population_metrics",)
@@ -384,6 +434,7 @@ def _housing_http_environment(
     bodies: dict[str, list[dict[str, list[str]]]],
     *,
     housing_next_area_enabled: bool = False,
+    event_category_enabled: bool = False,
 ) -> HttpEvalEnvironment:
     def handle(request: httpx.Request) -> httpx.Response:
         seen_paths.append(request.url.path)
@@ -407,6 +458,88 @@ def _housing_http_environment(
                 [
                     {"house_type": "住宅出租", "total": 32},
                     {"house_type": "商铺出租", "total": 8},
+                ]
+            )
+        if request.url.path == "/geo-qxst/api/getBuildingAndRoomTotal":
+            bodies.setdefault("housing_stock", []).append(
+                {
+                    key: request.url.params.get_list(key)
+                    for key in request.url.params
+                }
+            )
+            return _legacy_envelope(
+                {"buildingTotal": 128, "roomTotal": 4096}
+            )
+        if request.url.path == "/geo-qxst/room/getRoomUseAndAlone":
+            bodies.setdefault("room_use", []).append(
+                {
+                    key: request.url.params.get_list(key)
+                    for key in request.url.params
+                }
+            )
+            return _legacy_envelope(
+                [
+                    {"key": "10", "doc_count": 24},
+                    {"key": "20", "doc_count": 11},
+                ]
+            )
+        if request.url.path == "/geo-qxst/api/getEnterpriseTypeCount":
+            bodies.setdefault("enterprise_type", []).append(
+                {
+                    key: request.url.params.get_list(key)
+                    for key in request.url.params
+                }
+            )
+            return _legacy_envelope(
+                [
+                    {"enterprise_type": "10", "count": 18},
+                    {"enterprise_type": "20", "count": 7},
+                ]
+            )
+        if request.url.path == "/geo-qxst/api/getEnterpriseScale":
+            bodies.setdefault("enterprise_scale", []).append(
+                {
+                    key: request.url.params.get_list(key)
+                    for key in request.url.params
+                }
+            )
+            return _legacy_envelope(
+                [
+                    {
+                        "5人以下": 11,
+                        "5-10人": 7,
+                        "10-50人": 5,
+                        "50-100人": 3,
+                        "100人以上": 2,
+                    }
+                ]
+            )
+        if request.url.path == "/geo-qxst/dict/getDictValue":
+            dict_body = parse_qs(request.content.decode())
+            if "enterprise_type" in bodies:
+                bodies.setdefault("enterprise_type_dict", []).append(dict_body)
+            else:
+                bodies.setdefault("room_use_dict", []).append(dict_body)
+            return _legacy_envelope(
+                [
+                    {
+                        "room_user": [
+                            {"dicValue": "10", "dicName": "自住"},
+                            {"dicValue": "20", "dicName": "出租"},
+                        ]
+                    },
+                    {
+                        "enterprise_type": [
+                            {"dicValue": "10", "dicName": "有限责任公司"},
+                            {"dicValue": "20", "dicName": "股份有限公司"},
+                        ]
+                    },
+                    {
+                        "eventtype_code1": [
+                            {"dicValue": "01", "dicName": "社会治理"},
+                            {"dicValue": "02", "dicName": "公共安全"},
+                        ]
+                    },
                 ]
             )
         if request.url.path == "/geo-qxst/getNextSiteData":
@@ -435,6 +568,79 @@ def _housing_http_environment(
                     "streetFinishRate": "90%",
                 }
             )
+        if request.url.path == "/geo-qxst/api/getEventProperties":
+            bodies.setdefault("event_category", []).append(
+                {
+                    key: request.url.params.get_list(key)
+                    for key in request.url.params
+                }
+            )
+            return _legacy_envelope(
+                [
+                    {"key": "01", "doc_count": 12},
+                    {"key": "02", "doc_count": "7"},
+                ]
+            )
+        if request.url.path == "/geo-qxst/event/getEventCountByMonth":
+            bodies.setdefault("event_trend", []).append(
+                parse_qs(request.content.decode())
+            )
+            return _legacy_envelope(
+                [
+                    {"month": "2026-01", "total": 5},
+                    {"month": "2026-03", "total": "7"},
+                    {"month": "2026-04", "total": 4},
+                ]
+            )
+        if request.url.path == "/geo-qxst/base/getBaseTotal":
+            bodies.setdefault("governance_overview", []).append(
+                {
+                    key: request.url.params.get_list(key)
+                    for key in request.url.params
+                }
+            )
+            return _legacy_envelope(
+                {
+                    "personRelationNum": 80,
+                    "personTotal": 100,
+                    "houseRelationNum": 45,
+                    "houseTotal": 50,
+                    "enterpriseRelationNum": 18,
+                    "enterpriseTotal": 20,
+                    "eventRelationNum": 12,
+                    "eventTotal": 15,
+                    "matterRelationNum": 8,
+                    "matterTotal": 10,
+                }
+            )
+        if request.url.path == "/geo-qxst/api/getGovernancePower":
+            bodies.setdefault("governance_power", []).append(
+                {
+                    key: request.url.params.get_list(key)
+                    for key in request.url.params
+                }
+            )
+            return _legacy_envelope(
+                [
+                    {"type": "roomNum", "count": 1200},
+                    {"type": "10", "count": 24},
+                    {"type": "11", "count": 8},
+                    {"type": "12", "count": 48},
+                    {"type": "13", "count": 16},
+                    {"type": "nGridSum", "count": 6},
+                    {"type": "gridUnitSum", "count": 180},
+                ]
+            )
+        if request.url.path == "/geo-qxst/enterprise/getNextEnterprise":
+            bodies.setdefault("enterprise", []).append(
+                parse_qs(request.content.decode())
+            )
+            return _legacy_envelope(
+                [
+                    {"areaCode": "330106001", "areaName": "翠苑街道", "total": 31},
+                    {"areaCode": "330106002", "areaName": "北山街道", "total": 18},
+                ]
+            )
         raise AssertionError(f"unexpected path: {request.url.path}")
 
     client = httpx.AsyncClient(transport=httpx.MockTransport(handle))
@@ -445,6 +651,7 @@ def _housing_http_environment(
         p0_allowed_user_ids={"legacy-user-1"},
         client=client,
         housing_next_area_enabled=housing_next_area_enabled,
+        event_category_enabled=event_category_enabled,
     )
 
 
@@ -530,6 +737,98 @@ async def test_production_wiring_housing_next_area_over_http(
 
 
 @pytest.mark.asyncio
+async def test_production_wiring_housing_room_use_over_http(
+    production_orchestrator: str,
+) -> None:
+    seen_paths: list[str] = []
+    bodies: dict[str, list[dict[str, list[str]]]] = {}
+    environment = _housing_http_environment(seen_paths, bodies)
+    case = load_eval_case(EVAL_CASES / "planning-housing-room-use-http-success.yaml")
+
+    trace = await EvalRunner(
+        environment=environment,
+        orchestrator=production_orchestrator,
+    ).run(case)
+
+    assert trace.passed is True
+    assert trace.terminal_status == "completed"
+    assert seen_paths == [
+        "/getUserByToken",
+        "/geo-qxst/area/getAreaInfoByAreaName",
+        "/geo-qxst/room/getRoomUseAndAlone",
+        "/geo-qxst/dict/getDictValue",
+    ]
+    assert bodies["room_use"][0] == {
+        "areaName": ["county_code"],
+        "areaCode": ["330106"],
+    }
+    assert bodies["room_use_dict"][0] == {}
+    assert trace.tool_ids == [
+        "governance.resolve_area",
+        "governance.semantic_query",
+    ]
+    assert len(trace.evidence_ids) >= 2
+    serialized = trace.model_dump_json()
+    assert "test-geo-token" not in serialized
+    assert "getRoomUseAndAlone" not in str(trace.model_requests)
+    room_use_requests = [
+        summary
+        for summary in trace.outbound_requests
+        if summary.path == "/geo-qxst/room/getRoomUseAndAlone"
+    ]
+    assert [
+        (summary.method, summary.path, summary.count)
+        for summary in room_use_requests
+    ] == [("POST", "/geo-qxst/room/getRoomUseAndAlone", 1)]
+
+
+@pytest.mark.asyncio
+async def test_production_wiring_housing_stock_over_http(
+    production_orchestrator: str,
+) -> None:
+    seen_paths: list[str] = []
+    bodies: dict[str, list[dict[str, list[str]]]] = {}
+    environment = _housing_http_environment(seen_paths, bodies)
+    case = load_eval_case(EVAL_CASES / "planning-housing-stock-http-success.yaml")
+
+    trace = await EvalRunner(
+        environment=environment,
+        orchestrator=production_orchestrator,
+    ).run(case)
+
+    assert trace.passed is True
+    assert trace.terminal_status == "completed"
+    assert seen_paths == [
+        "/getUserByToken",
+        "/geo-qxst/area/getAreaInfoByAreaName",
+        "/geo-qxst/api/getBuildingAndRoomTotal",
+    ]
+    assert bodies["housing_stock"] == [
+        {
+            "areaCodeName": ["county_code"],
+            "areaCodeValue": ["330106"],
+        }
+    ]
+    assert trace.tool_ids == [
+        "governance.resolve_area",
+        "governance.semantic_query",
+    ]
+    assert len(trace.evidence_ids) >= 2
+    serialized = trace.model_dump_json()
+    assert "test-geo-token" not in serialized
+    assert "getBuildingAndRoomTotal" not in str(trace.model_requests)
+    stock_requests = [
+        summary
+        for summary in trace.outbound_requests
+        if summary.path == "/geo-qxst/api/getBuildingAndRoomTotal"
+    ]
+    assert [
+        (summary.method, summary.path, summary.count)
+        for summary in stock_requests
+    ] == [("GET", "/geo-qxst/api/getBuildingAndRoomTotal", 1)]
+
+
+@pytest.mark.asyncio
 async def test_production_wiring_event_finish_rate_over_http(
     production_orchestrator: str,
 ) -> None:
@@ -572,6 +871,96 @@ async def test_production_wiring_event_finish_rate_over_http(
 
 
 @pytest.mark.asyncio
+async def test_production_wiring_event_monthly_total_trend_over_http(
+    production_orchestrator: str,
+) -> None:
+    seen_paths: list[str] = []
+    bodies: dict[str, list[dict[str, list[str]]]] = {}
+    environment = _housing_http_environment(seen_paths, bodies)
+    case = load_eval_case(
+        EVAL_CASES / "planning-event-trend-http-success.yaml"
+    )
+
+    trace = await EvalRunner(
+        environment=environment,
+        orchestrator=production_orchestrator,
+    ).run(case)
+
+    assert trace.passed is True
+    assert trace.terminal_status == "completed"
+    assert seen_paths == [
+        "/getUserByToken",
+        "/geo-qxst/area/getAreaInfoByAreaName",
+        "/geo-qxst/event/getEventCountByMonth",
+    ]
+    assert bodies["event_trend"] == [
+        {
+            "areaName": ["county_code"],
+            "areaCode": ["330106"],
+            "startDate": ["2026-01-01"],
+            "endDate": ["2026-04-30"],
+        }
+    ]
+    assert trace.tool_ids == [
+        "governance.resolve_area",
+        "governance.semantic_query",
+    ]
+    assert len(trace.evidence_ids) >= 2
+    serialized = trace.model_dump_json()
+    assert "test-geo-token" not in serialized
+    assert "getEventCountByMonth" not in str(trace.model_requests)
+    trend_requests = [
+        summary
+        for summary in trace.outbound_requests
+        if summary.path == "/geo-qxst/event/getEventCountByMonth"
+    ]
+    assert [
+        (summary.method, summary.path, summary.count)
+        for summary in trend_requests
+    ] == [("POST", "/geo-qxst/event/getEventCountByMonth", 1)]
+
+
+@pytest.mark.asyncio
+async def test_production_wiring_event_category_over_http(
+    production_orchestrator: str,
+) -> None:
+    seen_paths: list[str] = []
+    bodies: dict[str, list[dict[str, list[str]]]] = {}
+    environment = _housing_http_environment(
+        seen_paths,
+        bodies,
+        event_category_enabled=True,
+    )
+    case = load_eval_case(
+        EVAL_CASES.parent
+        / "cases-feature-gated"
+        / "planning-event-category-http-success.yaml"
+    )
+
+    trace = await EvalRunner(
+        environment=environment,
+        orchestrator=production_orchestrator,
+    ).run(case)
+
+    assert trace.passed is True
+    assert seen_paths == [
+        "/getUserByToken",
+        "/geo-qxst/area/getAreaInfoByAreaName",
+        "/geo-qxst/api/getEventProperties",
+        "/geo-qxst/dict/getDictValue",
+    ]
+    assert bodies["event_category"] == [
+        {
+            "areaCodeName": ["county_code"],
+            "areaCodeValue": ["330106"],
+            "eventType": ["eventtype_code1"],
+        }
+    ]
+    assert len(trace.evidence_ids) >= 2
+    assert "test-geo-token" not in trace.model_dump_json()
+
+
+@pytest.mark.asyncio
 async def test_production_wiring_population_resolve_and_query_over_http(
     production_orchestrator: str,
 ) -> None:
@@ -610,6 +999,226 @@ async def test_production_wiring_population_resolve_and_query_over_http(
         summary.path == "/geo-qxst/getNextSiteData"
         for summary in trace.outbound_requests
     )
+
+
+@pytest.mark.asyncio
+async def test_production_wiring_governance_overview_over_http(
+    production_orchestrator: str,
+) -> None:
+    seen_paths: list[str] = []
+    bodies: dict[str, list[dict[str, list[str]]]] = {}
+    environment = _housing_http_environment(seen_paths, bodies)
+    case = load_eval_case(
+        EVAL_CASES / "planning-governance-overview-http-success.yaml"
+    )
+
+    trace = await EvalRunner(
+        environment=environment,
+        orchestrator=production_orchestrator,
+    ).run(case)
+
+    assert trace.passed is True
+    assert trace.terminal_status == "completed"
+    assert seen_paths == [
+        "/getUserByToken",
+        "/geo-qxst/area/getAreaInfoByAreaName",
+        "/geo-qxst/base/getBaseTotal",
+    ]
+    assert bodies["governance_overview"][0] == {
+        "areaName": ["county_code"],
+        "areaCode": ["330106"],
+        "dataBaseType": ["2"],
+    }
+    assert trace.tool_ids == [
+        "governance.resolve_area",
+        "governance.semantic_query",
+    ]
+    assert len(trace.evidence_ids) >= 2
+    serialized = trace.model_dump_json()
+    assert "test-geo-token" not in serialized
+    overview_requests = [
+        summary
+        for summary in trace.outbound_requests
+        if summary.path == "/geo-qxst/base/getBaseTotal"
+    ]
+    assert [
+        (summary.method, summary.path, summary.count)
+        for summary in overview_requests
+    ] == [("GET", "/geo-qxst/base/getBaseTotal", 1)]
+
+
+@pytest.mark.asyncio
+async def test_production_wiring_governance_power_over_http(
+    production_orchestrator: str,
+) -> None:
+    seen_paths: list[str] = []
+    bodies: dict[str, list[dict[str, list[str]]]] = {}
+    environment = _housing_http_environment(seen_paths, bodies)
+    case = load_eval_case(
+        EVAL_CASES / "planning-governance-power-http-success.yaml"
+    )
+
+    trace = await EvalRunner(
+        environment=environment,
+        orchestrator=production_orchestrator,
+    ).run(case)
+
+    assert trace.passed is True
+    assert trace.terminal_status == "completed"
+    assert seen_paths == [
+        "/getUserByToken",
+        "/geo-qxst/area/getAreaInfoByAreaName",
+        "/geo-qxst/api/getGovernancePower",
+    ]
+    assert bodies["governance_power"] == [
+        {
+            "areaCodeName": ["county_code"],
+            "areaCodeValue": ["330106"],
+        }
+    ]
+    assert trace.tool_ids == [
+        "governance.resolve_area",
+        "governance.semantic_query",
+    ]
+    assert len(trace.evidence_ids) >= 2
+    assert "result.available" in trace.event_types
+    assert "evidence.available" in trace.event_types
+    assert "test-geo-token" not in trace.model_dump_json()
+    requests = [
+        summary
+        for summary in trace.outbound_requests
+        if summary.path == "/geo-qxst/api/getGovernancePower"
+    ]
+    assert [(item.method, item.path, item.count) for item in requests] == [
+        ("GET", "/geo-qxst/api/getGovernancePower", 1)
+    ]
+
+
+@pytest.mark.asyncio
+async def test_production_wiring_enterprise_metrics_over_http(
+    production_orchestrator: str,
+) -> None:
+    seen_paths: list[str] = []
+    bodies: dict[str, list[dict[str, list[str]]]] = {}
+    environment = _housing_http_environment(seen_paths, bodies)
+    case = load_eval_case(EVAL_CASES / "planning-enterprise-http-success.yaml")
+
+    trace = await EvalRunner(
+        environment=environment,
+        orchestrator=production_orchestrator,
+    ).run(case)
+
+    assert trace.passed is True
+    assert trace.terminal_status == "completed"
+    assert seen_paths == [
+        "/getUserByToken",
+        "/geo-qxst/area/getAreaInfoByAreaName",
+        "/geo-qxst/enterprise/getNextEnterprise",
+    ]
+    assert bodies["enterprise"][0] == {
+        "areaCode": ["330106"],
+        "areaName": ["county_code"],
+    }
+    assert trace.tool_ids == [
+        "governance.resolve_area",
+        "governance.semantic_query",
+    ]
+    assert len(trace.evidence_ids) >= 2
+    assert "test-geo-token" not in trace.model_dump_json()
+
+
+@pytest.mark.asyncio
+async def test_production_wiring_enterprise_type_over_http(
+    production_orchestrator: str,
+) -> None:
+    seen_paths: list[str] = []
+    bodies: dict[str, list[dict[str, list[str]]]] = {}
+    environment = _housing_http_environment(seen_paths, bodies)
+    case = load_eval_case(
+        EVAL_CASES / "planning-enterprise-type-http-success.yaml"
+    )
+
+    trace = await EvalRunner(
+        environment=environment,
+        orchestrator=production_orchestrator,
+    ).run(case)
+
+    assert trace.passed is True
+    assert trace.terminal_status == "completed"
+    assert seen_paths == [
+        "/getUserByToken",
+        "/geo-qxst/area/getAreaInfoByAreaName",
+        "/geo-qxst/api/getEnterpriseTypeCount",
+        "/geo-qxst/dict/getDictValue",
+    ]
+    assert bodies["enterprise_type"][0] == {
+        "areaCodeName": ["county_code"],
+        "areaCodeValue": ["330106"],
+        "typeColumn": ["enterprise_type"],
+    }
+    assert bodies["enterprise_type_dict"][0] == {}
+    assert trace.tool_ids == [
+        "governance.resolve_area",
+        "governance.semantic_query",
+    ]
+    assert len(trace.evidence_ids) >= 2
+    serialized = trace.model_dump_json()
+    assert "test-geo-token" not in serialized
+    assert "getEnterpriseTypeCount" not in str(trace.model_requests)
+    enterprise_type_requests = [
+        summary
+        for summary in trace.outbound_requests
+        if summary.path == "/geo-qxst/api/getEnterpriseTypeCount"
+    ]
+    assert [
+        (summary.method, summary.path, summary.count)
+        for summary in enterprise_type_requests
+    ] == [("GET", "/geo-qxst/api/getEnterpriseTypeCount", 1)]
+
+
+@pytest.mark.asyncio
+async def test_production_wiring_enterprise_scale_over_http(
+    production_orchestrator: str,
+) -> None:
+    seen_paths: list[str] = []
+    bodies: dict[str, list[dict[str, list[str]]]] = {}
+    environment = _housing_http_environment(seen_paths, bodies)
+    case = load_eval_case(
+        EVAL_CASES / "planning-enterprise-scale-http-success.yaml"
+    )
+
+    trace = await EvalRunner(
+        environment=environment,
+        orchestrator=production_orchestrator,
+    ).run(case)
+
+    assert trace.passed is True
+    assert trace.terminal_status == "completed"
+    assert seen_paths == [
+        "/getUserByToken",
+        "/geo-qxst/area/getAreaInfoByAreaName",
+        "/geo-qxst/api/getEnterpriseScale",
+    ]
+    assert bodies["enterprise_scale"][0] == {
+        "areaCodeName": ["county_code"],
+        "areaCodeValue": ["330106"],
+    }
+    assert trace.tool_ids == [
+        "governance.resolve_area",
+        "governance.semantic_query",
+    ]
+    assert len(trace.evidence_ids) >= 2
+    serialized = trace.model_dump_json()
+    assert "test-geo-token" not in serialized
+    assert "getEnterpriseScale" not in str(trace.model_requests)
+    requests = [
+        summary
+        for summary in trace.outbound_requests
+        if summary.path == "/geo-qxst/api/getEnterpriseScale"
+    ]
+    assert [(item.method, item.path, item.count) for item in requests] == [
+        ("GET", "/geo-qxst/api/getEnterpriseScale", 1)
+    ]
 
 
 # ---------------------------------------------------------------------------

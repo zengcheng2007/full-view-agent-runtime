@@ -37,6 +37,7 @@ def test_redis_event_notifier_exposes_publish_wait_and_close_contract() -> None:
 
 
 @pytest.mark.asyncio
+@pytest.mark.redis
 async def test_redis_notifier_wakes_a_different_instance() -> None:
     import asyncio
 

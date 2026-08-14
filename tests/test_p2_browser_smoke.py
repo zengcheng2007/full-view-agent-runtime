@@ -148,6 +148,76 @@ class TestCapabilityCenterPermissions:
         assert response.status_code == 200
 
     @pytest.mark.asyncio
+    async def test_independent_console_can_authenticate_with_bearer_token(self):
+        from unittest.mock import AsyncMock
+
+        from full_view_agent.domain.models import LegacyIdentitySnapshot, Principal
+
+        runtime = RuntimeContainer(credentials=InMemoryCredentialBroker())
+        identity = LegacyIdentitySnapshot(
+            principal=Principal(
+                tenant_id="platform",
+                user_id="capability-admin",
+                org_id="platform-admins",
+                roles=["admin"],
+            ),
+            source="capability-console",
+            source_session_expires_at=__import__("datetime").datetime.now(
+                __import__("datetime").timezone.utc
+            )
+            + __import__("datetime").timedelta(hours=1),
+            base_area_codes=[],
+        )
+        runtime.capability_identity_port = AsyncMock()
+        runtime.capability_identity_port.resolve = AsyncMock(return_value=identity)
+        app = create_app(runtime=runtime)
+
+        async with AsyncClient(
+            transport=ASGITransport(app=app),
+            base_url="http://test",
+            headers={"Authorization": "Bearer capability-console-token"},
+        ) as client:
+            response = await client.get("/capability-api/v1/connectors")
+
+        assert response.status_code == 200
+        runtime.capability_identity_port.resolve.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    async def test_admin_can_list_registered_applications(self, admin_client):
+        response = await admin_client.get("/capability-api/v1/applications")
+
+        assert response.status_code == 200
+        payload = response.json()
+        assert [item["app_id"] for item in payload["data"]] == [
+            "full_information_view",
+            "unified_address",
+        ]
+
+    @pytest.mark.asyncio
+    async def test_regular_user_cannot_list_platform_applications(self, user_client):
+        response = await user_client.get("/capability-api/v1/applications")
+
+        assert response.status_code == 403
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        "path",
+        [
+            "/capability-api/v1/tools",
+            "/capability-api/v1/skills",
+            "/capability-api/v1/workflows",
+            "/capability-api/v1/connectors",
+            "/capability-api/v1/runtime/tools",
+        ],
+    )
+    async def test_regular_business_user_cannot_read_control_plane_metadata(
+        self, user_client, path
+    ):
+        response = await user_client.get(path)
+
+        assert response.status_code == 403
+
+    @pytest.mark.asyncio
     async def test_admin_can_create_connector(self, admin_client, monkeypatch):
         """Admin can create connectors (write operation)."""
         # Mock DNS resolution to avoid real network calls
@@ -191,11 +261,10 @@ class TestCapabilityCenterPermissions:
         assert response.status_code in (401, 403)
 
     @pytest.mark.asyncio
-    async def test_user_can_read_connectors(self, user_client):
-        """Regular user can read connectors (least privilege)."""
+    async def test_business_user_cannot_read_connector_topology(self, user_client):
+        """Connector endpoints and credential refs belong to the control plane."""
         response = await user_client.get("/capability-api/v1/connectors")
-        # Read operations should work for regular users
-        assert response.status_code == 200
+        assert response.status_code in (401, 403)
 
     @pytest.mark.asyncio
     async def test_admin_can_create_tool(self, admin_client, monkeypatch):
@@ -234,6 +303,7 @@ class TestCapabilityCenterPermissions:
                 "resource_path": "/api/v1/query",
                 "http_method": "GET",
                 "required_permissions": ["test.read"],
+                "dataset_ids": ["test_dataset"],
             },
         )
         assert response.status_code in (200, 201)
@@ -251,6 +321,7 @@ class TestCapabilityCenterPermissions:
                 "connector_ref": "test.api",
                 "resource_path": "/api/v1/query",
                 "http_method": "GET",
+                "dataset_ids": ["test_dataset"],
             },
         )
         assert response.status_code in (401, 403)
@@ -268,6 +339,80 @@ class TestCapabilityCenterPermissions:
             },
         )
         assert response.status_code in (200, 201)
+
+    @pytest.mark.asyncio
+    async def test_admin_can_see_effective_environment_model(
+        self, admin_client, monkeypatch
+    ):
+        monkeypatch.setenv("FULL_VIEW_MODEL_PROVIDER", "openai_compatible")
+        monkeypatch.setenv("FULL_VIEW_MODEL_BASE_URL", "https://model.example/v1")
+        monkeypatch.setenv("FULL_VIEW_MODEL_NAME", "deepseek-v4-flash-0731")
+        monkeypatch.setenv("FULL_VIEW_MODEL_TIMEOUT_SECONDS", "60")
+        monkeypatch.setenv("FULL_VIEW_MODEL_MAX_OUTPUT_TOKENS", "131072")
+        monkeypatch.setenv("FULL_VIEW_MODEL_MAX_RETRIES", "1")
+
+        response = await admin_client.get(
+            "/capability-api/v1/model-configs/effective"
+        )
+
+        assert response.status_code == 200
+        assert response.json()["data"] == {
+            "source": "environment",
+            "config_id": None,
+            "name": "环境变量配置",
+            "api_base_url": "https://model.example/v1",
+            "model_name": "deepseek-v4-flash-0731",
+            "protocol": "openai_compatible",
+            "timeout_seconds": 60,
+            "max_output_tokens": 128000,
+            "max_retries": 1,
+        }
+
+    @pytest.mark.asyncio
+    async def test_admin_can_import_environment_model_without_key_roundtrip(
+        self, admin_client, monkeypatch
+    ):
+        monkeypatch.setenv("FULL_VIEW_MODEL_PROVIDER", "openai_compatible")
+        monkeypatch.setenv("FULL_VIEW_MODEL_BASE_URL", "https://model.example/v1")
+        monkeypatch.setenv("FULL_VIEW_MODEL_NAME", "deepseek-v4-flash-0731")
+        monkeypatch.setenv("FULL_VIEW_MODEL_API_KEY", "server-only-secret")
+        monkeypatch.setenv("FULL_VIEW_MODEL_MAX_OUTPUT_TOKENS", "131072")
+
+        response = await admin_client.post(
+            "/capability-api/v1/model-configs/import-effective",
+            json={"name": "当前环境模型", "notes": "测试纳管"},
+        )
+
+        assert response.status_code == 201
+        data = response.json()["data"]
+        assert data["is_enabled"] is True
+        assert data["model_name"] == "deepseek-v4-flash-0731"
+        assert data["max_output_tokens"] == 128000
+        assert "server-only-secret" not in response.text
+        effective = await admin_client.get(
+            "/capability-api/v1/model-configs/effective"
+        )
+        assert effective.json()["data"]["source"] == "database"
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("invalid_value", ["not-an-integer", "0", "-1"])
+    async def test_import_environment_model_rejects_invalid_token_limit_cleanly(
+        self, admin_client, monkeypatch, invalid_value
+    ):
+        monkeypatch.setenv("FULL_VIEW_MODEL_PROVIDER", "openai_compatible")
+        monkeypatch.setenv("FULL_VIEW_MODEL_BASE_URL", "https://model.example/v1")
+        monkeypatch.setenv("FULL_VIEW_MODEL_NAME", "deepseek-v4-flash-0731")
+        monkeypatch.setenv("FULL_VIEW_MODEL_API_KEY", "server-only-secret")
+        monkeypatch.setenv("FULL_VIEW_MODEL_MAX_OUTPUT_TOKENS", invalid_value)
+
+        response = await admin_client.post(
+            "/capability-api/v1/model-configs/import-effective",
+            json={"name": "invalid environment model"},
+        )
+
+        assert response.status_code == 409, response.text
+        assert "FULL_VIEW_MODEL_MAX_OUTPUT_TOKENS" in response.text
+        assert "server-only-secret" not in response.text
 
     @pytest.mark.asyncio
     async def test_user_cannot_manage_model_configs(self, user_client):
@@ -304,3 +449,4 @@ class TestCapabilityCenterPermissions:
             f"/capability-api/v1/model-configs/{config_id}/enable"
         )
         assert response.status_code == 200
+        assert response.json()["data"] == {"status": "ok"}

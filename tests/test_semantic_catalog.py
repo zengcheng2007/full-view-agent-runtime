@@ -22,7 +22,7 @@ from full_view_agent.domain.models import (
 )
 from full_view_agent.infrastructure.governance_adapter import (
     _validate_housing_next_area_query,
-    _validate_solitary_elderly_query,
+    _validate_population_query,
 )
 from full_view_agent.semantic import (
     CapabilityBinding,
@@ -69,7 +69,10 @@ FULL_AUTH = SubjectAuthorization(
 def catalog() -> SemanticCatalog:
     # 本 fixture 验证完整已部署能力；next_area 必须显式开启，避免测试
     # 无意中改变生产默认门禁。
-    return SemanticCatalog.default(housing_next_area_enabled=True)
+    return SemanticCatalog.default(
+        housing_next_area_enabled=True,
+        event_category_enabled=True,
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -77,10 +80,17 @@ def catalog() -> SemanticCatalog:
 # ---------------------------------------------------------------------------
 
 
-def test_catalog_declares_exactly_the_three_verified_subjects(
+def test_catalog_declares_exactly_the_verified_subjects(
     catalog: SemanticCatalog,
 ) -> None:
-    assert sorted(catalog.subject_ids()) == ["event", "housing", "population"]
+    assert sorted(catalog.subject_ids()) == [
+        "enterprise",
+        "event",
+        "governance_overview",
+        "governance_power",
+        "housing",
+        "population",
+    ]
     assert catalog.catalog_version.endswith("-s0-candidate")
     assert catalog.supported_spec_versions == ("s0.1",)
 
@@ -96,14 +106,17 @@ def test_population_only_declares_verified_capabilities(
     assert person_category.operators == ("eq",)
     assert person_category.allowed_values == ("solitary_elderly",)
     assert {rule.value for rule in subject.group_by_rules} == {
+        "district",
+        "descendant_street",
+        "descendant_community",
         "street",
         "community",
         "grid",
     }
-    assert subject.scope_levels == (6, 9, 12)
+    assert subject.scope_levels == (4, 6, 9, 12)
     assert subject.min_group_by == 1
     assert subject.max_group_by == 1
-    assert subject.supports_order_by is False
+    assert subject.supports_order_by is True
     assert subject.supports_time_range is False
     assert subject.output_forms == ("table", "choropleth")
     # 旧草稿提前宣称的 gender/age_band/age 能力不得出现。
@@ -113,15 +126,21 @@ def test_population_only_declares_verified_capabilities(
     assert '"age"' not in serialized
 
 
-def test_housing_only_declares_lease_summary_and_next_area(
+def test_housing_declares_lease_room_use_and_next_area(
     catalog: SemanticCatalog,
 ) -> None:
     subject = catalog.require_subject("housing")
 
     assert subject.filters == ()
-    assert [rule.value for rule in subject.group_by_rules] == ["next_area"]
-    next_area = subject.group_by_rules[0]
+    assert [rule.value for rule in subject.group_by_rules] == [
+        "room_use",
+        "next_area",
+        "descendant_street",
+    ]
+    room_use, next_area, descendant_street = subject.group_by_rules
+    assert room_use.allowed_scope_levels == (4, 6, 9, 12, 15)
     assert next_area.allowed_scope_levels == (4, 6, 9, 12)
+    assert descendant_street.allowed_scope_levels == (4,)
     assert subject.min_group_by == 0
     assert subject.max_group_by == 1
     assert subject.supports_time_range is False
@@ -130,6 +149,8 @@ def test_housing_only_declares_lease_summary_and_next_area(
     assert refs == {
         "schema://data/housing-lease-type-table/1.0.0",
         "schema://data/housing-area-group-table/1.0.0",
+        "schema://data/housing-room-use-table/1.0.0",
+        "schema://data/housing-stock-overview/1.0.0",
     }
 
 
@@ -137,26 +158,98 @@ def test_default_catalog_keeps_housing_next_area_gate_closed() -> None:
     catalog = SemanticCatalog.default()
     housing = catalog.require_subject("housing")
 
-    assert housing.group_by_rules == ()
-    assert housing.max_group_by == 0
+    assert [rule.value for rule in housing.group_by_rules] == ["room_use"]
+    assert housing.max_group_by == 1
     assert [shape.shape_id for shape in housing.result_shapes] == [
-        "housing_lease_type_table"
+        "housing_lease_type_table",
+        "housing_room_use_table",
+        "housing_stock_overview",
     ]
 
 
-def test_event_only_declares_three_level_finish_rate_snapshot(
+def test_event_declares_verified_snapshot_trend_and_category_shapes(
     catalog: SemanticCatalog,
 ) -> None:
     subject = catalog.require_subject("event")
 
-    assert [metric.metric_id for metric in subject.metrics] == ["finish_rate"]
+    assert [metric.metric_id for metric in subject.metrics] == [
+        "finish_rate",
+        "event_count",
+    ]
+    assert [rule.value for rule in subject.group_by_rules] == [
+        "month",
+        "event_category",
+    ]
+    assert subject.filters == ()
+    assert subject.max_group_by == 1
+    assert subject.supports_time_range is True
+    assert subject.output_forms == ("table",)
+    assert [shape.data_schema_ref for shape in subject.result_shapes] == [
+        "schema://data/event-finish-rate-table/1.0.0",
+        "schema://data/event-trend-table/1.0.0",
+        "schema://data/event-category-table/1.0.0",
+    ]
+
+
+def test_enterprise_declares_verified_area_and_type_aggregations() -> None:
+    subject = SemanticCatalog.default().require_subject("enterprise")
+
+    assert [metric.metric_id for metric in subject.metrics] == ["enterprise_count"]
+    assert [rule.value for rule in subject.group_by_rules] == [
+        "next_area",
+        "enterprise_type",
+        "enterprise_scale",
+        "industry_name",
+    ]
+    assert subject.group_by_rules[0].allowed_scope_levels == (4, 6, 9, 12)
+    assert subject.group_by_rules[1].allowed_scope_levels == (4, 6, 9, 12, 15)
+    assert subject.group_by_rules[2].allowed_scope_levels == (4, 6, 9, 12, 15)
+    assert subject.min_group_by == 1
+    assert subject.max_group_by == 1
+    assert subject.filters == ()
+    assert subject.output_forms == ("table", "choropleth")
+    assert subject.include_in_analysis_overview is False
+
+
+def test_governance_overview_declares_only_verified_snapshot() -> None:
+    subject = SemanticCatalog.default().require_subject("governance_overview")
+
+    assert [metric.metric_id for metric in subject.metrics] == [
+        "governance_coverage_overview"
+    ]
     assert subject.group_by_rules == ()
     assert subject.filters == ()
     assert subject.max_group_by == 0
     assert subject.supports_time_range is False
-    assert subject.output_forms == ("table",)
+    assert subject.output_forms == ("table", "metric_card")
+    assert subject.include_in_analysis_overview is False
     assert [shape.data_schema_ref for shape in subject.result_shapes] == [
-        "schema://data/event-finish-rate-table/1.0.0"
+        "schema://data/governance-overview-table/1.0.0"
+    ]
+
+
+def test_governance_power_declares_aggregate_only_contract() -> None:
+    subject = SemanticCatalog.default().require_subject("governance_power")
+
+    assert [metric.metric_id for metric in subject.metrics] == [
+        "governance_power_count"
+    ]
+    assert subject.group_by_rules == ()
+    assert subject.filters == ()
+    assert subject.max_group_by == 0
+    assert subject.required_user_terms == ("治理力量", "网格力量")
+    assert subject.output_forms == ("table",)
+    assert subject.include_in_analysis_overview is False
+    assert [shape.data_schema_ref for shape in subject.result_shapes] == [
+        "schema://data/governance-power-metric-table/1.0.0"
+    ]
+
+
+def test_analysis_overview_excludes_cross_domain_snapshot_subject() -> None:
+    assert SemanticCatalog.default().analysis_overview_subject_ids() == [
+        "event",
+        "housing",
+        "population",
     ]
 
 
@@ -166,7 +259,7 @@ def test_result_schemas_are_distinct_per_subject(catalog: SemanticCatalog) -> No
         for subject_id in catalog.subject_ids()
         for shape in catalog.require_subject(subject_id).result_shapes
     }
-    assert len(refs) == 4
+    assert len(refs) == 15
 
 
 # ---------------------------------------------------------------------------
@@ -177,9 +270,16 @@ def test_result_schemas_are_distinct_per_subject(catalog: SemanticCatalog) -> No
 def test_bindable_subject_ids_derive_from_capability_bindings(
     catalog: SemanticCatalog,
 ) -> None:
-    # 三个主题均存在已验证能力绑定 → 均可进入语义入口解析链路。
+    # 所有主题均存在已验证能力绑定 → 均可进入语义入口解析链路。
     assert catalog.bindable_subject_ids() == frozenset(
-        {"event", "housing", "population"}
+        {
+            "enterprise",
+            "event",
+            "governance_overview",
+            "governance_power",
+            "housing",
+            "population",
+        }
     )
 
 
@@ -201,8 +301,10 @@ def test_gate_closed_housing_stays_bindable_without_next_area() -> None:
     # 住房区域自身租赁汇总仍是已验证能力，主题保持在可执行集合内。
     gated = SemanticCatalog.default(housing_next_area_enabled=False)
     assert "housing" in gated.bindable_subject_ids()
-    assert gated.require_subject("housing").group_by_rules == ()
-    assert gated.require_subject("housing").max_group_by == 0
+    assert [
+        rule.value for rule in gated.require_subject("housing").group_by_rules
+    ] == ["room_use"]
+    assert gated.require_subject("housing").max_group_by == 1
 
 
 # ---------------------------------------------------------------------------
@@ -356,8 +458,11 @@ def test_model_view_exposes_scope_levels_and_group_by_levels(
     by_id = {subject.subject_id: subject for subject in view.subjects}
 
     population = by_id["population"]
-    assert population.scope_levels == (6, 9, 12)
+    assert population.scope_levels == (4, 6, 9, 12)
     assert {rule.value: rule.allowed_scope_levels for rule in population.group_by} == {
+        "district": (4,),
+        "descendant_street": (4,),
+        "descendant_community": (4,),
         "street": (6,),
         "community": (9,),
         "grid": (12,),
@@ -366,11 +471,18 @@ def test_model_view_exposes_scope_levels_and_group_by_levels(
     housing = by_id["housing"]
     assert housing.scope_levels == (4, 6, 9, 12, 15)
     assert {rule.value: rule.allowed_scope_levels for rule in housing.group_by} == {
+        "room_use": (4, 6, 9, 12, 15),
         "next_area": (4, 6, 9, 12),
+        "descendant_street": (4,),
     }
 
     assert by_id["event"].scope_levels == (4, 6, 9, 12, 15)
-    assert by_id["event"].group_by == ()
+    assert {
+        rule.value: rule.allowed_scope_levels for rule in by_id["event"].group_by
+    } == {
+        "month": (4, 6, 9, 12, 15),
+        "event_category": (4, 6, 9, 12, 15),
+    }
 
 
 def test_model_view_exposes_safe_catalog_derived_result_grains(
@@ -383,19 +495,46 @@ def test_model_view_exposes_safe_catalog_derived_result_grains(
 
     assert [rule.model_dump(mode="json") for rule in housing.group_by] == [
         {
+            "value": "room_use",
+            "label": "户室用途",
+            "allowed_scope_levels": [4, 6, 9, 12, 15],
+        },
+        {
             "value": "next_area",
             "label": "直接下级区划",
             "allowed_scope_levels": [4, 6, 9, 12],
-        }
+        },
+        {
+            "value": "descendant_street",
+            "label": "全市所有街道",
+            "allowed_scope_levels": [4],
+        },
     ]
     assert [shape.model_dump(mode="json") for shape in housing.result_shapes] == [
         {
             "group_by_selection": [],
+            "metric_selection": ["dwelling_count"],
             "grain_label": "按租赁类型汇总",
         },
         {
             "group_by_selection": ["next_area"],
-            "grain_label": "按直接下级区划汇总",
+            "metric_selection": ["dwelling_count"],
+            "grain_label": "按直接下级区划汇总（结果按出租房数量从高到低返回）",
+        },
+        {
+            "group_by_selection": ["descendant_street"],
+            "metric_selection": ["dwelling_count"],
+            "grain_label": "全市所有街道汇总（按出租房数量从高到低返回）",
+        },
+        {
+            "group_by_selection": ["room_use"],
+            "metric_selection": ["dwelling_count"],
+            "grain_label": "按户室用途分类汇总",
+        },
+        {
+            "group_by_selection": [],
+            "metric_selection": ["building_count", "room_count"],
+            "grain_label": "区域房屋存量总览（楼幢总数与户室总数）",
         },
     ]
 
@@ -450,10 +589,11 @@ def test_display_only_grain_label_does_not_change_execution_fingerprint() -> Non
     housing = base.require_subject("housing")
     relabeled = housing.model_copy(
         update={
-            "result_shapes": (
-                housing.result_shapes[0].model_copy(
+            "result_shapes": tuple(
+                shape.model_copy(
                     update={"grain_label": "按另一种安全业务标签展示"}
-                ),
+                )
+                for shape in housing.result_shapes
             )
         }
     )
@@ -517,31 +657,38 @@ def test_declared_population_grouping_is_accepted_by_legacy_adapter(
     subject = catalog.require_subject("population")
     rule_values = {rule.value for rule in subject.group_by_rules}
     assert group_by in rule_values
-    arguments = QueryPopulationMetricsInput.model_validate(
-        {
-            "query": {
-                "metrics": ["person_count"],
-                "scope": {"area_code": area_code},
-                "filters": [
-                    {
-                        "field": "person_category",
-                        "operator": "eq",
-                        "value": "solitary_elderly",
-                    }
-                ],
-                "group_by": [group_by],
+    for filters, expected_kind in (
+        ([], "general"),
+        (
+            [
+                {
+                    "field": "person_category",
+                    "operator": "eq",
+                    "value": "solitary_elderly",
+                }
+            ],
+            "solitary_elderly",
+        ),
+    ):
+        arguments = QueryPopulationMetricsInput.model_validate(
+            {
+                "query": {
+                    "metrics": ["person_count"],
+                    "scope": {"area_code": area_code},
+                    "filters": filters,
+                    "group_by": [group_by],
+                }
             }
-        }
-    )
-    # 不得抛出：Catalog 声明的组合必须被真实 Adapter 白名单接受。
-    _validate_solitary_elderly_query(arguments)
+        )
+        # 不得抛出：Catalog 声明的组合必须被真实 Adapter 白名单接受。
+        assert _validate_population_query(arguments) == expected_kind
 
 
-def test_undeclared_population_capabilities_are_rejected_by_adapter(
+def test_population_adapter_rejects_unmatched_city_and_undeclared_dimensions(
     catalog: SemanticCatalog,
 ) -> None:
     subject = catalog.require_subject("population")
-    assert 4 not in subject.scope_levels
+    assert 4 in subject.scope_levels
 
     city_scope = QueryPopulationMetricsInput.model_validate(
         {
@@ -559,8 +706,8 @@ def test_undeclared_population_capabilities_are_rejected_by_adapter(
             }
         }
     )
-    with pytest.raises(Exception, match="immediate child area grouping"):
-        _validate_solitary_elderly_query(city_scope)
+    with pytest.raises(Exception, match="declared population area groupings"):
+        _validate_population_query(city_scope)
 
     gender_group = QueryPopulationMetricsInput.model_validate(
         {
@@ -578,8 +725,8 @@ def test_undeclared_population_capabilities_are_rejected_by_adapter(
             }
         }
     )
-    with pytest.raises(Exception, match="immediate child area grouping"):
-        _validate_solitary_elderly_query(gender_group)
+    with pytest.raises(Exception, match="declared population area groupings"):
+        _validate_population_query(gender_group)
 
 
 @pytest.mark.parametrize(

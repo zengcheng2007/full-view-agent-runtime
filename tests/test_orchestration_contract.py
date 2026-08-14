@@ -587,6 +587,7 @@ async def test_final_model_timeout_preserves_results_as_partial_completion(
     messages = await store.list_messages(user_id="u", session_id=run.session_id)
     event_types = [event.type for event in await events.list_events(run_id=run_id)]
     assistant = messages[-1]
+    reference = next(item for item in assistant.content if item.type == "result_reference")
 
     assert run.status == "completed"
     assert run.outcome == "partial"
@@ -594,6 +595,7 @@ async def test_final_model_timeout_preserves_results_as_partial_completion(
     assert len(store.results) == 1
     assert len(store.evidence) == 1
     assert any(item.type == "result_reference" for item in assistant.content)
+    assert reference.label == "共 1 个区划，独居老人数量合计 128 人。"
     assert "result.available" in event_types
     assert "run.completed" in event_types
     assert "run.failed" not in event_types
@@ -936,7 +938,7 @@ async def test_structured_finish_is_identical_across_orchestrators(
     messages = await store.list_messages(user_id="u", session_id=run.session_id)
     answer = next(message for message in messages if message.role == "assistant")
     assert answer.content[0].type == "text"
-    assert answer.content[0].text == "330106001的独居老人人数为128人。"  # type: ignore[union-attr]
+    assert answer.content[0].text == "示例街道的人口数为128人。"  # type: ignore[union-attr]
 
 
 # ---------------------------------------------------------------------------

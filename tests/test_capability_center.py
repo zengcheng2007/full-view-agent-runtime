@@ -973,3 +973,29 @@ class TestConnectorValidation:
                     name="Invalid",
                     base_url=url,
                 )
+
+    async def test_connector_creation_reuses_exact_private_host_allowlist(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        monkeypatch.setenv("FULL_VIEW_CONNECTOR_ALLOWED_PRIVATE_HOSTS", "127.0.0.1")
+        service = CapabilityManagementService(InMemoryCapabilityRepository())
+
+        connector = await service.create_connector(
+            connector_id="conn.local-governance",
+            name="本地治理网关",
+            base_url="http://127.0.0.1:9666",
+            allowed_path_prefixes=["/geo-qxst"],
+        )
+
+        assert connector.base_url == "http://127.0.0.1:9666"
+
+    async def test_tool_creation_rejects_path_prefix_confusion(self) -> None:
+        repository = InMemoryCapabilityRepository()
+        await _seed_connector(repository, allowed_path_prefixes=["/api"])
+        service = CapabilityManagementService(repository)
+
+        with pytest.raises(ResourceNotFound, match="not allowed"):
+            await service.create_tool(
+                **_tool_kwargs(resource_path="/api-evil/query")
+            )

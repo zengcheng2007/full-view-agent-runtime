@@ -38,6 +38,10 @@ async def test_run_admission_builds_and_stores_immutable_auth_context() -> None:
     assert "governance.population.aggregate.read" in auth_context.entitlements
     assert "governance.housing.aggregate.read" in auth_context.entitlements
     assert "governance.event.aggregate.read" in auth_context.entitlements
+    assert "governance.overview.aggregate.read" in auth_context.entitlements
+    assert "governance.enterprise.aggregate.read" in auth_context.entitlements
+    assert "governance_overview" in auth_context.data_scopes.datasets
+    assert "enterprise" in auth_context.data_scopes.datasets
     assert "housing" in auth_context.data_scopes.datasets
     assert "event" in auth_context.data_scopes.datasets
     assert auth_context.data_scopes.areas[0].area_code == "330106"

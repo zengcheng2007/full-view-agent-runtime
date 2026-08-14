@@ -35,7 +35,7 @@ def test_default_registry_cannot_expose_unverified_object_profile_over_http() ->
         )
 
 
-def test_population_descriptor_cannot_overclaim_generic_population() -> None:
+def test_population_descriptor_must_distinguish_general_population() -> None:
     baseline = ToolRegistry.production_http()
     descriptors = [
         baseline.get_model_descriptor(tool_id)
@@ -60,7 +60,7 @@ def test_population_descriptor_cannot_overclaim_generic_population() -> None:
         housing_next_area_enabled=False,
     )
 
-    with pytest.raises(CapabilityConsistencyError, match="overclaims generic"):
+    with pytest.raises(CapabilityConsistencyError, match="must state 一般人口"):
         validate_production_http_capabilities(
             registry=drifted,
             catalog=SemanticCatalog.default(),

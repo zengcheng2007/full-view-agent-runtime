@@ -197,8 +197,8 @@ class TestEnableDisable:
         assert config is not None
         assert config.is_enabled
 
-    async def test_only_one_config_enabled_at_a_time(self) -> None:
-        """Test that enabling one config disables all others."""
+    async def test_public_model_pool_can_keep_multiple_configs_enabled(self) -> None:
+        """Enabled means selectable by new Agent releases, not global default."""
         svc, repo, _ = _build_service()
 
         id1 = await _create_config(svc, name="Config 1")
@@ -210,20 +210,20 @@ class TestEnableDisable:
         c1 = await repo.get(id1)
         assert c1 is not None and c1.is_enabled
 
-        # Enable config 2 - config 1 should be disabled
+        # Enable config 2 - config 1 remains selectable in the public pool.
         await svc.enable_config(config_id=id2)
         c1 = await repo.get(id1)
         c2 = await repo.get(id2)
-        assert c1 is not None and not c1.is_enabled
+        assert c1 is not None and c1.is_enabled
         assert c2 is not None and c2.is_enabled
 
-        # Enable config 3 - config 2 should be disabled
+        # Enable config 3 - all three remain selectable.
         await svc.enable_config(config_id=id3)
         c1 = await repo.get(id1)
         c2 = await repo.get(id2)
         c3 = await repo.get(id3)
-        assert c1 is not None and not c1.is_enabled
-        assert c2 is not None and not c2.is_enabled
+        assert c1 is not None and c1.is_enabled
+        assert c2 is not None and c2.is_enabled
         assert c3 is not None and c3.is_enabled
 
     async def test_disable_config(self) -> None:

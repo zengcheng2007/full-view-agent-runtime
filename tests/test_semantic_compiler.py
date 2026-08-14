@@ -18,7 +18,10 @@ from full_view_agent.domain.models import (
     HousingLeaseTypeTable,
     PopulationMetricRow,
     PopulationMetricTable,
+    QueryEnterpriseMetricsInput,
     QueryEventMetricsInput,
+    QueryGovernanceOverviewInput,
+    QueryGovernancePowerMetricsInput,
     QueryHousingMetricsInput,
     QueryPopulationMetricsInput,
     TableDataResult,
@@ -51,10 +54,21 @@ FULL_AUTH = SubjectAuthorization(
     entitlements=(
         "governance.area.read",
         "governance.event.aggregate.read",
+        "governance.enterprise.aggregate.read",
         "governance.housing.aggregate.read",
         "governance.population.aggregate.read",
+        "governance.overview.aggregate.read",
+        "governance.power.aggregate.read",
     ),
-    datasets=("administrative_area", "event", "housing", "population"),
+    datasets=(
+        "administrative_area",
+        "event",
+        "enterprise",
+        "governance_overview",
+        "governance_power",
+        "housing",
+        "population",
+    ),
     area_scopes=(AuthorizedAreaScope(area_code="3301", include_descendants=True),),
     field_policy_set="governance_analyst_v1",
 )
@@ -160,6 +174,7 @@ def test_housing_lease_and_next_area_select_distinct_result_schemas(
             scope={"area_code": "330106"},
             filters=[],
             group_by=["next_area"],
+            order_by=[{"field": "dwelling_count", "direction": "desc"}],
         ),
         authorization=FULL_AUTH,
     )
@@ -167,6 +182,8 @@ def test_housing_lease_and_next_area_select_distinct_result_schemas(
         next_area.steps[0].arguments
     )
     assert next_area_input.query.group_by == ["next_area"]
+    # Adapter 的 next_area 结果已固有降序，编译后无需下传任意排序参数。
+    assert not hasattr(next_area_input.query, "order_by")
     assert next_area.expected_result.data_schema_ref == (
         "schema://data/housing-area-group-table/1.0.0"
     )
@@ -196,6 +213,86 @@ def test_event_plan_maps_to_finish_rate_snapshot(compiler: SemanticCompiler) -> 
     # 事件参数不得携带 group_by/filters 等未验证语义。
     assert "group_by" not in plan.steps[0].arguments["query"]
     assert "filters" not in plan.steps[0].arguments["query"]
+
+
+def test_governance_overview_plan_maps_to_verified_scope_only_capability(
+    compiler: SemanticCompiler,
+) -> None:
+    plan = compiler.compile(
+        _population_spec(
+            subject="governance_overview",
+            metrics=["governance_coverage_overview"],
+            filters=[],
+            group_by=[],
+            output="metric_card",
+        ),
+        authorization=FULL_AUTH,
+    )
+
+    validated = QueryGovernanceOverviewInput.model_validate(plan.steps[0].arguments)
+    assert validated.query.scope.area_code == "330106"
+    assert plan.subject == "governance_overview"
+    assert plan.logical_dataset_id == "governance_overview"
+    assert plan.steps[0].capability_id == "governance.get_governance_overview"
+
+
+def test_governance_power_plan_maps_to_aggregate_only_capability(
+    compiler: SemanticCompiler,
+) -> None:
+    plan = compiler.compile(
+        SemanticQuerySpec(
+            subject="governance_power",
+            metrics=["governance_power_count"],
+            scope={"area_code": "330106"},
+            output="table",
+        ),
+        authorization=FULL_AUTH,
+    )
+
+    assert plan.logical_dataset_id == "governance_power"
+    assert plan.steps[0].capability_id == (
+        "governance.query_governance_power_metrics"
+    )
+    query = QueryGovernancePowerMetricsInput.model_validate(
+        plan.steps[0].arguments
+    ).query
+    assert query.scope.area_code == "330106"
+    assert plan.expected_result.data_schema_ref == (
+        "schema://data/governance-power-metric-table/1.0.0"
+    )
+    assert plan.steps[0].arguments == {
+        "query": {
+            "schema_version": "1.0",
+            "scope": {"area_code": "330106", "include_descendants": True},
+        }
+    }
+    assert plan.expected_result.row_fields == ("type_code", "type_name", "count")
+    assert [item.metric_id for item in plan.evidence.metric_definitions] == [
+        "governance_power_count"
+    ]
+
+
+def test_enterprise_plan_maps_to_verified_direct_child_capability(
+    compiler: SemanticCompiler,
+) -> None:
+    plan = compiler.compile(
+        _population_spec(
+            subject="enterprise",
+            metrics=["enterprise_count"],
+            filters=[],
+            group_by=["next_area"],
+        ),
+        authorization=FULL_AUTH,
+    )
+
+    validated = QueryEnterpriseMetricsInput.model_validate(plan.steps[0].arguments)
+    assert validated.query.scope.area_code == "330106"
+    assert validated.query.group_by == ["next_area"]
+    assert plan.subject == "enterprise"
+    assert plan.steps[0].capability_id == "governance.query_enterprise_metrics"
+    assert plan.expected_result.data_schema_ref == (
+        "schema://data/enterprise-metric-table/1.0.0"
+    )
 
 
 def test_three_subjects_never_share_result_schema(compiler: SemanticCompiler) -> None:

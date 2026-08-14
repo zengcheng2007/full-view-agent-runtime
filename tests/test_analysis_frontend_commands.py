@@ -242,6 +242,7 @@ async def test_analysis_commands_follow_capabilities_and_area_grouping() -> None
         c for c in store.frontend_commands.values() if c.type == "map.render_choropleth"
     )
     assert choropleth.target == "map_panel"
+    assert choropleth.payload.legend_title == "人口数量"
     assert choropleth.preconditions.required_client_capability == "map.render_choropleth@1.0"
     # 每一步必须先在 Result/Evidence 原子持久化，之后才发布事件与命令。
     groups: list[list[str]] = []
@@ -301,6 +302,29 @@ async def test_analysis_without_declared_capability_persists_without_commands(
     assert sum(event.type == "result.available" for event in run_events) == 3
     assert sum(event.type == "evidence.available" for event in run_events) == 3
     assert len(store.evidence) == 3
+
+
+@pytest.mark.asyncio
+async def test_population_analysis_can_highlight_the_queried_area() -> None:
+    graph, _execution, store, _events, plan, auth, _order = await _runtime(
+        capabilities=_capabilities(("map.highlight_area",))
+    )
+
+    outcome = await graph.run(**_graph_kwargs(plan, auth))
+
+    assert outcome.status == "completed"
+    highlights = [
+        command
+        for command in store.frontend_commands.values()
+        if command.type == "map.highlight_area"
+    ]
+    assert len(highlights) == 1
+    assert highlights[0].payload.area_code == AREA_CODE
+    assert highlights[0].target == "map_panel"
+    assert (
+        highlights[0].preconditions.required_client_capability
+        == "map.highlight_area@1.0"
+    )
 
 
 @pytest.mark.asyncio

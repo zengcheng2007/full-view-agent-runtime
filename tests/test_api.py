@@ -11,6 +11,12 @@ from full_view_agent.api.app import (
     create_app,
 )
 from full_view_agent.application.answer_claims import FINISH_TOOL_ID
+from full_view_agent.application.dynamic_skill_workflow_bridge import (
+    RuntimeSkillContract,
+    RuntimeWorkflowEdge,
+    RuntimeWorkflowGraphSnapshot,
+    RuntimeWorkflowNode,
+)
 from full_view_agent.application.model_provider import (
     ModelResponse,
     ModelToolCall,
@@ -47,10 +53,14 @@ def test_runtime_selects_http_governance_adapter_only_when_explicitly_enabled(
 
     assert isinstance(runtime.governance_adapter, HttpGovernanceAdapter)
     assert runtime.tool_registry.list_tool_ids() == [
+        "governance.get_governance_overview",
+        "governance.query_enterprise_metrics",
         "governance.query_event_metrics",
+        "governance.query_governance_power_metrics",
         "governance.query_housing_metrics",
         "governance.query_population_metrics",
         "governance.resolve_area",
+        "knowledge.search",
     ]
 
 
@@ -441,6 +451,7 @@ async def test_session_list_uses_owned_filtered_signed_cursor_and_recovers_activ
         )
         owner_user_id = runtime.store.sessions[session_ids[0]].owner_user_id
         active_run = await runtime.service.create_run(
+            tenant_id=runtime.store.sessions[session_ids[0]].owner_tenant_id,
             user_id=owner_user_id,
             session_id=session_ids[0],
             request=run_request(
@@ -898,6 +909,7 @@ async def test_create_run_admits_auth_context_used_by_executor() -> None:
         run_id=run_id,
     )
     events = await runtime.events.list_events(run_id=run_id)
+    tool_started = next(event for event in events if event.type == "tool.started")
     tool_completed = next(event for event in events if event.type == "tool.completed")
     assert auth_context.run_id == run_id
     assert auth_context.session_id == session_id
@@ -906,6 +918,16 @@ async def test_create_run_admits_auth_context_used_by_executor() -> None:
         tool_completed.data["tool_result"]["policy"]["auth_context_fingerprint"]
         == auth_context.auth_context_fingerprint
     )
+    assert tool_started.data["tool_id"] == "governance.query_population_metrics"
+    assert tool_started.data["display"] == {
+        "label": "查询人口聚合指标",
+        "status_label": "执行中",
+    }
+    assert tool_completed.data["display"] == {
+        "label": "查询人口聚合指标",
+        "status_label": "执行成功",
+        "summary": "业务能力执行成功。",
+    }
     assert token not in str(tool_completed.model_dump(mode="json"))
 
 
@@ -942,6 +964,80 @@ async def test_create_run_rejects_unregistered_workflow_without_occupying_sessio
     assert response.status_code == 422
     assert response.json()["error"]["code"] == "workflow_not_available"
     assert runtime.store.sessions[session_id].active_run_id is None
+
+
+@pytest.mark.asyncio
+async def test_create_run_prevalidation_uses_pinned_skill_registry() -> None:
+    runtime = runtime_fixture()
+    skill = RuntimeSkillContract(
+        skill_id="skill.population-query",
+        version="1.0.0",
+        guidance="Query population metrics.",
+        allowed_tool_ids=("governance.query_population_metrics",),
+    )
+    workflow = RuntimeWorkflowGraphSnapshot(
+        workflow_id="workflow.population-by-skill",
+        version="1.0.0",
+        start_node_id="start",
+        end_node_ids=("end",),
+        nodes=(
+            RuntimeWorkflowNode(node_id="start", node_type="start"),
+            RuntimeWorkflowNode(
+                node_id="skill",
+                node_type="skill",
+                skill_ref=(skill.skill_id, skill.version),
+                config_json=json.dumps(
+                    {
+                        "tool_id": "governance.query_population_metrics",
+                        "arguments": {
+                            "query": {
+                                "metrics": ["person_count"],
+                                "scope": {"area_code": "330106"},
+                                "group_by": ["street"],
+                            }
+                        },
+                    }
+                ),
+            ),
+            RuntimeWorkflowNode(node_id="end", node_type="end"),
+        ),
+        edges=(
+            RuntimeWorkflowEdge(source_node_id="start", target_node_id="skill"),
+            RuntimeWorkflowEdge(source_node_id="skill", target_node_id="end"),
+        ),
+        timeout_seconds=120,
+    )
+    runtime.runtime_skill_registry.replace((skill,))
+    runtime.runtime_workflow_registry.replace((workflow,))
+    app = create_app(runtime)
+    auth = {"geoToken": "test-token-workflow-skill"}
+
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=app), base_url="http://test"
+    ) as client:
+        session_response = await client.post(
+            "/agent-api/v1/sessions",
+            headers={**auth, "Idempotency-Key": "idem-workflow-skill-session"},
+            json={"title": "Skill workflow"},
+        )
+        session_id = session_response.json()["data"]["session_id"]
+        response = await client.post(
+            f"/agent-api/v1/sessions/{session_id}/runs",
+            headers={**auth, "Idempotency-Key": "idem-workflow-skill-run"},
+            json={
+                **run_request(
+                    message_id="web-msg-workflow-skill",
+                    client_instance_id="cli-workflow-skill",
+                ).model_dump(mode="json"),
+                "mode": "workflow",
+                "workflow_ref": {
+                    "workflow_id": workflow.workflow_id,
+                    "workflow_version": workflow.version,
+                },
+            },
+        )
+
+    assert response.status_code == 202, response.text
 
 
 @pytest.mark.asyncio
@@ -1044,6 +1140,7 @@ async def test_cancel_endpoint_cancels_an_active_run_and_emits_event() -> None:
         session_id = session_response.json()["data"]["session_id"]
         owner_user_id = runtime.store.sessions[session_id].owner_user_id
         run = await runtime.service.create_run(
+            tenant_id=runtime.store.sessions[session_id].owner_tenant_id,
             user_id=owner_user_id,
             session_id=session_id,
             request=run_request(
@@ -1144,6 +1241,7 @@ async def test_steer_endpoint_accepts_instruction_for_next_safe_checkpoint() -> 
         session_id = session_response.json()["data"]["session_id"]
         owner_user_id = runtime.store.sessions[session_id].owner_user_id
         run = await runtime.service.create_run(
+            tenant_id=runtime.store.sessions[session_id].owner_tenant_id,
             user_id=owner_user_id,
             session_id=session_id,
             request=run_request(
@@ -1407,6 +1505,7 @@ async def test_get_result_supports_object_profile_result_union() -> None:
         session_id = session_response.json()["data"]["session_id"]
         owner_user_id = runtime.store.sessions[session_id].owner_user_id
         run = await runtime.service.create_run(
+            tenant_id=runtime.store.sessions[session_id].owner_tenant_id,
             user_id=owner_user_id,
             session_id=session_id,
             request=run_request(
@@ -1468,6 +1567,7 @@ async def test_result_items_returns_cursor_page_for_table_payload() -> None:
         session_id = session_response.json()["data"]["session_id"]
         owner_user_id = runtime.store.sessions[session_id].owner_user_id
         run = await runtime.service.create_run(
+            tenant_id=runtime.store.sessions[session_id].owner_tenant_id,
             user_id=owner_user_id,
             session_id=session_id,
             request=run_request(
@@ -1524,6 +1624,80 @@ async def test_result_items_returns_cursor_page_for_table_payload() -> None:
     assert tampered.json()["error"]["code"] == "validation_error"
 
 
+@pytest.mark.asyncio
+async def test_result_download_is_owner_scoped_and_csv_formula_safe() -> None:
+    from full_view_agent.domain.models import DynamicTableData, TableDataResult
+
+    runtime = runtime_fixture()
+    app = create_app(runtime)
+    auth = {"geoToken": "test-token-result-download-owner"}
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=app), base_url="http://test"
+    ) as client:
+        session_response = await client.post(
+            "/agent-api/v1/sessions",
+            headers={**auth, "Idempotency-Key": "idem-result-download-session"},
+            json={"title": "结果下载"},
+        )
+        session_id = session_response.json()["data"]["session_id"]
+        owner_user_id = runtime.store.sessions[session_id].owner_user_id
+        run = await runtime.service.create_run(
+            tenant_id=runtime.store.sessions[session_id].owner_tenant_id,
+            user_id=owner_user_id,
+            session_id=session_id,
+            request=run_request(
+                message_id="web-msg-result-download",
+                client_instance_id="cli-result-download",
+            ),
+        )
+        await runtime.service.start_run(user_id=owner_user_id, run_id=run.run_id)
+        result = TableDataResult(
+            result_id="res-download-api-01",
+            data_schema_ref="schema://data/dynamic-table/1.0.0",
+            result_fingerprint="sha256:result-download-api",
+            data=DynamicTableData(
+                rows=[
+                    {
+                        "area_name": "西湖区",
+                        "note": '=HYPERLINK("https://invalid.example","click")',
+                    }
+                ]
+            ),
+            row_count=1,
+            presentation={
+                "title": "查询结果",
+                "summary": "已生成 1 条结果。",
+                "status_label": "查询完成",
+                "fields": [
+                    {"field": "area_name", "label": "区划名称", "role": "dimension"},
+                    {"field": "note", "label": "备注", "role": "dimension"},
+                ],
+                "visualizations": [{"kind": "table", "title": "数据表格"}],
+            },
+        )
+        await runtime.store.save_result(
+            user_id=owner_user_id,
+            run_id=run.run_id,
+            result=result,
+        )
+
+        response = await client.get(
+            "/agent-api/v1/results/res-download-api-01/download?format=csv",
+            headers=auth,
+        )
+        other_user_response = await client.get(
+            "/agent-api/v1/results/res-download-api-01/download?format=csv",
+            headers={"geoToken": "test-token-result-download-other"},
+        )
+
+    assert response.status_code == 200
+    assert response.headers["content-type"].startswith("text/csv")
+    assert "attachment" in response.headers["content-disposition"]
+    assert response.text.splitlines()[0].lstrip("\ufeff") == "区划名称,备注"
+    assert "'=HYPERLINK" in response.text
+    assert other_user_response.status_code == 404
+
+
 def test_result_items_response_accepts_housing_area_group_rows() -> None:
     from full_view_agent.api.app import CursorPageMeta, ResultItemsResponse
     from full_view_agent.domain.models import HousingAreaGroupRow
@@ -1565,6 +1739,7 @@ async def test_expired_result_keeps_metadata_but_rejects_payload_items() -> None
         session_id = session_response.json()["data"]["session_id"]
         owner_user_id = runtime.store.sessions[session_id].owner_user_id
         run = await runtime.service.create_run(
+            tenant_id=runtime.store.sessions[session_id].owner_tenant_id,
             user_id=owner_user_id,
             session_id=session_id,
             request=run_request(
@@ -1631,6 +1806,7 @@ async def test_expired_analysis_report_metadata_is_explicit_not_object_profile()
         session_id = session_response.json()["data"]["session_id"]
         owner_user_id = runtime.store.sessions[session_id].owner_user_id
         run = await runtime.service.create_run(
+            tenant_id=runtime.store.sessions[session_id].owner_tenant_id,
             user_id=owner_user_id,
             session_id=session_id,
             request=run_request(

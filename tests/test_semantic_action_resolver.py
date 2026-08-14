@@ -13,7 +13,10 @@ import pytest
 from full_view_agent.application.policy import MinimalPolicyAdapter
 from full_view_agent.application.tool_registry import ToolRegistry
 from full_view_agent.domain.models import (
+    QueryEnterpriseMetricsInput,
     QueryEventMetricsInput,
+    QueryGovernanceOverviewInput,
+    QueryGovernancePowerMetricsInput,
     QueryHousingMetricsInput,
     QueryPopulationMetricsInput,
 )
@@ -155,6 +158,12 @@ def test_resolver_attaches_versioned_semantic_lineage() -> None:
     assert lineage.area_code == "330106"
     assert lineage.output == "table"
     assert [m.metric_id for m in lineage.metric_definitions] == ["person_count"]
+    assert len(lineage.filter_contexts) == 1
+    assert lineage.filter_contexts[0].field == "person_category"
+    assert lineage.filter_contexts[0].value == "solitary_elderly"
+    assert lineage.filter_contexts[0].display_label == (
+        "独居老人（空巢老人按此受控口径映射）"
+    )
     assert lineage.spec_fingerprint.startswith("sha256:")
     assert lineage.plan_fingerprint.startswith("sha256:")
 
@@ -232,7 +241,14 @@ def test_resolver_different_specs_produce_different_fingerprints() -> None:
 def test_resolver_bindable_subjects_derive_from_catalog_bindings() -> None:
     # 默认目录三主题均有已验证绑定 → 全部进入统一语义入口。
     assert _resolver().bindable_subjects == frozenset(
-        {"event", "housing", "population"}
+        {
+            "enterprise",
+            "event",
+            "governance_overview",
+            "governance_power",
+            "housing",
+            "population",
+        }
     )
     # 绑定收缩 → 可执行集合同步收缩，无需改任何白名单常量。
     partial = _catalog_with_bindings("population")
@@ -304,6 +320,78 @@ def test_resolver_compiles_event_snapshot_spec_to_canonical_tool_action() -> Non
     assert resolution.recheck.allowed is True
 
 
+def test_resolver_compiles_governance_overview_to_canonical_tool_action() -> None:
+    resolution = _resolver().resolve(
+        _subject_args(
+            "governance_overview",
+            metrics=["governance_coverage_overview"],
+        ),
+        auth_context=_auth_for("overview").model_copy(
+            update={
+                "data_scopes": population_auth_context().data_scopes.model_copy(
+                    update={"datasets": ["governance_overview"]}
+                )
+            }
+        ),
+    )
+
+    assert isinstance(resolution, ResolvedSemanticAction)
+    action = resolution.canonical_action
+    assert action.tool_id == "governance.get_governance_overview"
+    validated = QueryGovernanceOverviewInput.model_validate(action.arguments)
+    assert validated.query.scope.area_code == "330106"
+    assert resolution.lineage.logical_dataset_id == "governance_overview"
+
+
+@pytest.mark.parametrize("phrase", ["查询西湖区治理力量汇总", "西湖区网格力量构成"])
+def test_resolver_compiles_governance_power_expressions_to_aggregate_action(
+    phrase: str,
+) -> None:
+    del phrase  # user-language coverage is asserted at the planner boundary below
+    auth = _auth_for("power").model_copy(
+        update={
+            "data_scopes": population_auth_context().data_scopes.model_copy(
+                update={"datasets": ["governance_power"]}
+            )
+        }
+    )
+    resolution = _resolver().resolve(
+        _subject_args(
+            "governance_power", metrics=["governance_power_count"]
+        ),
+        auth_context=auth,
+    )
+
+    assert isinstance(resolution, ResolvedSemanticAction)
+    action = resolution.canonical_action
+    assert action.tool_id == "governance.query_governance_power_metrics"
+    assert QueryGovernancePowerMetricsInput.model_validate(
+        action.arguments
+    ).query.scope.area_code == "330106"
+    assert resolution.recheck is not None
+    assert resolution.recheck.allowed is True
+
+
+def test_resolver_compiles_enterprise_distribution_to_canonical_tool_action() -> None:
+    resolution = _resolver().resolve(
+        _subject_args(
+            "enterprise",
+            metrics=["enterprise_count"],
+            group_by=["next_area"],
+        ),
+        auth_context=_auth_for("enterprise"),
+    )
+
+    assert isinstance(resolution, ResolvedSemanticAction)
+    action = resolution.canonical_action
+    assert action.tool_id == "governance.query_enterprise_metrics"
+    validated = QueryEnterpriseMetricsInput.model_validate(action.arguments)
+    assert validated.query.group_by == ["next_area"]
+    assert resolution.lineage.logical_dataset_id == "enterprise"
+    assert resolution.recheck is not None
+    assert resolution.recheck.allowed is True
+
+
 # ---------------------------------------------------------------------------
 # Fail closed：声明存在但无能力绑定 → SUBJECT_NOT_BINDABLE，不执行
 # ---------------------------------------------------------------------------
@@ -345,7 +433,7 @@ def test_resolver_rejects_event_time_range_as_unsupported() -> None:
     assert "TIME_RANGE_UNSUPPORTED" in resolution.codes
 
 
-@pytest.mark.parametrize("metric", ["event_count", "finish_count", "total_count"])
+@pytest.mark.parametrize("metric", ["finish_count", "total_count"])
 def test_resolver_rejects_event_total_or_volume_metrics(metric: str) -> None:
     resolution = _resolver().resolve(
         _subject_args("event", metrics=[metric]),
@@ -354,6 +442,16 @@ def test_resolver_rejects_event_total_or_volume_metrics(metric: str) -> None:
 
     assert isinstance(resolution, RejectedSemanticAction)
     assert "UNKNOWN_METRIC" in resolution.codes
+
+
+def test_resolver_rejects_event_count_without_month_and_time_range() -> None:
+    resolution = _resolver().resolve(
+        _subject_args("event", metrics=["event_count"]),
+        auth_context=_auth_for("event"),
+    )
+
+    assert isinstance(resolution, RejectedSemanticAction)
+    assert "INVALID_RESULT_SHAPE" in resolution.codes
 
 
 def test_resolver_rejects_event_threshold_filter() -> None:
@@ -532,9 +630,8 @@ def test_resolver_rejects_invalid_dimension() -> None:
     assert "INVALID_GROUP_BY" in resolution.codes
 
 
-def test_resolver_rejects_non_eq_operator_via_required_filter_precedence() -> None:
-    # person_category 仅注册 eq；gte 同时意味着必填筛选缺失，
-    # 必填筛选检查优先（真实 Adapter 白名单只接受 eq=solitary_elderly）。
+def test_resolver_rejects_non_eq_population_filter_operator() -> None:
+    # person_category 仅注册 eq；其他操作符必须明确拒绝。
     resolution = _resolver().resolve(
         _population_spec(
             filters=[
@@ -545,7 +642,7 @@ def test_resolver_rejects_non_eq_operator_via_required_filter_precedence() -> No
     )
 
     assert isinstance(resolution, RejectedSemanticAction)
-    assert "REQUIRED_FILTER_MISSING" in resolution.codes
+    assert "INVALID_FILTER_OPERATOR" in resolution.codes
 
 
 def test_resolver_rejects_age_filter_as_capability_gap() -> None:
@@ -564,7 +661,7 @@ def test_resolver_rejects_age_filter_as_capability_gap() -> None:
     assert "INVALID_FILTER_FIELD" in resolution.codes
 
 
-def test_resolver_rejects_unsupported_scope_level() -> None:
+def test_resolver_rejects_unauthorized_city_and_unmatched_grouping() -> None:
     # 市级（4 位）不在 population 支持的 6/9/12 层级内。
     resolution = _resolver().resolve(
         _population_spec(scope={"area_code": "3301"}),
@@ -572,17 +669,20 @@ def test_resolver_rejects_unsupported_scope_level() -> None:
     )
 
     assert isinstance(resolution, RejectedSemanticAction)
-    assert "SCOPE_LEVEL_UNSUPPORTED" in resolution.codes
+    assert "AREA_OUT_OF_SCOPE" in resolution.codes
+    assert "GROUP_BY_SCOPE_MISMATCH" in resolution.codes
 
 
-def test_resolver_rejects_order_by_as_unsupported() -> None:
+def test_resolver_compiles_population_count_order_by() -> None:
     resolution = _resolver().resolve(
         _population_spec(order_by=[{"field": "person_count", "direction": "desc"}]),
         auth_context=population_auth_context(),
     )
 
-    assert isinstance(resolution, RejectedSemanticAction)
-    assert "INVALID_ORDER_BY" in resolution.codes
+    assert isinstance(resolution, ResolvedSemanticAction)
+    assert resolution.canonical_action.arguments["query"]["order_by"] == [
+        {"field": "person_count", "direction": "desc"}
+    ]
 
 
 def test_resolver_rejects_time_range_as_unsupported() -> None:
@@ -595,16 +695,15 @@ def test_resolver_rejects_time_range_as_unsupported() -> None:
     assert "TIME_RANGE_UNSUPPORTED" in resolution.codes
 
 
-def test_resolver_rejects_missing_required_solitary_elderly_filter() -> None:
-    # 无筛选的人口查询在真实 Adapter 白名单之外，必须语义层即拒绝。
+def test_resolver_accepts_general_population_without_specialized_filter() -> None:
+    # 无筛选明确表示一般人口，不得被替换成独居老人或提前拒绝。
     resolution = _resolver().resolve(
         _population_spec(filters=[]),
         auth_context=population_auth_context(),
     )
 
-    assert isinstance(resolution, RejectedSemanticAction)
-    assert "REQUIRED_FILTER_MISSING" in resolution.codes
-    assert "solitary_elderly" in resolution.user_message
+    assert isinstance(resolution, ResolvedSemanticAction)
+    assert resolution.canonical_action.arguments["query"]["filters"] == []
 
 
 def test_resolver_rejects_incompatible_spec_version() -> None:

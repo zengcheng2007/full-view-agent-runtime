@@ -14,10 +14,13 @@ from scripts.cleanup_expired import cleanup_expired
 
 pg_dsn = os.environ.get("FULL_VIEW_TEST_DATABASE_URL", "")
 
-pytestmark = pytest.mark.skipif(
-    not pg_dsn,
-    reason="FULL_VIEW_TEST_DATABASE_URL not set",
-)
+pytestmark = [
+    pytest.mark.skipif(
+        not pg_dsn,
+        reason="FULL_VIEW_TEST_DATABASE_URL not set",
+    ),
+    pytest.mark.db,
+]
 
 
 @pytest.mark.asyncio

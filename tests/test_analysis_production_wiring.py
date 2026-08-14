@@ -28,6 +28,7 @@ def _postgres_test_dsn() -> str:
 
 
 @pytest.mark.asyncio
+@pytest.mark.db
 async def test_queued_plan_is_discoverable_after_runtime_restart(monkeypatch) -> None:
     dsn = _postgres_test_dsn()
     suffix = uuid4().hex[:12]
@@ -134,6 +135,7 @@ async def test_queued_plan_is_discoverable_after_runtime_restart(monkeypatch) ->
 
 
 @pytest.mark.asyncio
+@pytest.mark.db
 async def test_two_runtime_workers_publish_one_terminal_record(monkeypatch) -> None:
     dsn = _postgres_test_dsn()
     suffix = uuid4().hex[:12]
@@ -210,6 +212,7 @@ async def test_two_runtime_workers_publish_one_terminal_record(monkeypatch) -> N
 
 
 @pytest.mark.asyncio
+@pytest.mark.db
 async def test_production_composition_survives_runtime_restart(monkeypatch) -> None:
     dsn = _postgres_test_dsn()
     suffix = uuid4().hex[:12]

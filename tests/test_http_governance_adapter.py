@@ -49,8 +49,529 @@ def full_auth_context():
     )
 
 
+def overview_auth_context():
+    context = full_auth_context()
+    return context.model_copy(
+        update={
+            "entitlements": [
+                *context.entitlements,
+                "governance.overview.aggregate.read",
+            ],
+            "data_scopes": context.data_scopes.model_copy(
+                update={
+                    "datasets": [
+                        *context.data_scopes.datasets,
+                        "governance_overview",
+                    ]
+                }
+            ),
+        }
+    )
+
+
+def governance_power_auth_context():
+    context = full_auth_context()
+    return context.model_copy(
+        update={
+            "entitlements": [
+                *context.entitlements,
+                "governance.power.aggregate.read",
+            ],
+            "data_scopes": context.data_scopes.model_copy(
+                update={
+                    "datasets": [
+                        *context.data_scopes.datasets,
+                        "governance_power",
+                    ]
+                }
+            ),
+        }
+    )
+
+
+@pytest.mark.asyncio
+async def test_http_adapter_queries_governance_power_aggregate_without_person_details() -> None:
+    requests: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        return httpx.Response(
+            200,
+            json={
+                "state": True,
+                "code": 200,
+                "data": [
+                    {"type": "roomNum", "count": "120"},
+                    {"type": "10", "count": 5},
+                    {"type": "11", "count": 4},
+                    {"type": "12", "count": 9},
+                    {"type": "13", "count": 8},
+                    {"type": "nGridSum", "count": 7},
+                    {"type": "gridUnitSum", "count": 30},
+                    # The legacy service always appends this superseded aggregate.
+                    # The product UI ignores it in favour of nGridSum.
+                    {"type": "999", "count": 6},
+                ],
+            },
+        )
+
+    arguments = models.QueryGovernancePowerMetricsInput.model_validate(
+        {"query": {"scope": {"area_code": "330106"}}}
+    )
+    auth_context = governance_power_auth_context()
+    manifest = ToolRegistry.default().get_manifest(
+        "governance.query_governance_power_metrics"
+    )
+    policy = MinimalPolicyAdapter().evaluate(
+        manifest=manifest,
+        auth_context=auth_context,
+        arguments=arguments,
+    )
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        result = await governance_adapter.HttpGovernanceAdapter(
+            base_url="http://legacy.test/geo-qxst",
+            credential_broker=RecordingCredentialBroker(),
+            client=client,
+        ).execute(
+            manifest=manifest,
+            arguments=arguments,
+            policy_decision=policy,
+            auth_context=auth_context,
+        )
+
+    assert requests[0].url.path == "/geo-qxst/api/getGovernancePower"
+    assert dict(requests[0].url.params) == {
+        "areaCodeName": "county_code",
+        "areaCodeValue": "330106",
+    }
+    assert requests[0].headers["geoToken"] == "run-scoped-token"
+    assert [(row.type_code, row.type_name, row.count) for row in result.data.rows] == [
+        ("roomNum", "户数", 120),
+        ("10", "网格长", 5),
+        ("11", "网格指导员", 4),
+        ("12", "专职网格员", 9),
+        ("13", "兼职网格员", 8),
+        ("nGridSum", "其他网格力量", 7),
+        ("gridUnitSum", "微网格", 30),
+    ]
+    assert "getGovernancePowerByGridCode" not in str(requests[0].url)
+
+
+@pytest.mark.parametrize(
+    "data",
+    [
+        [{"type": "unknown", "count": 1}],
+        [{"type": "10", "count": 1}, {"type": "10", "count": 2}],
+        [{"type": "999", "count": 1}, {"type": "999", "count": 2}],
+        [{"type": "10", "count": True}],
+        [{"type": "999", "count": True}],
+        [{"type": "10", "count": -1}],
+    ],
+)
+@pytest.mark.asyncio
+async def test_http_adapter_rejects_unsafe_governance_power_aggregate(
+    data: list[dict[str, object]],
+) -> None:
+    arguments = models.QueryGovernancePowerMetricsInput.model_validate(
+        {"query": {"scope": {"area_code": "330106"}}}
+    )
+    auth_context = governance_power_auth_context()
+    manifest = ToolRegistry.default().get_manifest(
+        "governance.query_governance_power_metrics"
+    )
+    policy = MinimalPolicyAdapter().evaluate(
+        manifest=manifest,
+        auth_context=auth_context,
+        arguments=arguments,
+    )
+    transport = httpx.MockTransport(
+        lambda _request: httpx.Response(
+            200, json={"state": True, "code": 200, "data": data}
+        )
+    )
+    async with httpx.AsyncClient(transport=transport) as client:
+        with pytest.raises(errors.UpstreamContractError):
+            await governance_adapter.HttpGovernanceAdapter(
+                base_url="http://legacy.test/geo-qxst",
+                credential_broker=RecordingCredentialBroker(),
+                client=client,
+            ).execute(
+                manifest=manifest,
+                arguments=arguments,
+                policy_decision=policy,
+                auth_context=auth_context,
+            )
+
+
 def test_http_governance_adapter_is_available() -> None:
     assert getattr(governance_adapter, "HttpGovernanceAdapter", None) is not None
+
+
+@pytest.mark.asyncio
+async def test_http_adapter_queries_governance_overview_with_run_token() -> None:
+    requests: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        return httpx.Response(
+            200,
+            json={
+                "state": True,
+                "code": 200,
+                "msg": "",
+                "data": {
+                    "personRelationNum": "80",
+                    "personTotal": 100,
+                    "houseRelationNum": 45,
+                    "houseTotal": 50,
+                    "enterpriseRelationNum": 18,
+                    "enterpriseTotal": 20,
+                    "eventRelationNum": 12,
+                    "eventTotal": 15,
+                    "matterRelationNum": 8,
+                    "matterTotal": 10,
+                },
+            },
+        )
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        adapter = governance_adapter.HttpGovernanceAdapter(
+            base_url="http://legacy.test/geo-qxst",
+            credential_broker=RecordingCredentialBroker(),
+            client=client,
+        )
+        arguments = models.QueryGovernanceOverviewInput.model_validate(
+            {"query": {"scope": {"area_code": "330106"}}}
+        )
+        auth_context = overview_auth_context()
+        manifest = ToolRegistry.default().get_manifest(
+            "governance.get_governance_overview"
+        )
+        policy = MinimalPolicyAdapter().evaluate(
+            manifest=manifest,
+            auth_context=auth_context,
+            arguments=arguments,
+        )
+
+        result = await adapter.execute(
+            manifest=manifest,
+            arguments=arguments,
+            policy_decision=policy,
+            auth_context=auth_context,
+        )
+
+    assert len(requests) == 1
+    assert requests[0].method == "GET"
+    assert requests[0].url.path == "/geo-qxst/base/getBaseTotal"
+    assert dict(requests[0].url.params) == {
+        "areaName": "county_code",
+        "areaCode": "330106",
+        "dataBaseType": "2",
+    }
+    assert requests[0].headers["geoToken"] == "run-scoped-token"
+    assert [row.model_dump() for row in result.data.rows] == [
+        {
+            "subject": "person",
+            "subject_label": "人",
+            "related_count": 80,
+            "total_count": 100,
+            "coverage_rate": 80.0,
+        },
+        {
+            "subject": "house",
+            "subject_label": "房",
+            "related_count": 45,
+            "total_count": 50,
+            "coverage_rate": 90.0,
+        },
+        {
+            "subject": "enterprise",
+            "subject_label": "企",
+            "related_count": 18,
+            "total_count": 20,
+            "coverage_rate": 90.0,
+        },
+        {
+            "subject": "event",
+            "subject_label": "事",
+            "related_count": 12,
+            "total_count": 15,
+            "coverage_rate": 80.0,
+        },
+        {
+            "subject": "matter",
+            "subject_label": "物",
+            "related_count": 8,
+            "total_count": 10,
+            "coverage_rate": 80.0,
+        },
+    ]
+
+
+@pytest.mark.asyncio
+async def test_http_adapter_rejects_incomplete_governance_overview() -> None:
+    def handler(_request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            json={
+                "state": True,
+                "code": 200,
+                "msg": "",
+                "data": {
+                    "personRelationNum": 80,
+                    "personTotal": 100,
+                    "houseRelationNum": 45,
+                    "houseTotal": 50,
+                    "enterpriseRelationNum": 18,
+                    "enterpriseTotal": 20,
+                    "eventRelationNum": 12,
+                    "eventTotal": 15,
+                    "matterRelationNum": 8,
+                },
+            },
+        )
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        adapter = governance_adapter.HttpGovernanceAdapter(
+            base_url="http://legacy.test/geo-qxst",
+            credential_broker=RecordingCredentialBroker(),
+            client=client,
+        )
+        arguments = models.QueryGovernanceOverviewInput.model_validate(
+            {"query": {"scope": {"area_code": "330106"}}}
+        )
+        auth_context = overview_auth_context()
+        manifest = ToolRegistry.default().get_manifest(
+            "governance.get_governance_overview"
+        )
+        policy = MinimalPolicyAdapter().evaluate(
+            manifest=manifest,
+            auth_context=auth_context,
+            arguments=arguments,
+        )
+
+        with pytest.raises(
+            errors.UpstreamContractError,
+            match="missing required counts",
+        ):
+            await adapter.execute(
+                manifest=manifest,
+                arguments=arguments,
+                policy_decision=policy,
+                auth_context=auth_context,
+            )
+
+
+@pytest.mark.parametrize("invalid_count", [True, 1.0, "1.0", -1, "-1"])
+@pytest.mark.asyncio
+async def test_http_adapter_rejects_non_integer_governance_overview_counts(
+    invalid_count: object,
+) -> None:
+    def handler(_request: httpx.Request) -> httpx.Response:
+        data: dict[str, object] = {
+            "personRelationNum": invalid_count,
+            "personTotal": 100,
+            "houseRelationNum": 45,
+            "houseTotal": 50,
+            "enterpriseRelationNum": 18,
+            "enterpriseTotal": 20,
+            "eventRelationNum": 12,
+            "eventTotal": 15,
+            "matterRelationNum": 8,
+            "matterTotal": 10,
+        }
+        return httpx.Response(
+            200,
+            json={"state": True, "code": 200, "msg": "", "data": data},
+        )
+
+    arguments = models.QueryGovernanceOverviewInput.model_validate(
+        {"query": {"scope": {"area_code": "330106"}}}
+    )
+    auth_context = overview_auth_context()
+    manifest = ToolRegistry.default().get_manifest(
+        "governance.get_governance_overview"
+    )
+    policy = MinimalPolicyAdapter().evaluate(
+        manifest=manifest,
+        auth_context=auth_context,
+        arguments=arguments,
+    )
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        with pytest.raises(errors.UpstreamContractError, match="invalid counts"):
+            await governance_adapter.HttpGovernanceAdapter(
+                base_url="http://legacy.test/geo-qxst",
+                credential_broker=RecordingCredentialBroker(),
+                client=client,
+            ).execute(
+                manifest=manifest,
+                arguments=arguments,
+                policy_decision=policy,
+                auth_context=auth_context,
+            )
+
+
+@pytest.mark.parametrize("area_code", ["33010x", "33010", "3301060010000000"])
+@pytest.mark.asyncio
+async def test_http_governance_overview_rejects_invalid_area_code_semantically(
+    area_code: str,
+) -> None:
+    arguments = models.QueryGovernanceOverviewInput.model_validate(
+        {"query": {"scope": {"area_code": area_code}}}
+    )
+    async with httpx.AsyncClient(
+        transport=httpx.MockTransport(lambda _request: pytest.fail("unexpected HTTP"))
+    ) as client:
+        adapter = governance_adapter.HttpGovernanceAdapter(
+            base_url="http://legacy.test/geo-qxst",
+            credential_broker=RecordingCredentialBroker(),
+            client=client,
+        )
+        with pytest.raises(errors.SemanticValidationError, match="area code"):
+            await adapter._get_governance_overview_http(
+                arguments=arguments,
+                auth_context=overview_auth_context(),
+                timeout_seconds=8,
+                max_attempts=1,
+            )
+
+
+@pytest.mark.asyncio
+async def test_http_adapter_queries_enterprise_metrics_with_form_and_run_token() -> None:
+    requests: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        return httpx.Response(
+            200,
+            json={
+                "state": True,
+                "code": 200,
+                "msg": "",
+                "data": [
+                    {"areaCode": "330106001", "areaName": "翠苑街道", "total": "31"},
+                    {"areaCode": "330106002", "areaName": "北山街道", "total": 18},
+                ],
+            },
+        )
+
+    input_model = getattr(models, "QueryEnterpriseMetricsInput", None)
+    assert input_model is not None
+    arguments = input_model.model_validate(
+        {"query": {"scope": {"area_code": "330106"}, "group_by": ["next_area"]}}
+    )
+    auth_context = _domain_auth_context(
+        entitlement="governance.enterprise.aggregate.read",
+        dataset_id="enterprise",
+    )
+    manifest = ToolRegistry.default().get_manifest(
+        "governance.query_enterprise_metrics"
+    )
+    policy = MinimalPolicyAdapter().evaluate(
+        manifest=manifest,
+        auth_context=auth_context,
+        arguments=arguments,
+    )
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        result = await governance_adapter.HttpGovernanceAdapter(
+            base_url="http://legacy.test/geo-qxst",
+            credential_broker=RecordingCredentialBroker(),
+            client=client,
+        ).execute(
+            manifest=manifest,
+            arguments=arguments,
+            policy_decision=policy,
+            auth_context=auth_context,
+        )
+
+    assert len(requests) == 1
+    assert requests[0].method == "POST"
+    assert requests[0].url.path == "/geo-qxst/enterprise/getNextEnterprise"
+    assert parse_qs(requests[0].content.decode()) == {
+        "areaCode": ["330106"],
+        "areaName": ["county_code"],
+    }
+    assert requests[0].headers["geoToken"] == "run-scoped-token"
+    assert [row.model_dump() for row in result.data.rows] == [
+        {
+            "area_code": "330106001",
+            "area_name": "翠苑街道",
+            "enterprise_count": 31,
+        },
+        {
+            "area_code": "330106002",
+            "area_name": "北山街道",
+            "enterprise_count": 18,
+        },
+    ]
+
+
+@pytest.mark.parametrize(
+    "row",
+    [
+        {"areaCode": "330106001", "areaName": "翠苑街道"},
+        {"areaCode": "330108001", "areaName": "越权街道", "total": 1},
+        {"areaCode": "330106001", "areaName": "翠苑街道", "total": -1},
+        {"areaCode": "330106001", "areaName": "翠苑街道", "total": True},
+        {"areaCode": "330106001", "areaName": "翠苑街道", "total": 1.0},
+        {"areaCode": "330106001", "areaName": "翠苑街道", "total": "1.0"},
+        {"areaCode": "33010600x", "areaName": "非法街道", "total": 1},
+    ],
+)
+@pytest.mark.asyncio
+async def test_http_adapter_rejects_invalid_enterprise_metric_row(
+    row: dict[str, object],
+) -> None:
+    def handler(_request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            json={"state": True, "code": 200, "msg": "", "data": [row]},
+        )
+
+    arguments = models.QueryEnterpriseMetricsInput.model_validate(
+        {"query": {"scope": {"area_code": "330106"}, "group_by": ["next_area"]}}
+    )
+    auth_context = _domain_auth_context(
+        entitlement="governance.enterprise.aggregate.read",
+        dataset_id="enterprise",
+    )
+    manifest = ToolRegistry.default().get_manifest(
+        "governance.query_enterprise_metrics"
+    )
+    policy = MinimalPolicyAdapter().evaluate(
+        manifest=manifest,
+        auth_context=auth_context,
+        arguments=arguments,
+    )
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        with pytest.raises(errors.UpstreamContractError):
+            await governance_adapter.HttpGovernanceAdapter(
+                base_url="http://legacy.test/geo-qxst",
+                credential_broker=RecordingCredentialBroker(),
+                client=client,
+            ).execute(
+                manifest=manifest,
+                arguments=arguments,
+                policy_decision=policy,
+                auth_context=auth_context,
+            )
+
+
+@pytest.mark.parametrize("area_code", ["33010x", "33010", "330106001000000"])
+def test_enterprise_query_rejects_non_numeric_or_unsupported_area_code(
+    area_code: str,
+) -> None:
+    arguments = models.QueryEnterpriseMetricsInput.model_validate(
+        {
+            "query": {
+                "scope": {"area_code": area_code},
+                "group_by": ["next_area"],
+            }
+        }
+    )
+
+    with pytest.raises(errors.SemanticValidationError, match="area code"):
+        governance_adapter._validate_enterprise_next_area_query(arguments)
 
 
 @pytest.mark.asyncio
@@ -433,6 +954,75 @@ async def test_http_adapter_resolves_area_with_run_credential_in_header() -> Non
     assert result.kind == "area_candidates"
     assert result.data.resolved_area_code == "330106"
     assert result.data.candidates[0].level == "district"
+
+
+@pytest.mark.asyncio
+async def test_http_adapter_maps_general_population_to_direct_child_totals() -> None:
+    requests: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        return httpx.Response(
+            200,
+            json={
+                "state": True,
+                "code": 200,
+                "msg": "",
+                "data": [
+                    {
+                        "areaCode": "330106002",
+                        "areaName": "北山街道",
+                        "total": 64000,
+                    },
+                    {
+                        "areaCode": "330106001",
+                        "areaName": "翠苑街道",
+                        "total": 128000,
+                    }
+                ],
+            },
+        )
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        adapter = governance_adapter.HttpGovernanceAdapter(
+            base_url="http://legacy.test/geo-qxst",
+            credential_broker=RecordingCredentialBroker(),
+            client=client,
+        )
+        arguments = QueryPopulationMetricsInput.model_validate(
+            {
+                "query": {
+                    "metrics": ["person_count"],
+                    "scope": {"area_code": "330106"},
+                    "group_by": ["street"],
+                    "order_by": [{"field": "person_count", "direction": "desc"}],
+                }
+            }
+        )
+        auth_context = full_auth_context()
+        manifest = ToolRegistry.default().get_manifest(
+            "governance.query_population_metrics"
+        )
+        policy = MinimalPolicyAdapter().evaluate(
+            manifest=manifest,
+            auth_context=auth_context,
+            arguments=arguments,
+        )
+
+        result = await adapter.execute(
+            manifest=manifest,
+            arguments=arguments,
+            policy_decision=policy,
+            auth_context=auth_context,
+        )
+
+    assert requests[0].url.path == "/geo-qxst/area/getNextPersonByType"
+    assert parse_qs(requests[0].content.decode()) == {
+        "areaName": ["county_code"],
+        "areaCode": ["330106"],
+    }
+    assert result.data.rows[0].area_name == "翠苑街道"
+    assert result.data.rows[0].person_count == 128000
 
 
 @pytest.mark.asyncio

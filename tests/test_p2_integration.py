@@ -10,6 +10,7 @@ import socket
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
+from pydantic import SecretStr
 
 from full_view_agent.application.dynamic_tool_bridge import (
     build_dynamic_tool_registry_entries,
@@ -17,6 +18,7 @@ from full_view_agent.application.dynamic_tool_bridge import (
     convert_tool_capability_to_manifest,
     load_published_tools,
 )
+from full_view_agent.application.errors import CredentialUnavailable
 from full_view_agent.application.tool_registry import ToolRegistry
 from full_view_agent.domain.capability import (
     Connector,
@@ -115,6 +117,32 @@ class TestDynamicToolBridge:
         assert descriptor.tool_version == "1.0.0"
         assert descriptor.name == "Test Query Tool"
         assert "test tool" in descriptor.description.lower()
+
+    def test_builtin_tool_keeps_its_verified_execution_contract(self):
+        """DB lifecycle metadata must not turn a built-in into a generic HTTP tool."""
+
+        tool = ToolCapability(
+            capability_id="governance.query_population_metrics",
+            name="数据库中的旧名称",
+            owner="system",
+            version="1.0.0",
+            status="published",
+            required_permissions=["governance.population.aggregate.read"],
+            dataset_ids=["population"],
+            description="数据库中的宽泛人口描述",
+            connector_ref="governance-geo-qxst",
+            http_method="POST",
+            resource_path="/geo-qxst/population-metrics",
+            input_schema={"type": "object"},
+        )
+
+        manifest = convert_tool_capability_to_manifest(tool)
+        descriptor = convert_tool_capability_to_descriptor(tool)
+        canonical = ToolRegistry.default()
+
+        assert manifest == canonical.get_manifest(tool.capability_id)
+        assert descriptor == canonical.get_model_descriptor(tool.capability_id)
+        assert "独居老人" in descriptor.description
 
     @pytest.mark.asyncio
     async def test_load_published_tools(self):
@@ -305,6 +333,76 @@ class TestHttpConnectorExecutor:
             executor._validate_url_ssrf(
                 "http://service.internal/test", sample_connector.denied_hosts
             )
+
+    @pytest.mark.asyncio
+    async def test_exact_private_host_allowlist_is_shared_by_runtime_executor(self):
+        executor = HttpConnectorExecutor(
+            MagicMock(),
+            allowed_private_hosts=frozenset({"127.0.0.1"}),
+        )
+
+        executor._validate_url_ssrf("http://127.0.0.1:9666/api", [])
+        await executor._validate_dns("http://127.0.0.1:9666/api")
+
+        with pytest.raises(SSRFProtectionError):
+            executor._validate_url_ssrf("http://127.0.0.2:9666/api", [])
+
+        with pytest.raises(SSRFProtectionError):
+            executor._validate_url_ssrf(
+                "http://127.0.0.1:9666/api", ["127.0.0.1"]
+            )
+
+    def test_path_prefix_requires_a_segment_boundary(self, sample_connector):
+        executor = HttpConnectorExecutor(MagicMock())
+
+        executor._validate_path_whitelist(sample_connector, "/api/v1/query")
+        with pytest.raises(SSRFProtectionError):
+            executor._validate_path_whitelist(sample_connector, "/api/v1-evil")
+
+    def test_opaque_credential_reference_is_never_used_as_a_bearer_token(self):
+        executor = HttpConnectorExecutor(MagicMock())
+
+        headers = executor._build_headers("vault.reference.not-a-secret")
+
+        assert headers == {"Accept": "application/json"}
+
+    @pytest.mark.asyncio
+    async def test_credential_reference_is_resolved_by_broker_with_execution_scope(self):
+        broker = AsyncMock()
+        broker.resolve = AsyncMock(return_value=SecretStr("resolved-secret-token"))
+        executor = HttpConnectorExecutor(MagicMock(), credential_broker=broker)
+        resolver = getattr(executor, "_resolve_headers", None)
+
+        assert resolver is not None
+        headers = await resolver(
+            credential_ref="opaque-reference",
+            subject_user_id="user-1",
+            app_id="full_information_view",
+            run_id="run-1",
+        )
+
+        assert headers["Authorization"] == "Bearer resolved-secret-token"
+        assert "opaque-reference" not in str(headers)
+        broker.resolve.assert_awaited_once_with(
+            credential_ref="opaque-reference",
+            subject_user_id="user-1",
+            app_id="full_information_view",
+            run_id="run-1",
+        )
+
+    @pytest.mark.asyncio
+    async def test_credential_reference_without_broker_fails_closed(self):
+        executor = HttpConnectorExecutor(MagicMock())
+
+        with pytest.raises(CredentialUnavailable) as caught:
+            await executor._resolve_headers(
+                credential_ref="opaque-reference-must-not-leak",
+                subject_user_id="user-1",
+                app_id="full_information_view",
+                run_id="run-1",
+            )
+
+        assert "opaque-reference-must-not-leak" not in str(caught.value)
 
     def test_ip_validation(self):
         """Test IP address validation against blocked ranges."""

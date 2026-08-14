@@ -150,6 +150,52 @@ async def test_postgres_session_workspace_management_survives_restart() -> None:
 
 
 @pytest.mark.asyncio
+async def test_postgres_sessions_are_isolated_by_tenant_and_application() -> None:
+    schema = f"fva_test_{uuid4().hex[:12]}"
+    store = PostgresAgentPersistence(dsn=postgres_test_dsn(), schema=schema)
+    await store.initialize()
+    try:
+        service = SessionRunService(store)
+        full_view = await service.create_session(
+            tenant_id="tenant-a",
+            user_id="shared-user",
+            app_id="full_information_view",
+            title="全息图会话",
+        )
+        await service.create_session(
+            tenant_id="tenant-a",
+            user_id="shared-user",
+            app_id="unified_address",
+            title="统一地址会话",
+        )
+        await service.create_session(
+            tenant_id="tenant-b",
+            user_id="shared-user",
+            app_id="full_information_view",
+            title="其他租户会话",
+        )
+
+        restarted = PostgresAgentPersistence(
+            dsn=postgres_test_dsn(),
+            schema=schema,
+        )
+        assert await restarted.list_sessions(
+            tenant_id="tenant-a",
+            user_id="shared-user",
+            app_id="full_information_view",
+        ) == [full_view]
+        with pytest.raises(ResourceNotFound):
+            await restarted.get_session(
+                tenant_id="tenant-a",
+                user_id="shared-user",
+                app_id="unified_address",
+                session_id=full_view.session_id,
+            )
+    finally:
+        await store.drop_schema()
+
+
+@pytest.mark.asyncio
 async def test_postgres_persists_the_run_input_message_atomically() -> None:
     schema = f"fva_test_{uuid4().hex[:12]}"
     store = PostgresAgentPersistence(dsn=postgres_test_dsn(), schema=schema)
@@ -573,6 +619,7 @@ async def test_postgres_event_sequence_is_atomic_across_instances() -> None:
 
 
 @pytest.mark.asyncio
+@pytest.mark.redis
 async def test_redis_wakes_cross_instance_postgres_event_stream() -> None:
     from full_view_agent.infrastructure.redis_event_notifier import (
         RedisEventNotifier,
@@ -766,11 +813,21 @@ async def test_runtime_recovers_active_run_after_process_restart(monkeypatch) ->
 
 
 def test_runtime_container_uses_one_postgres_authority_store(monkeypatch) -> None:
+    """Wiring test: when DATABASE_URL is set, all authority stores
+    collapse to a single PostgresAgentPersistence. No actual DB
+    connection is needed — we only inspect the in-memory object graph.
+    """
     from full_view_agent.api.app import RuntimeContainer
     from full_view_agent.infrastructure.legacy_identity import HashedLegacyIdentityAdapter
 
     schema = f"fva_test_{uuid4().hex[:12]}"
-    monkeypatch.setenv("FULL_VIEW_DATABASE_URL", postgres_test_dsn())
+    # Use a dummy DSN — RuntimeContainer.__post_init__ only reads the
+    # env var to decide between Postgres and in-memory; no connection
+    # is established until a store method is actually called.
+    monkeypatch.setenv(
+        "FULL_VIEW_DATABASE_URL",
+        "postgresql://test:test@127.0.0.1:5432/test_db",
+    )
     monkeypatch.setenv("FULL_VIEW_POSTGRES_SCHEMA", schema)
     monkeypatch.setenv(
         "FULL_VIEW_CREDENTIAL_KEY",
@@ -788,11 +845,18 @@ def test_runtime_container_uses_one_postgres_authority_store(monkeypatch) -> Non
 
 
 def test_runtime_container_wires_redis_notifier_when_configured(monkeypatch) -> None:
+    """Wiring test: when DATABASE_URL + REDIS_URL are set,
+    RuntimeContainer exposes a RedisEventNotifier. No actual DB or
+    Redis connection is needed.
+    """
     from full_view_agent.api.app import RuntimeContainer
     from full_view_agent.infrastructure.legacy_identity import HashedLegacyIdentityAdapter
     from full_view_agent.infrastructure.redis_event_notifier import RedisEventNotifier
 
-    monkeypatch.setenv("FULL_VIEW_DATABASE_URL", postgres_test_dsn())
+    monkeypatch.setenv(
+        "FULL_VIEW_DATABASE_URL",
+        "postgresql://test:test@127.0.0.1:5432/test_db",
+    )
     monkeypatch.setenv("FULL_VIEW_POSTGRES_SCHEMA", f"fva_test_{uuid4().hex[:12]}")
     monkeypatch.setenv("FULL_VIEW_REDIS_URL", "redis://127.0.0.1:16379/0")
     monkeypatch.setenv(

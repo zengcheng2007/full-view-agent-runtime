@@ -217,6 +217,7 @@ async def test_resume_from_safe_checkpoint_does_not_repeat_completed_tool() -> N
     )
 
 
+@pytest.mark.db
 async def test_postgres_checkpoint_survives_orchestrator_and_manager_restart() -> None:
     suffix = uuid4().hex[:12]
     product_schema = f"fva_mapping_test_{suffix}"

@@ -13,11 +13,12 @@ import os
 
 import pytest
 
-DATABASE_URL = os.getenv("FULL_VIEW_DATABASE_URL", "")
+pytestmark = pytest.mark.db
+DATABASE_URL = os.getenv("FULL_VIEW_TEST_DATABASE_URL", "")
 
 requires_postgres = pytest.mark.skipif(
     not DATABASE_URL,
-    reason="FULL_VIEW_DATABASE_URL required for seed capability tests",
+    reason="FULL_VIEW_TEST_DATABASE_URL required for seed capability tests",
 )
 
 
@@ -151,7 +152,7 @@ async def test_capability_snapshot_includes_seed_tools() -> None:
     for tool_id in seed_ids:
         assert snapshot.tool_versions[tool_id] == "1.0.0"
 
-    snapshot_service.remove_snapshot("test-snapshot-seed")
+    await snapshot_service.remove_snapshot("test-snapshot-seed")
 
 
 @requires_postgres

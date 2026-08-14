@@ -209,25 +209,34 @@ async def test_model_hallucinated_catalog_field_is_removed_before_semantic_execu
     assert action.arguments["catalog_fingerprint"] == catalog.execution_fingerprint
 
 
-def test_presenter_marks_catalog_required_filters_as_mandatory() -> None:
+def test_presenter_marks_solitary_elderly_filter_as_optional() -> None:
     presentation = SemanticToolPresenter(catalog=SemanticCatalog.default()).present(
         auth_context=population_auth_context()
     )
 
     assert presentation is not None
-    assert "必填筛选 person_category eq solitary_elderly" in presentation.description
-    assert "查询必须携带" in presentation.description
+    assert "solitary_elderly 表示独居老人" in presentation.description
+    assert "必填筛选 person_category eq solitary_elderly" not in presentation.description
+    assert "查询必须携带" not in presentation.description
 
 
-def test_presenter_identifies_population_binding_as_explicit_solitary_elderly_only() -> None:
+def test_presenter_advertises_general_population_with_optional_elderly_filter() -> None:
     presentation = SemanticToolPresenter(catalog=SemanticCatalog.default()).present(
         auth_context=population_auth_context()
     )
 
     assert presentation is not None
-    assert "population（独居老人指标）" in presentation.description
-    assert "仅当用户明确询问独居老人时使用" in presentation.description
-    assert presentation.subject_intent_terms == {"population": ("独居老人",)}
+    assert "population（人口聚合指标）" in presentation.description
+    assert "独居老人" in presentation.description
+    assert "空巢老人" in presentation.description
+    assert "用户明确询问空巢老人时也按此受控口径查询" in presentation.description
+    assert "综合研判中的人口维度必须保持 filters=[]" in presentation.description
+    assert presentation.subject_intent_terms == {}
+    assert presentation.specialized_filter_intent_terms == {
+        "population": {
+            "person_category:eq:solitary_elderly": ("独居老人", "空巢老人"),
+        }
+    }
 
 
 def test_resolver_rejects_stale_server_pinned_catalog_version() -> None:
@@ -415,14 +424,16 @@ async def test_non_authorization_semantic_failure_does_not_pollute_ledger() -> N
         denial_ledger=ledger,
     )
     auth = population_auth_context()
-    missing_filter = _semantic_arguments()
-    assert isinstance(missing_filter["spec"], dict)
-    missing_filter["spec"]["filters"] = []
+    invalid_filter = _semantic_arguments()
+    assert isinstance(invalid_filter["spec"], dict)
+    invalid_filter["spec"]["filters"] = [
+        {"field": "age", "operator": "gte", "value": 80}
+    ]
 
     result = await stack.executor.execute(
         tool_call_id="tcl-semantic-invalid",
         tool_id=SEMANTIC_QUERY_TOOL_ID,
-        raw_arguments=missing_filter,
+        raw_arguments=invalid_filter,
         auth_context=auth,
     )
     valid_arguments = QueryPopulationMetricsInput.model_validate(
@@ -443,7 +454,7 @@ async def test_non_authorization_semantic_failure_does_not_pollute_ledger() -> N
     )
 
     assert result.status == "failed"
-    assert result.warnings == ["REQUIRED_FILTER_MISSING"]
+    assert result.warnings == ["INVALID_FILTER_FIELD"]
     assert not await ledger.contains(
         manifest=registry.get_manifest("governance.query_population_metrics"),
         arguments=valid_arguments,

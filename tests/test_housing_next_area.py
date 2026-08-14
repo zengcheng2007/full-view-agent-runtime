@@ -22,6 +22,8 @@ from full_view_agent.application.prompt_catalog import (
 from full_view_agent.application.tool_registry import ToolRegistry
 from full_view_agent.domain import models
 from full_view_agent.infrastructure import governance_adapter
+from full_view_agent.semantic.catalog import SemanticCatalog
+from full_view_agent.semantic.presenter import SemanticToolPresenter
 
 from .test_http_governance_adapter import (
     RecordingCredentialBroker,
@@ -240,6 +242,121 @@ async def test_http_adapter_maps_housing_next_area_city_scope_to_city_column() -
         ("330106", "西湖区", 210),
     ]
     assert result.truncated is False
+
+
+@pytest.mark.asyncio
+async def test_http_adapter_fans_out_city_to_all_streets_in_one_tool_call() -> None:
+    requests: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        form = parse_qs(request.content.decode())
+        area_code = form["areaCode"][0]
+        rows_by_area = {
+            "3301": [
+                {"areaCode": "330102", "areaName": "上城区", "total": 900},
+                {"areaCode": "330106", "areaName": "西湖区", "total": 1200},
+            ],
+            "330102": [
+                {"areaCode": "330102001", "areaName": "湖滨街道", "total": 310},
+                {"areaCode": "330102002", "areaName": "丁兰街道", "total": 520},
+            ],
+            "330106": [
+                {"areaCode": "330106001", "areaName": "翠苑街道", "total": 486},
+                {"areaCode": "330106002", "areaName": "文新街道", "total": 412},
+            ],
+        }
+        return httpx.Response(
+            200,
+            json={
+                "state": True,
+                "code": 200,
+                "msg": "",
+                "data": rows_by_area[area_code],
+            },
+        )
+
+    arguments = models.QueryHousingMetricsInput.model_validate(
+        {
+            "query": {
+                "scope": {"area_code": "3301", "include_descendants": True},
+                "group_by": ["descendant_street"],
+            }
+        }
+    )
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        adapter = governance_adapter.HttpGovernanceAdapter(
+            base_url="http://legacy.test/geo-qxst",
+            credential_broker=RecordingCredentialBroker(),
+            client=client,
+        )
+        result = await _execute_housing(adapter, arguments)
+
+    assert len(requests) == 3
+    assert {parse_qs(request.content.decode())["areaCode"][0] for request in requests} == {
+        "3301",
+        "330102",
+        "330106",
+    }
+    assert [(row.area_name, row.dwelling_count) for row in result.data.rows] == [
+        ("丁兰街道", 520),
+        ("翠苑街道", 486),
+        ("文新街道", 412),
+        ("湖滨街道", 310),
+    ]
+    assert result.truncated is False
+
+
+@pytest.mark.asyncio
+async def test_http_adapter_city_street_fanout_fails_closed_on_incomplete_district() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        area_code = parse_qs(request.content.decode())["areaCode"][0]
+        if area_code == "3301":
+            return httpx.Response(
+                200,
+                json={
+                    "state": True,
+                    "code": 200,
+                    "msg": "",
+                    "data": [
+                        {"areaCode": "330102", "areaName": "上城区", "total": 900},
+                        {"areaCode": "330106", "areaName": "西湖区", "total": 1200},
+                    ],
+                },
+            )
+        if area_code == "330106":
+            return httpx.Response(
+                503,
+                json={"state": False, "code": 503, "msg": "upstream failed", "data": []},
+            )
+        return httpx.Response(
+            200,
+            json={
+                "state": True,
+                "code": 200,
+                "msg": "",
+                "data": [
+                    {"areaCode": "330102001", "areaName": "湖滨街道", "total": 310}
+                ],
+            },
+        )
+
+    arguments = models.QueryHousingMetricsInput.model_validate(
+        {
+            "query": {
+                "scope": {"area_code": "3301", "include_descendants": True},
+                "group_by": ["descendant_street"],
+            }
+        }
+    )
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        adapter = governance_adapter.HttpGovernanceAdapter(
+            base_url="http://legacy.test/geo-qxst",
+            credential_broker=RecordingCredentialBroker(),
+            client=client,
+        )
+        with pytest.raises(errors.UpstreamUnavailable):
+            await _execute_housing(adapter, arguments)
 
 
 @pytest.mark.asyncio
@@ -641,6 +758,21 @@ def test_housing_model_surface_advertises_city_wide_district_grouping() -> None:
     assert "不支持全市按区县" not in prompt
 
 
+def test_semantic_housing_surface_marks_next_area_as_descending_result() -> None:
+    presentation = SemanticToolPresenter(
+        catalog=SemanticCatalog.default(housing_next_area_enabled=True)
+    ).present(auth_context=_housing_auth_context())
+
+    assert presentation is not None
+    assert "group_by=['next_area']" in presentation.description
+    assert "结果按出租房数量从高到低返回" in presentation.description
+    # 精确声明已验证的固有顺序，不把任意 order_by 暴露成能力。
+    assert (
+        "order_by 仅支持 group_by=['next_area'] 且 output=table 时 "
+        "dwelling_count desc"
+    ) in presentation.description
+
+
 def test_system_prompt_forbids_unsupported_causal_explanations() -> None:
     prompt = build_full_view_system_prompt(
         {}, tool_ids=("governance.query_housing_metrics",)
@@ -654,7 +786,7 @@ def test_housing_prompt_treats_lease_types_as_dynamic_open_categories() -> None:
         {}, tool_ids=("governance.query_housing_metrics",)
     )
 
-    assert FULL_VIEW_SYSTEM_PROMPT_VERSION == "full-view-governance-readonly-v15"
+    assert FULL_VIEW_SYSTEM_PROMPT_VERSION == "full-view-governance-readonly-v20"
     assert "按上游当前返回的出租类型动态汇总" in prompt
     assert "类型集合由业务数据决定" in prompt
     assert "住宅出租、商铺出租、公寓出租、群租房、工业出租" not in prompt

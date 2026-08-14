@@ -12,15 +12,22 @@ from full_view_agent.application.harness import (
     HarnessState,
 )
 from full_view_agent.domain.models import (
+    EnterpriseMetricRow,
+    EnterpriseMetricTable,
     EventFinishRateRow,
     EventFinishRateTable,
+    EvidenceMetricDefinition,
     GovernanceObjectRef,
+    GovernanceOverviewRow,
+    GovernanceOverviewTable,
     HousingAreaGroupRow,
     HousingAreaGroupTable,
     ObjectProfileData,
     ObjectProfileResult,
     PopulationMetricRow,
     PopulationMetricTable,
+    SemanticFilterLineage,
+    SemanticResultLineage,
     TableDataResult,
     ToolResult,
 )
@@ -127,7 +134,14 @@ async def test_capability_limitation_after_query_returns_only_server_boundary() 
 def metric_result(
     *,
     result_id: str,
-    data: PopulationMetricTable | HousingAreaGroupTable | EventFinishRateTable,
+    data: (
+        PopulationMetricTable
+        | HousingAreaGroupTable
+        | EventFinishRateTable
+        | GovernanceOverviewTable
+        | EnterpriseMetricTable
+    ),
+    semantic_lineage: SemanticResultLineage | None = None,
 ) -> ToolResult:
     rows = data.rows
     return ToolResult(
@@ -136,6 +150,7 @@ def metric_result(
         tool_version="1.0.0",
         status="success",
         summary="查询成功",
+        semantic_lineage=semantic_lineage,
         data_result=TableDataResult(
             result_id=result_id,
             data_schema_ref=f"schema://data/{result_id}/1.0.0",
@@ -167,7 +182,127 @@ async def test_event_claim_renders_contract_label_unit_and_enum_label() -> None:
     )
 
     assert assessment.status == "accept"
-    assert assessment.safe_summary == "网格的办结率为85%。"
+    assert assessment.safe_summary == "网格的事件办结率为85%。"
+
+
+@pytest.mark.asyncio
+async def test_governance_overview_claim_renders_chinese_subject_label() -> None:
+    result = metric_result(
+        result_id="governance-overview",
+        data=GovernanceOverviewTable(
+            rows=[
+                GovernanceOverviewRow(
+                    subject="person",
+                    subject_label="人",
+                    related_count=80,
+                    total_count=100,
+                    coverage_rate=80,
+                )
+            ]
+        ),
+    )
+    overview_claim = claim(
+        result_id="governance-overview",
+        result_fingerprint="sha256:governance-overview",
+        locator={"subject": "person"},
+        field="coverage_rate",
+        value=80,
+    )
+
+    assessment = await DeterministicCompletionValidator().assess(
+        HarnessState(tool_results=(result,)), finish(overview_claim)
+    )
+
+    assert assessment.status == "accept"
+    assert assessment.safe_summary == "人的治理覆盖率为80%。"
+    assert "person" not in assessment.safe_summary
+
+
+@pytest.mark.asyncio
+async def test_enterprise_claim_renders_business_area_name_and_unit() -> None:
+    result = metric_result(
+        result_id="enterprise",
+        data=EnterpriseMetricTable(
+            rows=[
+                EnterpriseMetricRow(
+                    area_code="330106001",
+                    area_name="翠苑街道",
+                    enterprise_count=31,
+                )
+            ]
+        ),
+    )
+    enterprise_claim = claim(
+        result_id="enterprise",
+        result_fingerprint="sha256:enterprise",
+        locator={"area_code": "330106001"},
+        field="enterprise_count",
+        value=31,
+    )
+
+    assessment = await DeterministicCompletionValidator().assess(
+        HarnessState(tool_results=(result,)), finish(enterprise_claim)
+    )
+
+    assert assessment.status == "accept"
+    assert assessment.safe_summary == "翠苑街道的企业数量为31家。"
+
+
+@pytest.mark.asyncio
+async def test_comprehensive_claims_keep_governance_and_enterprise_business_labels() -> None:
+    overview = metric_result(
+        result_id="governance-overview",
+        data=GovernanceOverviewTable(
+            rows=[
+                GovernanceOverviewRow(
+                    subject="enterprise",
+                    subject_label="企",
+                    related_count=18,
+                    total_count=20,
+                    coverage_rate=90,
+                )
+            ]
+        ),
+    )
+    enterprise = metric_result(
+        result_id="enterprise",
+        data=EnterpriseMetricTable(
+            rows=[
+                EnterpriseMetricRow(
+                    area_code="330106001",
+                    area_name="翠苑街道",
+                    enterprise_count=31,
+                )
+            ]
+        ),
+    )
+    overview_claim = claim(
+        result_id="governance-overview",
+        result_fingerprint="sha256:governance-overview",
+        locator={"subject": "enterprise"},
+        field="coverage_rate",
+        value=90,
+    )
+    enterprise_claim = claim(
+        result_id="enterprise",
+        result_fingerprint="sha256:enterprise",
+        locator={"area_code": "330106001"},
+        field="enterprise_count",
+        value=31,
+    ).model_copy(update={"claim_id": "claim-2"})
+
+    assessment = await DeterministicCompletionValidator().assess(
+        HarnessState(tool_results=(overview, enterprise)),
+        finish(overview_claim, enterprise_claim),
+    )
+
+    assert assessment.status == "accept"
+    assert assessment.safe_summary == (
+        "企的治理覆盖率为90%。\n翠苑街道的企业数量为31家。"
+    )
+    assert not {"person", "house", "enterprise", "event", "matter"}.intersection(
+        assessment.safe_summary.split()
+    )
 
 
 @pytest.mark.asyncio
@@ -195,7 +330,96 @@ async def test_population_claim_renders_contract_label_and_unit() -> None:
     )
 
     assert assessment.status == "accept"
-    assert assessment.safe_summary == "西湖区的独居老人人数为1200人。"
+    assert assessment.safe_summary == "西湖区的人口数为1200人。"
+
+
+@pytest.mark.asyncio
+async def test_population_claim_preserves_server_resolved_filter_context() -> None:
+    lineage = SemanticResultLineage(
+        virtual_tool_id="governance.semantic_query",
+        virtual_tool_version="1.0.0",
+        spec_version="s0.1",
+        catalog_version="catalog-v1",
+        subject="population",
+        logical_dataset_id="population",
+        canonical_tool_id="governance.query_population_metrics",
+        canonical_tool_version="1.0.0",
+        spec_fingerprint="sha256:spec",
+        plan_fingerprint="sha256:plan",
+        area_code="330106",
+        output="table",
+        metric_definitions=[
+            EvidenceMetricDefinition(
+                metric_id="person_count",
+                definition_version="1.0.0",
+            )
+        ],
+        filter_contexts=[
+            SemanticFilterLineage(
+                field="person_category",
+                operator="eq",
+                value="solitary_elderly",
+                display_label="独居老人",
+            )
+        ],
+    )
+    result = metric_result(
+        result_id="population",
+        semantic_lineage=lineage,
+        data=PopulationMetricTable(
+            rows=[
+                PopulationMetricRow(
+                    area_code="330106001",
+                    area_name="示例街道",
+                    person_count=128,
+                )
+            ]
+        ),
+    )
+    population_claim = claim(
+        result_id="population",
+        result_fingerprint="sha256:population",
+        locator={"area_code": "330106001"},
+        field="person_count",
+        value=128,
+    )
+
+    assessment = await DeterministicCompletionValidator().assess(
+        HarnessState(tool_results=(result,)), finish(population_claim)
+    )
+
+    assert assessment.status == "accept"
+    assert assessment.safe_summary == "独居老人中，示例街道的人口数为128人。"
+
+
+@pytest.mark.asyncio
+async def test_area_code_locator_renders_available_area_name() -> None:
+    result = metric_result(
+        result_id="population",
+        data=PopulationMetricTable(
+            rows=[
+                PopulationMetricRow(
+                    area_code="330106011",
+                    area_name="转塘街道",
+                    person_count=1840,
+                )
+            ]
+        ),
+    )
+    population_claim = claim(
+        result_id="population",
+        result_fingerprint="sha256:population",
+        locator={"area_code": "330106011", "area_name": "转塘街道"},
+        field="person_count",
+        value=1840,
+    )
+
+    assessment = await DeterministicCompletionValidator().assess(
+        HarnessState(tool_results=(result,)), finish(population_claim)
+    )
+
+    assert assessment.status == "accept"
+    assert assessment.safe_summary == "转塘街道的人口数为1840人。"
 
 
 @pytest.mark.asyncio

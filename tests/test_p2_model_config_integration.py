@@ -9,6 +9,7 @@ import asyncio
 
 import pytest
 
+from full_view_agent.application.errors import RunStateConflict
 from full_view_agent.application.model_config_service import (
     EncryptedModelConfigKeyStore,
     InMemoryModelConfigKeyStore,
@@ -91,7 +92,7 @@ class TestModelConfigIntegration:
 
     @pytest.mark.asyncio
     async def test_resolve_for_runtime_multiple_configs(self):
-        """Test that resolve_for_runtime returns the first enabled config."""
+        """Legacy runtime refuses to choose arbitrarily from the public pool."""
         from pydantic import SecretStr
 
         repo = InMemoryModelConfigRepository()
@@ -130,12 +131,8 @@ class TestModelConfigIntegration:
         await key_store.store_key(config_id="config.2", api_key=SecretStr("key-2"))
         await key_store.store_key(config_id="config.3", api_key=SecretStr("key-3"))
 
-        # Resolve for runtime - should return first enabled (config.2)
-        resolved = await service.resolve_for_runtime()
-
-        assert resolved is not None
-        # Note: list_all returns configs sorted by created_at, so config.2 comes first
-        assert resolved.model_name in ["gpt-3.5-turbo", "claude-3"]
+        with pytest.raises(RunStateConflict, match="default model"):
+            await service.resolve_for_runtime()
 
     @pytest.mark.asyncio
     async def test_encrypted_key_store_persistence(self):

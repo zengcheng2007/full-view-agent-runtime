@@ -196,7 +196,10 @@ async def test_real_dynamic_tool_execution(upstream_server: str) -> None:
     repo = InMemoryCapabilityRepository()
     management = CapabilityManagementService(repo)
 
-    executor = HttpConnectorExecutor(repo, allow_private_networks=True)
+    executor = HttpConnectorExecutor(
+        repo,
+        allowed_private_hosts=frozenset({"127.0.0.1"}),
+    )
     adapter = HttpDynamicToolAdapter(repository=repo, http_executor=executor)
 
     registry = ToolRegistry.default()
@@ -242,7 +245,7 @@ async def test_real_dynamic_tool_execution(upstream_server: str) -> None:
         status="draft",
         risk_level="low",
         required_permissions=[],
-        dataset_ids=[],
+        dataset_ids=["population"],
         connector_ref="test-upstream-connector",
         http_method="GET",
         resource_path="/api/v1/population",
@@ -254,6 +257,19 @@ async def test_real_dynamic_tool_execution(upstream_server: str) -> None:
             "query.area_name": {"source": "arguments", "path": "area_name"},
         },
         result_kind="table",
+        output_schema={
+            "type": "object",
+            "required": ["rows"],
+            "properties": {
+                "rows": {
+                    "type": "array",
+                    "items": {
+                        "type": "object",
+                        "required": ["area_code", "area_name", "population"],
+                    },
+                }
+            },
+        },
         created_by="test",
         updated_by="test",
     )
@@ -295,8 +311,14 @@ async def test_real_dynamic_tool_execution(upstream_server: str) -> None:
     assert req["method"] == "GET"
     assert "/api/v1/population" in req["path"]
 
-    # Assert: result is formed
-    assert result is not None
+    # Assert: the upstream payload is preserved as a real table result rather
+    # than being replaced by an empty generic placeholder.
+    assert isinstance(result.data_result, models.TableDataResult)
+    assert result.data_result.kind == "table"
+    assert result.data_result.row_count == 2
+    assert result.data_result.data.model_dump(mode="json")["rows"] == (
+        _UpstreamHandler.response_payload["rows"]
+    )
 
 
 @pytest.mark.asyncio

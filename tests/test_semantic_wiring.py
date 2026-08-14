@@ -270,8 +270,11 @@ def test_presenter_derives_description_from_catalog_not_handwritten_list() -> No
     # 所有已绑定主题都只通过统一语义入口对模型暴露；规范 Tool 仍保留在
     # Registry/CapabilityService 内部供编译结果兼容执行。
     assert presentation.shadowed_tool_ids == (
-        "governance.query_event_metrics",
-        "governance.query_housing_metrics",
+        "governance.get_governance_overview",
+        "governance.query_enterprise_metrics",
+            "governance.query_event_metrics",
+            "governance.query_governance_power_metrics",
+            "governance.query_housing_metrics",
         "governance.query_population_metrics",
     )
     description = presentation.description
@@ -321,7 +324,7 @@ async def test_context_builder_advertises_semantic_tool_and_prompt_section() -> 
     assert "语义查询入口说明" in prompt
     assert "semantic_query" in prompt
     assert "governance.query_population_metrics" not in prompt
-    assert request.prompt_version == "full-view-governance-readonly-v15"
+    assert request.prompt_version == "full-view-governance-readonly-v20"
 
 
 @pytest.mark.asyncio

@@ -88,6 +88,35 @@ def test_policy_denies_population_query_outside_authorized_area() -> None:
                 {"query": {"scope": {"area_code": "330108"}}}
             ),
         ),
+        (
+            "governance.query_enterprise_metrics",
+            "enterprise",
+            "governance.enterprise.aggregate.read",
+            models.QueryEnterpriseMetricsInput.model_validate(
+                {
+                    "query": {
+                        "scope": {"area_code": "330108"},
+                        "group_by": ["next_area"],
+                    }
+                }
+            ),
+        ),
+        (
+            "governance.get_governance_overview",
+            "governance_overview",
+            "governance.overview.aggregate.read",
+            models.QueryGovernanceOverviewInput.model_validate(
+                {"query": {"scope": {"area_code": "330108"}}}
+            ),
+        ),
+        (
+            "governance.query_governance_power_metrics",
+            "governance_power",
+            "governance.power.aggregate.read",
+            models.QueryGovernancePowerMetricsInput.model_validate(
+                {"query": {"scope": {"area_code": "330108"}}}
+            ),
+        ),
     ],
 )
 def test_policy_denies_every_metric_query_outside_authorized_area(

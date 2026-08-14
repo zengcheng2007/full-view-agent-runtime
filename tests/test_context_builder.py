@@ -92,7 +92,7 @@ async def test_context_builder_uses_messages_and_only_authorized_tools() -> None
     assert [tool.tool_id for tool in request.tools] == [
         "governance.query_population_metrics"
     ]
-    assert request.prompt_version == "full-view-governance-readonly-v15"
+    assert request.prompt_version == "full-view-governance-readonly-v20"
     assert "full_view.finish_answer" in (request.messages[0].content or "")
     assert "每条事实必须绑定 result_id" in (request.messages[0].content or "")
     assert "需要业务数据时必须调用" in request.messages[0].content
@@ -178,7 +178,9 @@ async def test_context_builder_does_not_advertise_unimplemented_event_filters() 
     )
 
     prompt = request.messages[0].content
-    assert "事件总量或办结数" in prompt
+    assert "事件总数月度趋势" in prompt
+    assert "time_range" in prompt
+    assert "不得表述为上报或处置趋势" in prompt
     assert "不支持按阈值筛选" in prompt
     assert "min_finish_rate" not in prompt
 

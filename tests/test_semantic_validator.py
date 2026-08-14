@@ -109,7 +109,7 @@ def test_valid_event_spec_passes(validator: SemanticValidator) -> None:
 
 
 def test_unknown_subject_rejected(validator: SemanticValidator) -> None:
-    report = validator.validate(_spec(subject="enterprise"))
+    report = validator.validate(_spec(subject="traffic"))
     assert ViolationCode.UNKNOWN_SUBJECT in _codes(report)
     assert not report.is_valid
 
@@ -161,7 +161,7 @@ def test_scope_level_unsupported(validator: SemanticValidator) -> None:
     city = validator.validate(
         _spec(scope={"area_code": "3301"}, group_by=["street"])
     )
-    assert ViolationCode.SCOPE_LEVEL_UNSUPPORTED in _codes(city)
+    assert ViolationCode.GROUP_BY_SCOPE_MISMATCH in _codes(city)
 
 
 def test_housing_next_area_rejects_grid_scope(validator: SemanticValidator) -> None:
@@ -202,6 +202,58 @@ def test_housing_next_area_rejected_when_deployment_gate_closed() -> None:
         authorization=FULL_AUTH,
     )
     assert lease_self.is_valid, lease_self.violations
+
+
+def test_housing_next_area_accepts_only_its_intrinsic_dwelling_count_desc_order(
+    validator: SemanticValidator,
+) -> None:
+    report = validator.validate(
+        _spec(
+            subject="housing",
+            metrics=["dwelling_count"],
+            filters=[],
+            group_by=["next_area"],
+            order_by=[{"field": "dwelling_count", "direction": "desc"}],
+            output="table",
+        ),
+        authorization=FULL_AUTH,
+    )
+
+    assert report.is_valid, report.violations
+
+
+@pytest.mark.parametrize(
+    "overrides",
+    [
+        {"order_by": [{"field": "dwelling_count", "direction": "asc"}]},
+        {"group_by": [], "order_by": [{"field": "dwelling_count", "direction": "desc"}]},
+        {
+            "filters": [{"field": "lease_type", "operator": "eq", "value": "住宅"}],
+            "order_by": [{"field": "dwelling_count", "direction": "desc"}],
+        },
+        {
+            "output": "choropleth",
+            "order_by": [{"field": "dwelling_count", "direction": "desc"}],
+        },
+    ],
+)
+def test_housing_intrinsic_order_does_not_widen_other_shapes_or_constraints(
+    validator: SemanticValidator,
+    overrides: dict[str, object],
+) -> None:
+    values: dict[str, object] = {
+        "subject": "housing",
+        "metrics": ["dwelling_count"],
+        "filters": [],
+        "group_by": ["next_area"],
+    }
+    values.update(overrides)
+    report = validator.validate(
+        _spec(**values),
+        authorization=FULL_AUTH,
+    )
+
+    assert ViolationCode.INVALID_ORDER_BY in _codes(report)
 
 
 # ---------------------------------------------------------------------------
@@ -257,7 +309,7 @@ def test_structurally_valid_levels_still_constrained_by_subject(
 ) -> None:
     # 结构合法的层级，主题没有对应真实能力时仍由 Validator 拒绝。
     city = validator.validate(_spec(scope={"area_code": "3301"}, group_by=["street"]))
-    assert ViolationCode.SCOPE_LEVEL_UNSUPPORTED in _codes(city)
+    assert ViolationCode.GROUP_BY_SCOPE_MISMATCH in _codes(city)
     grid = validator.validate(
         _spec(scope={"area_code": "330106001001001"}, group_by=["grid"])
     )
@@ -294,7 +346,7 @@ def test_event_rejects_any_group_by(validator: SemanticValidator) -> None:
 # ---------------------------------------------------------------------------
 
 
-@pytest.mark.parametrize("metric", ["event_count", "finish_count", "total_count"])
+@pytest.mark.parametrize("metric", ["finish_count", "total_count"])
 def test_event_rejects_total_or_volume_metrics(
     validator: SemanticValidator, metric: str
 ) -> None:
@@ -303,6 +355,16 @@ def test_event_rejects_total_or_volume_metrics(
         _spec(subject="event", metrics=[metric], filters=[], group_by=[])
     )
     assert ViolationCode.UNKNOWN_METRIC in _codes(report)
+
+
+def test_event_count_requires_month_grouping_and_time_range(
+    validator: SemanticValidator,
+) -> None:
+    report = validator.validate(
+        _spec(subject="event", metrics=["event_count"], filters=[], group_by=[])
+    )
+
+    assert ViolationCode.INVALID_RESULT_SHAPE in _codes(report)
 
 
 @pytest.mark.parametrize("dimension", ["next_area", "street", "grid"])
@@ -476,12 +538,11 @@ def test_housing_and_event_reject_all_filters(
 @pytest.mark.parametrize(
     ("subject", "metrics", "scope", "group_by"),
     [
-        ("population", ["person_count"], "330106", ["street"]),
         ("housing", ["dwelling_count"], "330106", []),
         ("event", ["finish_rate"], "330106", []),
     ],
 )
-def test_order_by_rejected_for_all_verified_subjects(
+def test_order_by_rejected_for_subjects_without_verified_sorting(
     validator: SemanticValidator,
     subject: str,
     metrics: list[str],
@@ -499,6 +560,22 @@ def test_order_by_rejected_for_all_verified_subjects(
         )
     )
     assert ViolationCode.INVALID_ORDER_BY in _codes(report)
+
+
+def test_population_person_count_order_by_is_supported(
+    validator: SemanticValidator,
+) -> None:
+    report = validator.validate(
+        _spec(
+            subject="population",
+            metrics=["person_count"],
+            scope={"area_code": "330106"},
+            filters=[],
+            group_by=["street"],
+            order_by=[{"field": "person_count", "direction": "desc"}],
+        )
+    )
+    assert report.is_valid
 
 
 def test_time_range_rejected_until_source_supports_it(

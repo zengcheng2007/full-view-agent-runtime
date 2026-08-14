@@ -16,6 +16,43 @@ def test_export_contracts_writes_openapi_and_versioned_json_schemas(tmp_path) ->
     assert "/agent-api/v1/runs/{run_id}/steers" in openapi["paths"]
     assert "/agent-api/v1/runs/{run_id}/analysis-plans" in openapi["paths"]
     assert "/agent-api/v1/sessions/{session_id}/messages" in openapi["paths"]
+
+    workflow_body = openapi["components"]["schemas"]["WorkflowCreateBody"]
+    workflow_node_ref = workflow_body["properties"]["nodes"]["items"]["$ref"]
+    workflow_node = openapi["components"]["schemas"][
+        workflow_node_ref.rsplit("/", 1)[-1]
+    ]
+    node_types = workflow_node["properties"]["node_type"]["enum"]
+    assert "condition" in node_types
+    assert "join" in node_types
+    assert "parallel" not in node_types
+    assert workflow_body["properties"]["edges"]["items"]["$ref"].endswith(
+        "/WorkflowEdgeDefinition"
+    )
+    workflow_paths = openapi["paths"]
+    create_workflow_response = workflow_paths["/capability-api/v1/workflows"][
+        "post"
+    ]["responses"]["201"]["content"]["application/json"]["schema"]
+    workflow_detail_response = workflow_paths[
+        "/capability-api/v1/workflows/{capability_id}/{version}"
+    ]["get"]["responses"]["200"]["content"]["application/json"]["schema"]
+    workflow_dry_run_response = workflow_paths[
+        "/capability-api/v1/workflows/{capability_id}/{version}/dry-run"
+    ]["post"]["responses"]["200"]["content"]["application/json"]["schema"]
+    assert create_workflow_response["$ref"].endswith("/WorkflowDefinitionResponse")
+    assert workflow_detail_response["$ref"].endswith("/WorkflowDefinitionResponse")
+    assert workflow_dry_run_response["$ref"].endswith("/WorkflowDryRunResponse")
+    definition_response = openapi["components"]["schemas"][
+        "WorkflowDefinitionResponse"
+    ]
+    assert definition_response["properties"]["data"]["$ref"].endswith(
+        "/WorkflowCapability"
+    )
+    dry_run_data = openapi["components"]["schemas"]["WorkflowDryRunData"]
+    assert dry_run_data["properties"]["workflow"]["$ref"].endswith(
+        "/RuntimeWorkflowGraphSnapshot"
+    )
+    assert "condition_expression" in workflow_node["properties"]
     security_scheme = openapi["components"]["securitySchemes"]["GeoToken"]
     assert security_scheme == {"type": "apiKey", "in": "header", "name": "geoToken"}
     assert openapi["paths"]["/agent-api/v1/sessions"]["post"]["security"] == [
@@ -98,7 +135,11 @@ def test_export_contracts_writes_openapi_and_versioned_json_schemas(tmp_path) ->
         "tools/query-population-metrics-input.schema.json": (
             "QueryPopulationMetricsInput"
         ),
-        "tools/get-object-profile-input.schema.json": "GetObjectProfileInput",
+        "tools/query-governance-power-metrics-input.schema.json": (
+            "QueryGovernancePowerMetricsInput"
+        ),
+            "tools/get-object-profile-input.schema.json": "GetObjectProfileInput",
+            "tools/knowledge-search-input.schema.json": "KnowledgeSearchInput",
         "tools/tool-result.schema.json": "ToolResult",
         "data/area-candidates.schema.json": "AreaCandidatesResult",
         "data/object-profile.schema.json": "ObjectProfileResult",
@@ -113,6 +154,11 @@ def test_export_contracts_writes_openapi_and_versioned_json_schemas(tmp_path) ->
         ),
         "data/tool-specific/event-finish-rate-table.schema.json": (
             "EventFinishRateTable"
+        ),
+        "data/tool-specific/event-category-table.schema.json": "EventCategoryTable",
+        "data/tool-specific/event-trend-table.schema.json": "EventTrendTable",
+        "data/tool-specific/governance-power-metric-table.schema.json": (
+            "GovernancePowerMetricTable"
         ),
     }
     for relative_path, expected_title in expected_schemas.items():
@@ -142,12 +188,16 @@ def test_export_contracts_writes_openapi_and_versioned_json_schemas(tmp_path) ->
         ).read_text(encoding="utf-8")
     )
     assert [item["tool_id"] for item in descriptors] == [
+        "governance.get_governance_overview",
         "governance.get_object_profile",
+        "governance.query_enterprise_metrics",
         "governance.query_event_metrics",
+        "governance.query_governance_power_metrics",
         "governance.query_housing_metrics",
         "governance.query_population_metrics",
-        "governance.resolve_area",
-    ]
+            "governance.resolve_area",
+            "knowledge.search",
+        ]
     assert all("adapter_ref" not in item for item in descriptors)
     for descriptor in descriptors:
         schema_ref = descriptor["input_schema"]["$ref"]

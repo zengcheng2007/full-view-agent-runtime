@@ -15,8 +15,9 @@ import psycopg
 import pytest
 from pydantic import SecretStr
 
-DATABASE_URL = os.getenv("FULL_VIEW_DATABASE_URL", "")
-CREDENTIAL_KEY_B64 = os.getenv("FULL_VIEW_CREDENTIAL_KEY", "")
+pytestmark = pytest.mark.db
+DATABASE_URL = os.getenv("FULL_VIEW_TEST_DATABASE_URL", "")
+CREDENTIAL_KEY_B64 = os.getenv("FULL_VIEW_TEST_CREDENTIAL_KEY", "")
 
 
 def _get_credential_key() -> bytes:
@@ -27,7 +28,7 @@ def _get_credential_key() -> bytes:
 
 requires_postgres = pytest.mark.skipif(
     not DATABASE_URL,
-    reason="FULL_VIEW_DATABASE_URL required for A3 test",
+    reason="FULL_VIEW_TEST_DATABASE_URL required for A3 test",
 )
 
 
