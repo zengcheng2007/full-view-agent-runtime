@@ -51,7 +51,10 @@ def _identity(*, tenant_id: str = "tenant-a", roles: list[str] | None = None):
 
 
 def _runtime(identity: LegacyIdentitySnapshot | None = None) -> RuntimeContainer:
-    runtime = RuntimeContainer(credentials=InMemoryCredentialBroker())
+    runtime = RuntimeContainer(
+        credentials=InMemoryCredentialBroker(),
+        events=InMemoryEventBroker(retention_seconds=3600, now=lambda: NOW),
+    )
     runtime.capability_identity_port = AsyncMock()
     runtime.capability_identity_port.resolve = AsyncMock(return_value=identity or _identity())
     return runtime
