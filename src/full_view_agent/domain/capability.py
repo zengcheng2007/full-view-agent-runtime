@@ -11,7 +11,7 @@ import re
 from datetime import UTC, datetime
 from typing import Annotated, Literal
 
-from pydantic import Field, field_validator, model_validator
+from pydantic import Field, JsonValue, field_validator, model_validator
 
 from full_view_agent.domain.contract_model import ContractModel
 
@@ -100,6 +100,7 @@ class ToolSemanticMetric(ContractModel):
     label: str = Field(min_length=1, max_length=100)
     unit: str | None = Field(default=None, max_length=32)
     value_type: Literal["integer", "number"]
+    intent_terms: tuple[str, ...] = ()
 
 
 class ToolSemanticDimension(ContractModel):
@@ -108,6 +109,12 @@ class ToolSemanticDimension(ContractModel):
     )
     label: str = Field(min_length=1, max_length=100)
     kind: Literal["category", "administrative_area", "time"]
+    intent_terms: tuple[str, ...] = ()
+
+
+class ToolSemanticOperatorIntent(ContractModel):
+    operator: SemanticOperator
+    terms: tuple[str, ...] = Field(min_length=1)
 
 
 class ToolSemanticFilter(ContractModel):
@@ -148,6 +155,7 @@ class ToolSemanticQueryShape(ContractModel):
     result_schema_ref: str = Field(min_length=1, max_length=300)
     result_row_fields: tuple[str, ...] = Field(min_length=1)
     result_fingerprint_domain: str = Field(min_length=1, max_length=300)
+    argument_template: dict[str, JsonValue] | None = None
 
     @model_validator(mode="after")
     def require_exact_executable_shape(self) -> ToolSemanticQueryShape:
@@ -157,7 +165,40 @@ class ToolSemanticQueryShape(ContractModel):
             raise ValueError("semantic query shape must declare exactly one output form")
         if len(self.result_row_fields) != len(set(self.result_row_fields)):
             raise ValueError("semantic query shape result fields must be unique")
+        if self.argument_template is not None:
+            _validate_semantic_argument_template(self.argument_template)
         return self
+
+
+_SEMANTIC_ARGUMENT_PLACEHOLDERS = frozenset(
+    {
+        "$semantic.metrics",
+        "$semantic.metric",
+        "$semantic.operator",
+        "$semantic.scope",
+        "$semantic.scope.area_code",
+        "$semantic.group_by",
+        "$semantic.filters",
+        "$semantic.order_by",
+        "$semantic.limit",
+        "$semantic.output",
+        "$semantic.time_range",
+    }
+)
+
+
+def _validate_semantic_argument_template(value: JsonValue) -> None:
+    if isinstance(value, str) and value.startswith("$semantic."):
+        if value not in _SEMANTIC_ARGUMENT_PLACEHOLDERS:
+            raise ValueError(f"unknown semantic argument placeholder: {value}")
+        return
+    if isinstance(value, dict):
+        for nested in value.values():
+            _validate_semantic_argument_template(nested)
+        return
+    if isinstance(value, list):
+        for nested in value:
+            _validate_semantic_argument_template(nested)
 
 
 class ToolSemanticContract(ContractModel):
@@ -165,10 +206,13 @@ class ToolSemanticContract(ContractModel):
 
     schema_version: Literal["1.0"] = "1.0"
     subject: str = Field(min_length=1, max_length=64, pattern=r"^[a-z][a-z0-9_]*$")
+    intent_terms: tuple[str, ...] = ()
+    excluded_intent_terms: tuple[str, ...] = ()
     metrics: tuple[ToolSemanticMetric, ...] = Field(min_length=1)
     dimensions: tuple[ToolSemanticDimension, ...]
     filters: tuple[ToolSemanticFilter, ...]
     operators: tuple[SemanticOperator, ...] = Field(min_length=1)
+    operator_intents: tuple[ToolSemanticOperatorIntent, ...] = ()
     sort: ToolSemanticSort
     completeness: ToolSemanticCompleteness
     output_forms: tuple[SemanticOutputForm, ...] = Field(min_length=1)
@@ -189,6 +233,29 @@ class ToolSemanticContract(ContractModel):
             raise ValueError("semantic filter fields must be unique")
         if len(self.operators) != len(set(self.operators)):
             raise ValueError("semantic operators must be unique")
+        operator_intents = [item.operator for item in self.operator_intents]
+        if len(operator_intents) != len(set(operator_intents)):
+            raise ValueError("semantic operator intents must be unique")
+        if not set(operator_intents).issubset(self.operators):
+            raise ValueError("semantic operator intent is not supported")
+        term_groups = (
+            self.intent_terms,
+            self.excluded_intent_terms,
+            *(metric.intent_terms for metric in self.metrics),
+            *(dimension.intent_terms for dimension in self.dimensions),
+            *(item.terms for item in self.operator_intents),
+        )
+        for terms in term_groups:
+            if any(not term.strip() for term in terms):
+                raise ValueError("semantic intent terms must not contain blank values")
+            if len(terms) != len(set(terms)):
+                raise ValueError("semantic intent terms must be unique")
+        operator_term_owner: dict[str, SemanticOperator] = {}
+        for item in self.operator_intents:
+            for term in item.terms:
+                owner = operator_term_owner.setdefault(term, item.operator)
+                if owner != item.operator:
+                    raise ValueError("semantic operator terms must not be ambiguous")
         known_sort_fields = set(metric_ids).union(dimension_ids)
         for field in (*self.sort.allowed_fields, *self.sort.tie_breakers):
             if field not in known_sort_fields:
@@ -225,6 +292,20 @@ class ToolSemanticContract(ContractModel):
                 for shape in self.query_shapes
             ):
                 raise ValueError("semantic example does not match a declared query shape")
+        if self.intent_terms:
+            if any(not metric.intent_terms for metric in self.metrics):
+                raise ValueError("intent-routed semantic metrics require intent terms")
+            if any(not dimension.intent_terms for dimension in self.dimensions):
+                raise ValueError("intent-routed semantic dimensions require intent terms")
+            declared_operator_intents = {item.operator for item in self.operator_intents}
+            if declared_operator_intents != set(self.operators):
+                raise ValueError(
+                    "intent-routed semantic operators require exact intent terms"
+                )
+            if any(shape.argument_template is None for shape in self.query_shapes):
+                raise ValueError(
+                    "intent-routed semantic query shapes require argument templates"
+                )
         return self
 
 

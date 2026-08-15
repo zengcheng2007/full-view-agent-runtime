@@ -10,6 +10,24 @@ class AreaScopedContract(Protocol):
     def authorization_area_scope(self) -> MetricQueryScope | None: ...
 
 
+class DynamicToolArguments(BaseModel):
+    """Policy-safe wrapper for JSON-Schema validated dynamic Tool arguments."""
+
+    data: dict[str, object]
+
+    def authorization_area_scope(self) -> MetricQueryScope | None:
+        container: object = self.data.get("query", self.data)
+        if not isinstance(container, dict):
+            return None
+        scope = container.get("scope")
+        if not isinstance(scope, dict):
+            return None
+        try:
+            return MetricQueryScope.model_validate(scope)
+        except ValueError:
+            return None
+
+
 def extract_area_scope(value: BaseModel | None) -> MetricQueryScope | None:
     if value is None or not isinstance(value, AreaScopedContract):
         return None

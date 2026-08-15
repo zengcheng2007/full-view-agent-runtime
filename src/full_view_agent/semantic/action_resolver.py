@@ -147,13 +147,14 @@ class SemanticActionResolver:
         compiler: SemanticCompiler | None = None,
         guard: ExecutionGuard | None = None,
     ) -> None:
-        self._catalog = catalog
-        self._validator = validator or SemanticValidator(catalog)
+        effective_catalog = catalog.with_registry_contracts(registry)
+        self._catalog = effective_catalog
+        self._validator = validator or SemanticValidator(effective_catalog)
         self._compiler = compiler or SemanticCompiler(
-            catalog, self._validator, registry=registry
+            effective_catalog, self._validator, registry=registry
         )
         self._guard = guard or ExecutionGuard(
-            catalog=catalog, registry=registry, policy=policy
+            catalog=effective_catalog, registry=registry, policy=policy
         )
 
     @property

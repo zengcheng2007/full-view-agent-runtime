@@ -15,6 +15,7 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
 from full_view_agent.application.errors import ResourceNotFound
+from full_view_agent.domain.capability import ToolSemanticContract
 from full_view_agent.domain.models import AuthContext
 from full_view_agent.semantic.action_resolver import (
     SEMANTIC_QUERY_TOOL_ID,
@@ -42,6 +43,7 @@ class SemanticToolPresentation:
     description: str
     input_schema: dict[str, object]
     server_arguments: dict[str, object]
+    semantic_contracts: tuple[ToolSemanticContract, ...]
     subject_intent_terms: dict[str, tuple[str, ...]]
     subject_trigger_terms: dict[str, tuple[str, ...]]
     specialized_filter_intent_terms: dict[
@@ -60,7 +62,11 @@ class SemanticToolPresenter:
         catalog: SemanticCatalog,
         registry: "ToolRegistry | None" = None,
     ) -> None:
-        self._catalog = catalog
+        self._catalog = (
+            catalog.with_registry_contracts(registry)
+            if registry is not None
+            else catalog
+        )
         self._registry = registry
 
     @property
@@ -134,6 +140,19 @@ class SemanticToolPresenter:
             }
             if rules:
                 specialized_filter_intent_terms[subject_view.subject_id] = rules
+        contracts: list[ToolSemanticContract] = []
+        if self._registry is not None:
+            for subject in bindable:
+                binding = self._catalog.binding(subject.subject_id)
+                if binding is None:
+                    continue
+                try:
+                    contract = self._registry.get_semantic_contract(
+                        binding.capability_id
+                    )
+                except ResourceNotFound:
+                    continue
+                contracts.append(contract)
         return SemanticToolPresentation(
             tool_id=SEMANTIC_QUERY_TOOL_ID,
             tool_version=SEMANTIC_QUERY_TOOL_VERSION,
@@ -148,6 +167,7 @@ class SemanticToolPresenter:
                 for subject in bindable
                 if subject.required_user_terms
             },
+            semantic_contracts=tuple(contracts),
             subject_trigger_terms={
                 subject.subject_id: subject.trigger_user_terms
                 for subject in bindable

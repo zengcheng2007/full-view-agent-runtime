@@ -99,7 +99,7 @@ async def pg_schema():
 
     * Reads the test DSN from ``FULL_VIEW_TEST_DATABASE_URL``.
     * Creates a throwaway schema named ``fva_test_<uuid>``.
-    * Runs migrations V001..V019 (the full agent schema) after
+    * Runs all registered migrations (the full agent schema) after
       substituting ``full_view_agent`` with the throwaway schema name.
     * Sets ``FULL_VIEW_DATABASE_URL`` / ``FULL_VIEW_POSTGRES_SCHEMA`` /
       ``FULL_VIEW_CREDENTIAL_KEY`` for the duration of the test via
@@ -237,7 +237,7 @@ def _load_migration(name: str) -> str:
 
 # Order matters: each migration assumes its predecessors have run.
 # We inline the text at import time so tests don't depend on the
-# working directory. V001..V019 cover the full agent schema.
+# working directory. Keep this list synchronized with production auto-migrations.
 try:
     _MIGRATIONS_ALL = tuple(
         _load_migration(f"V{idx:03d}_{name}.sql")
@@ -269,6 +269,8 @@ try:
             (25, "seed_governance_power"),
             (26, "runtime_observability_indexes"),
             (27, "tool_semantic_contracts"),
+            (28, "prompt_authority_layers"),
+            (29, "tool_intent_contracts"),
         )
     )
 except FileNotFoundError:

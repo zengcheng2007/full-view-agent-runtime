@@ -55,7 +55,7 @@ from full_view_agent.application.application_management_service import (
     ApplicationRegistry,
 )
 from full_view_agent.application.auth_context_refresh import RunAuthContextRefresher
-from full_view_agent.application.builtin_capability_seeds import population_tool_v1_1
+from full_view_agent.application.builtin_capability_seeds import population_tool_v1_2
 from full_view_agent.application.capability_consistency import (
     validate_production_http_capabilities,
 )
@@ -1136,7 +1136,7 @@ class RuntimeContainer:
         # The no-DB composition consumes a published control-plane Tool too;
         # the physical built-in Registry deliberately remains contract-free.
         if isinstance(self.capability_repository, InMemoryCapabilityRepository):
-            population_seed = population_tool_v1_1()
+            population_seed = population_tool_v1_2()
             existing_population = await self.capability_repository.get(
                 population_seed.capability_id, population_seed.version
             )

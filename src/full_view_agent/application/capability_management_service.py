@@ -40,6 +40,9 @@ from full_view_agent.infrastructure.http_connector_executor import (
     SSRFProtectionError,
     configured_connector_allowed_private_hosts,
 )
+from full_view_agent.semantic.contract_intent_resolver import (
+    ContractSemanticIntentResolver,
+)
 
 
 class CapabilityManagementService:
@@ -326,6 +329,14 @@ class CapabilityManagementService:
             ToolSemanticContract.model_validate(
                 candidate.semantic_contract.model_dump(mode="python")
             )
+            coverage = ContractSemanticIntentResolver().validate_coverage(
+                candidate.semantic_contract
+            )
+            if not coverage.valid:
+                raise RunStateConflict(
+                    "tool semantic contract intent examples do not resolve uniquely: "
+                    + "; ".join(coverage.issues)
+                )
         capability = await self.advance_status(
             capability_id=capability_id,
             version=version,

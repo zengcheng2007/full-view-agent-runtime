@@ -5,6 +5,7 @@ from typing import Protocol
 import jsonschema
 from pydantic import BaseModel, ValidationError
 
+from full_view_agent.application.authorization_scope import DynamicToolArguments
 from full_view_agent.application.errors import (
     PolicyBindingMismatch,
     SemanticValidationError,
@@ -411,14 +412,6 @@ class CapabilityService:
                 ),
                 warnings=["TOOL_ARGUMENT_VALIDATION_FAILED"],
             )
-
-        # Create a minimal BaseModel wrapper for policy evaluation
-        # Dynamic tools don't have typed Pydantic models, so we use a generic wrapper
-        class DynamicToolArguments(BaseModel):
-            data: dict[str, object]
-
-            class Config:
-                arbitrary_types_allowed = True
 
         arguments_wrapper = DynamicToolArguments(data=raw_arguments)
 

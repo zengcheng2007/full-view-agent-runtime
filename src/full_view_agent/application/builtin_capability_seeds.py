@@ -3,14 +3,14 @@
 from full_view_agent.domain.capability import ToolCapability, ToolSemanticContract
 
 
-def population_semantic_contract_v1_1() -> ToolSemanticContract:
+def population_semantic_contract_v1_2() -> ToolSemanticContract:
     dimensions = {
-        "district": ("区县", 4, True),
-        "descendant_street": ("下辖街道", 4, True),
-        "descendant_community": ("下辖社区", 4, True),
-        "street": ("街道", 6, False),
-        "community": ("社区", 9, False),
-        "grid": ("网格", 12, False),
+        "district": ("区县", 4, True, ["区县", "城区", "哪个区"]),
+        "descendant_street": ("下辖街道", 4, True, ["街道", "镇街"]),
+        "descendant_community": ("下辖社区", 4, True, ["社区", "村社"]),
+        "street": ("街道", 6, False, ["街道", "镇街"]),
+        "community": ("社区", 9, False, ["社区", "村社"]),
+        "grid": ("网格", 12, False, ["网格"]),
     }
     operator_outputs = (
         ("list", "table"),
@@ -28,7 +28,7 @@ def population_semantic_contract_v1_1() -> ToolSemanticContract:
         "statement": "聚合与排名仅基于完整上游区划行集。",
     }
     shapes: list[dict[str, object]] = []
-    for dimension, (_label, scope_level, list_is_ranking) in dimensions.items():
+    for dimension, (_label, scope_level, list_is_ranking, _terms) in dimensions.items():
         for operator, output in operator_outputs:
             aggregate = operator in {"sum", "avg", "min", "max"}
             ranking = operator in {"top", "bottom", "rank"} or (
@@ -59,17 +59,61 @@ def population_semantic_contract_v1_1() -> ToolSemanticContract:
                     "result_fingerprint_domain": (
                         f"data-result:population-{result_kind}-table:1.0.0"
                     ),
+                    "argument_template": {
+                        "query": {
+                            "schema_version": "1.1",
+                            "metrics": "$semantic.metrics",
+                            "operator": "$semantic.operator",
+                            "scope": "$semantic.scope",
+                            "filters": "$semantic.filters",
+                            "group_by": "$semantic.group_by",
+                            "order_by": (
+                                [
+                                    {
+                                        "field": "person_count",
+                                        "direction": (
+                                            "asc" if operator == "bottom" else "desc"
+                                        ),
+                                    }
+                                ]
+                                if operator in {"top", "bottom", "rank"}
+                                else []
+                            ),
+                            "limit": "$semantic.limit",
+                            "presentation_hint": output,
+                        }
+                    },
                 }
             )
     return ToolSemanticContract.model_validate(
         {
             "subject": "population",
+            "intent_terms": [
+                "人口",
+                "人数",
+                "人最多",
+                "人最少",
+                "人最高",
+                "人最低",
+            ],
+            "excluded_intent_terms": [
+                "独居",
+                "空巢",
+                "年龄",
+                "性别",
+                "男性",
+                "女性",
+                "明细",
+                "姓名",
+                "电话",
+            ],
             "metrics": [
                 {
                     "metric_id": "person_count",
                     "label": "人口数",
                     "unit": "人",
                     "value_type": "integer",
+                    "intent_terms": ["人口", "人数", "人口数", "多少"],
                 }
             ],
             "dimensions": [
@@ -77,8 +121,9 @@ def population_semantic_contract_v1_1() -> ToolSemanticContract:
                     "dimension_id": dimension,
                     "label": label,
                     "kind": "administrative_area",
+                    "intent_terms": terms,
                 }
-                for dimension, (label, _scope, _ranking) in dimensions.items()
+                for dimension, (label, _scope, _ranking, terms) in dimensions.items()
             ],
             "filters": [
                 {
@@ -89,6 +134,16 @@ def population_semantic_contract_v1_1() -> ToolSemanticContract:
                 }
             ],
             "operators": ["list", "sum", "avg", "min", "max", "top", "bottom", "rank"],
+            "operator_intents": [
+                {"operator": "list", "terms": ["分布", "列表"]},
+                {"operator": "sum", "terms": ["总数", "合计"]},
+                {"operator": "avg", "terms": ["平均", "均值"]},
+                {"operator": "min", "terms": ["最小值"]},
+                {"operator": "max", "terms": ["最大值"]},
+                {"operator": "top", "terms": ["最多", "最高"]},
+                {"operator": "bottom", "terms": ["最少", "最低"]},
+                {"operator": "rank", "terms": ["排名", "排行"]},
+            ],
             "sort": {
                 "allowed_fields": ["person_count", *dimensions],
                 "default_direction": "desc",
@@ -111,6 +166,22 @@ def population_semantic_contract_v1_1() -> ToolSemanticContract:
     )
 
 
+def population_semantic_contract_v1_1() -> ToolSemanticContract:
+    """Historical 1.1 contract, preserved without intent-routing metadata."""
+
+    payload = population_semantic_contract_v1_2().model_dump(mode="json")
+    payload.pop("intent_terms", None)
+    payload.pop("excluded_intent_terms", None)
+    payload.pop("operator_intents", None)
+    for metric in payload["metrics"]:
+        metric.pop("intent_terms", None)
+    for dimension in payload["dimensions"]:
+        dimension.pop("intent_terms", None)
+    for shape in payload["query_shapes"]:
+        shape.pop("argument_template", None)
+    return ToolSemanticContract.model_validate(payload)
+
+
 def population_tool_v1_1() -> ToolCapability:
     return ToolCapability(
         capability_id="governance.query_population_metrics",
@@ -129,4 +200,13 @@ def population_tool_v1_1() -> ToolCapability:
         semantic_contract=population_semantic_contract_v1_1(),
         created_by="system-seed",
         updated_by="system-seed",
+    )
+
+
+def population_tool_v1_2() -> ToolCapability:
+    return population_tool_v1_1().model_copy(
+        update={
+            "version": "1.2.0",
+            "semantic_contract": population_semantic_contract_v1_2(),
+        }
     )

@@ -395,7 +395,7 @@ def default_application_registry(
             )
             for capability_id, capability_version in (
                 ("governance.resolve_area", "1.0.0"),
-                ("governance.query_population_metrics", "1.1.0"),
+                ("governance.query_population_metrics", "1.2.0"),
                 ("governance.query_housing_metrics", "1.0.0"),
                 ("governance.query_event_metrics", "1.0.0"),
                 ("governance.query_enterprise_metrics", "1.0.0"),

@@ -14,6 +14,7 @@ from full_view_agent.application.answer_claims import (
     StructuredFinish,
 )
 from full_view_agent.application.context_builder import AgentContextBuilder
+from full_view_agent.application.contract_result_finisher import ContractResultFinisher
 from full_view_agent.application.errors import (
     BudgetExceeded,
     ModelContractError,
@@ -55,10 +56,12 @@ from full_view_agent.domain.models import (
     AuthContext,
     HousingAreaGroupTable,
     HousingLeaseTypeTable,
-    PopulationRankingTable,
 )
 from full_view_agent.domain.prompt_template import RuntimePromptSnapshot
 from full_view_agent.semantic import SEMANTIC_QUERY_TOOL_ID
+from full_view_agent.semantic.contract_intent_resolver import (
+    ContractSemanticIntentResolver,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -128,17 +131,14 @@ class ModelPlanner:
                 summary="抱歉，当前账号没有可用于该查询的授权能力。",
                 legacy=True,
             )
-        deterministic_finish = _supported_housing_total_finish(
-            request=request,
-            state=state,
-        )
+        deterministic_finish = _contract_result_finish(state=state)
         if deterministic_finish is None:
-            deterministic_finish = _supported_housing_city_street_max_finish(
+            deterministic_finish = _supported_housing_total_finish(
                 request=request,
                 state=state,
             )
         if deterministic_finish is None:
-            deterministic_finish = _supported_population_city_ranking_finish(
+            deterministic_finish = _supported_housing_city_street_max_finish(
                 request=request,
                 state=state,
             )
@@ -149,17 +149,17 @@ class ModelPlanner:
             state=state,
         )
         if deterministic_followup is None:
+            deterministic_followup = _contract_semantic_followup(
+                request=request,
+                state=state,
+            )
+        if deterministic_followup is None:
             deterministic_followup = _supported_housing_next_area_followup(
                 request=request,
                 state=state,
             )
         if deterministic_followup is None:
             deterministic_followup = _supported_housing_city_street_followup(
-                request=request,
-                state=state,
-            )
-        if deterministic_followup is None:
-            deterministic_followup = _supported_population_city_ranking_followup(
                 request=request,
                 state=state,
             )
@@ -619,125 +619,13 @@ def _supported_housing_city_street_followup(
     )
 
 
-_POPULATION_CITY_TERMS = ("全市", "全杭州", "杭州市")
-_POPULATION_RANKING_TERMS = ("最多", "最少", "排名", "排行", "前十", "最高", "最低")
-_POPULATION_SPECIALIZED_TERMS = ("独居", "空巢", "年龄", "性别", "男性", "女性")
-
-
-def _population_city_max_request(message: str) -> str | None:
-    has_population_intent = "人口" in message or any(
-        term in message for term in ("人最多", "人最高")
-    )
-    if (
-        not has_population_intent
-        or not any(term in message for term in _POPULATION_CITY_TERMS)
-        or not any(term in message for term in ("最多", "最高"))
-        or any(term in message for term in _POPULATION_SPECIALIZED_TERMS)
-    ):
-        return None
-    if "社区" in message or "村社" in message:
-        level = "community"
-    elif "街道" in message:
-        level = "street"
-    elif any(term in message for term in ("区县", "城区", "哪个区")):
-        level = "district"
-    else:
-        return None
-    return level
-
-
-def _supported_population_city_ranking_finish(
-    *, request: ModelRequest, state: HarnessState
-) -> FinishAction | None:
-    level = _population_city_max_request(_latest_user_message(request))
-    if level is None:
-        return None
-    expected_length = {"district": 6, "street": 9, "community": 12}[level]
-    candidates = []
-    for tool_result in state.tool_results:
-        data_result = tool_result.data_result
-        data = getattr(data_result, "data", None)
-        if (
-            tool_result.status not in {"success", "partial"}
-            or data_result is None
-            or data_result.data_schema_ref
-            != "schema://data/population-ranking-table/1.0.0"
-            or not isinstance(data, PopulationRankingTable)
-            or not data.rows
-            or any(len(row.area_code) != expected_length for row in data.rows)
-        ):
-            continue
-        candidates.append((data_result, data))
-    if len(candidates) != 1:
-        return None
-    result, data = candidates[0]
-    winner = data.rows[0]
-    if winner.rank != 1:
-        return None
-    structured = StructuredFinish(
-        kind="claims",
-        summary=(
-            f"{winner.area_name}人口数为{winner.person_count}人，"
-            "且为本次查询中人口最多的区域。"
-        ),
-        claims=[
-            AnswerClaim(
-                claim_id=f"population-city-{level}-rank",
-                result_id=result.result_id,
-                result_fingerprint=result.result_fingerprint,
-                collection="rows",
-                row_locator={"area_code": winner.area_code},
-                field="rank",
-                operation="value",
-                value=1,
-            ),
-            AnswerClaim(
-                claim_id=f"population-city-{level}-count",
-                result_id=result.result_id,
-                result_fingerprint=result.result_fingerprint,
-                collection="rows",
-                row_locator={"area_code": winner.area_code},
-                field="person_count",
-                operation="value",
-                value=winner.person_count,
-            ),
-        ],
-    )
-    return FinishAction(
-        summary=structured.summary,
-        structured_finish=structured,
-        legacy=False,
-        server_authored=True,
-    )
-
-
-def _supported_population_city_ranking_followup(
+def _contract_semantic_followup(
     *, request: ModelRequest, state: HarnessState
 ) -> ToolAction | None:
-    """Route a proven city population ranking to one bounded semantic query."""
+    """Resolve one exact semantic query from published contract metadata."""
 
     if len(state.tool_results) != 1:
         return None
-    message = _latest_user_message(request)
-    has_population_intent = "人口" in message or any(
-        term in message for term in ("人最多", "人最少", "人最高", "人最低")
-    )
-    if (
-        not has_population_intent
-        or not any(term in message for term in _POPULATION_CITY_TERMS)
-        or not any(term in message for term in _POPULATION_RANKING_TERMS)
-        or any(term in message for term in _POPULATION_SPECIALIZED_TERMS)
-    ):
-        return None
-    if "社区" in message or "村社" in message:
-        group_by = "descendant_community"
-    elif "街道" in message:
-        group_by = "descendant_street"
-    elif any(term in message for term in ("区县", "城区", "哪个区")):
-        group_by = "district"
-    else:
-        return None
-
     area_result = state.tool_results[0]
     area_data = getattr(area_result.data_result, "data", None)
     candidates = getattr(area_data, "candidates", None)
@@ -746,42 +634,38 @@ def _supported_population_city_ranking_followup(
         area_result.tool_id != "governance.resolve_area"
         or area_result.status not in {"success", "partial"}
         or not isinstance(area_code, str)
-        or len(area_code) != 4
         or not isinstance(candidates, list)
         or len(candidates) != 1
-        or getattr(candidates[0], "level", None) != "city"
     ):
         return None
-
     semantic_tool = _find_advertised_tool(request, SEMANTIC_QUERY_TOOL_ID)
-    marker = f"group_by=['{group_by}']"
-    if (
-        semantic_tool is None
-        or "population" not in semantic_tool.description
-        or marker not in semantic_tool.description
-    ):
+    if semantic_tool is None or not semantic_tool.semantic_contracts:
         return None
-    descending = not any(term in message for term in ("最少", "最低"))
-    limit = 10 if "前十" in message else 1
-    operator = "top" if descending else "bottom"
-    shape_marker = f"population_{group_by}_{operator}_table"
-    if shape_marker not in semantic_tool.description:
+    resolved = ContractSemanticIntentResolver().resolve(
+        message=_latest_user_message(request),
+        scope_area_code=area_code,
+        contracts=semantic_tool.semantic_contracts,
+    )
+    if resolved is None:
         return None
     return ToolAction(
         tool_id=SEMANTIC_QUERY_TOOL_ID,
         arguments={
             **semantic_tool.server_arguments,
-            "spec": {
-                "subject": "population",
-                "operator": operator,
-                "metrics": ["person_count"],
-                "scope": {"area_code": area_code},
-                "group_by": [group_by],
-                "filters": [],
-                "limit": limit,
-                "output": "table",
-            },
+            "spec": resolved.spec.model_dump(mode="json"),
         },
+    )
+
+
+def _contract_result_finish(*, state: HarnessState) -> FinishAction | None:
+    structured = ContractResultFinisher().finish(state.tool_results)
+    if structured is None:
+        return None
+    return FinishAction(
+        summary=structured.summary,
+        structured_finish=structured,
+        legacy=False,
+        server_authored=True,
     )
 
 

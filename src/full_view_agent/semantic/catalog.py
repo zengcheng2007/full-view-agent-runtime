@@ -30,15 +30,22 @@ Catalog 只声明当前生产 HTTP Adapter 已逐项验证的能力，证据来�
 
 import re
 from collections.abc import Mapping
-from typing import Literal
+from typing import TYPE_CHECKING, Literal, cast
 
 from pydantic import Field, field_validator
 
 from full_view_agent.application.authorization_scope import area_is_within_scope
 from full_view_agent.application.fingerprints import canonical_fingerprint
-from full_view_agent.domain.models import ContractModel, MetricQueryScope
+from full_view_agent.domain.models import (
+    ContractModel,
+    InternalToolManifest,
+    MetricQueryScope,
+)
 from full_view_agent.semantic.authorization import SubjectAuthorization
 from full_view_agent.semantic.errors import UnknownSubjectError
+
+if TYPE_CHECKING:
+    from full_view_agent.application.tool_registry import ToolRegistry
 
 SEMANTIC_CATALOG_VERSION = "0.1.0-s0-candidate"
 SEMANTIC_SPEC_VERSIONS: tuple[str, ...] = ("s0.1",)
@@ -92,7 +99,7 @@ class FilterDefinition(ContractModel):
     field: str = Field(min_length=1, max_length=64)
     label: str = Field(min_length=1, max_length=100)
     operators: tuple[str, ...] = Field(min_length=1)
-    allowed_values: tuple[str, ...] = ()
+    allowed_values: tuple[str | int | float | bool, ...] = ()
     value_intent_terms: dict[str, tuple[str, ...]] = Field(default_factory=dict)
     # 展示名是 Catalog 事实，与用于识别原话的触发词分离；
     # 它会进入可验证 lineage，不由模型自由声称口径映射。
@@ -159,14 +166,7 @@ class IntrinsicOrderRule(ContractModel):
 
 
 class SubjectDefinition(ContractModel):
-    subject_id: Literal[
-        "population",
-        "housing",
-        "event",
-        "enterprise",
-        "governance_overview",
-        "governance_power",
-    ]
+    subject_id: str = Field(min_length=1, max_length=64, pattern=r"^[a-z][a-z0-9_]*$")
     display_name: str = Field(min_length=1, max_length=100)
     logical_dataset_id: str = Field(min_length=1, max_length=64)
     required_entitlement: str = Field(min_length=1, max_length=128)
@@ -205,11 +205,108 @@ class CapabilityBinding(ContractModel):
     adapter_ref: str = Field(min_length=1, max_length=200)
 
 
+def _subject_from_tool_contract(manifest: InternalToolManifest) -> SubjectDefinition:
+    contract = manifest.semantic_contract
+    if contract is None:
+        raise ValueError("semantic contract is required")
+    supported_outputs = tuple(
+        dict.fromkeys(
+            output
+            for shape in contract.query_shapes
+            for output in shape.output_forms
+            if output in {"table", "choropleth", "metric_card"}
+        )
+    )
+    if not supported_outputs:
+        raise ValueError("semantic contract has no executable output form")
+    group_rules = tuple(
+        GroupByRule(
+            value=dimension.dimension_id,
+            label=dimension.label,
+            allowed_scope_levels=tuple(
+                sorted(
+                    {
+                        level
+                        for shape in contract.query_shapes
+                        if dimension.dimension_id in shape.dimension_selection
+                        for level in shape.scope_levels
+                    }
+                )
+            ),
+        )
+        for dimension in contract.dimensions
+        if any(
+            dimension.dimension_id in shape.dimension_selection
+            for shape in contract.query_shapes
+        )
+    )
+    result_shapes = tuple(
+        ResultShape(
+            shape_id=shape.shape_id,
+            data_schema_ref=shape.result_schema_ref,
+            fingerprint_domain=shape.result_fingerprint_domain,
+            grain_label="按合同声明维度返回受控结果",
+            row_fields=shape.result_row_fields,
+            group_by_selection=shape.dimension_selection,
+            metric_selection=shape.metric_selection,
+            operator_selection=shape.operator_selection,
+            output_forms=cast(
+                tuple[OutputForm, ...],
+                tuple(
+                    output
+                    for output in shape.output_forms
+                    if output in {"table", "choropleth", "metric_card"}
+                ),
+            ),
+        )
+        for shape in contract.query_shapes
+        if any(
+            output in {"table", "choropleth", "metric_card"}
+            for output in shape.output_forms
+        )
+    )
+    group_counts = [len(shape.dimension_selection) for shape in contract.query_shapes]
+    return SubjectDefinition(
+        subject_id=contract.subject,
+        display_name=contract.subject,
+        logical_dataset_id=manifest.dataset_id,
+        required_entitlement=manifest.required_permissions[0],
+        scope_levels=tuple(
+            sorted({level for shape in contract.query_shapes for level in shape.scope_levels})
+        ),
+        metrics=tuple(
+            MetricDefinition(
+                metric_id=metric.metric_id,
+                label=metric.label,
+                unit=metric.unit or "count",
+            )
+            for metric in contract.metrics
+        ),
+        group_by_rules=group_rules,
+        min_group_by=min(group_counts),
+        max_group_by=max(group_counts),
+        filters=tuple(
+            FilterDefinition(
+                field=item.field,
+                label=item.label,
+                operators=tuple(item.operators),
+                allowed_values=item.allowed_values,
+            )
+            for item in contract.filters
+        ),
+        trigger_user_terms=contract.intent_terms,
+        supports_order_by=False,
+        output_forms=cast(tuple[OutputForm, ...], supported_outputs),
+        result_shapes=result_shapes,
+        include_in_analysis_overview=False,
+    )
+
+
 class FilterSummary(ContractModel):
     field: str
     label: str
     operators: tuple[str, ...]
-    allowed_values: tuple[str, ...]
+    allowed_values: tuple[str | int | float | bool, ...]
 
 
 class RequiredFilterSummary(ContractModel):
@@ -819,6 +916,59 @@ class SemanticCatalog:
             supported_spec_versions=SEMANTIC_SPEC_VERSIONS,
             subjects={subject.subject_id: subject for subject in subjects},
             bindings=dict(_DEFAULT_BINDINGS),
+        )
+
+    def with_registry_contracts(self, registry: "ToolRegistry") -> "SemanticCatalog":
+        """Overlay previously unknown subjects from exact published Tool contracts.
+
+        Existing built-in subjects keep their verified Catalog safety rules.  A new
+        subject is admitted only when one exact Runtime manifest supplies a semantic
+        contract, one dataset and one permission; ambiguous ownership fails closed.
+        """
+
+        subjects = dict(self._subjects)
+        bindings = dict(self._bindings)
+        dynamic_payloads: list[dict[str, object]] = []
+        dynamic_subject_owners: dict[str, str] = {}
+        for tool_id in registry.list_tool_ids():
+            manifest = registry.get_manifest(tool_id)
+            contract = manifest.semantic_contract
+            if contract is None:
+                continue
+            if contract.subject in self._subjects:
+                continue
+            if contract.subject in dynamic_subject_owners:
+                raise ValueError("semantic subject has more than one capability binding")
+            if len(manifest.required_permissions) != 1:
+                raise ValueError(
+                    "semantic Tool must declare exactly one required permission"
+                )
+            subject = _subject_from_tool_contract(manifest)
+            subjects[contract.subject] = subject
+            dynamic_subject_owners[contract.subject] = manifest.tool_id
+            bindings[contract.subject] = CapabilityBinding(
+                capability_id=manifest.tool_id,
+                capability_version=manifest.tool_version,
+                adapter_ref=manifest.adapter_ref,
+            )
+            dynamic_payloads.append(
+                {
+                    "tool_id": manifest.tool_id,
+                    "tool_version": manifest.tool_version,
+                    "contract": contract.model_dump(mode="json"),
+                }
+            )
+        if not dynamic_payloads:
+            return self
+        suffix = canonical_fingerprint(
+            domain="semantic-catalog-dynamic-contracts:1.0",
+            value={"contracts": dynamic_payloads},
+        ).removeprefix("sha256:")[:12]
+        return SemanticCatalog(
+            catalog_version=f"{self._catalog_version}+{suffix}",
+            supported_spec_versions=self._supported_spec_versions,
+            subjects=subjects,
+            bindings=bindings,
         )
 
     @property

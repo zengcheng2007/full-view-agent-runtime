@@ -9,6 +9,7 @@ verify_result 在执行后核对结果 Schema：主题之间不得串用 Schema�
 schema_ref 正确但行字段漂移同样拒绝。
 """
 
+from collections.abc import Mapping
 from typing import TYPE_CHECKING, Literal
 
 from pydantic import Field
@@ -166,7 +167,15 @@ class SemanticCompiler:
                 PlanStep(
                     capability_id=binding.capability_id,
                     capability_version=capability_version,
-                    arguments=self._build_arguments(binding.capability_id, spec),
+                    arguments=self._build_arguments(
+                        binding.capability_id,
+                        spec,
+                        argument_template=(
+                            compiled_contract.argument_template
+                            if compiled_contract is not None
+                            else None
+                        ),
+                    ),
                 ),
             ),
             expected_result=ExpectedResultShape(
@@ -271,7 +280,14 @@ class SemanticCompiler:
     def _build_arguments(
         capability_id: str,
         spec: SemanticQuerySpec,
+        *,
+        argument_template: Mapping[str, object] | None = None,
     ) -> dict[str, object]:
+        if argument_template is not None:
+            rendered = _render_argument_template(argument_template, spec)
+            if not isinstance(rendered, dict):
+                raise SemanticKernelError("semantic argument template must render an object")
+            return rendered
         scope = spec.scope.model_dump()
         if capability_id == "governance.query_population_metrics":
             order_by = [order.model_dump() for order in spec.order_by]
@@ -352,6 +368,35 @@ class SemanticCompiler:
                 }
             }
         raise SemanticKernelError(f"no compilation rule for {capability_id}")
+
+
+def _render_argument_template(value: object, spec: SemanticQuerySpec) -> object:
+    placeholders: dict[str, object] = {
+        "$semantic.metrics": list(spec.metrics),
+        "$semantic.metric": spec.metrics[0],
+        "$semantic.operator": spec.operator,
+        "$semantic.scope": spec.scope.model_dump(mode="json"),
+        "$semantic.scope.area_code": spec.scope.area_code,
+        "$semantic.group_by": list(spec.group_by),
+        "$semantic.filters": [item.model_dump(mode="json") for item in spec.filters],
+        "$semantic.order_by": [item.model_dump(mode="json") for item in spec.order_by],
+        "$semantic.limit": spec.limit,
+        "$semantic.output": spec.output,
+        "$semantic.time_range": (
+            spec.time_range.model_dump(mode="json")
+            if spec.time_range is not None
+            else None
+        ),
+    }
+    if isinstance(value, str) and value.startswith("$semantic."):
+        if value not in placeholders:
+            raise SemanticKernelError(f"unsupported semantic placeholder {value}")
+        return placeholders[value]
+    if isinstance(value, dict):
+        return {key: _render_argument_template(item, spec) for key, item in value.items()}
+    if isinstance(value, list):
+        return [_render_argument_template(item, spec) for item in value]
+    return value
 
 
 def _contract_tool(manifest):

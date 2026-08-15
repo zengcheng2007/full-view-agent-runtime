@@ -4,6 +4,9 @@ from full_view_agent.application.answer_claims import (
     FINISH_TOOL_ID,
     AnswerClaim,
 )
+from full_view_agent.application.builtin_capability_seeds import (
+    population_semantic_contract_v1_2,
+)
 from full_view_agent.application.errors import BudgetExceeded, ModelContractError
 from full_view_agent.application.harness import (
     DeterministicCompletionValidator,
@@ -28,6 +31,9 @@ from full_view_agent.domain.models import (
     HousingAreaGroupTable,
     PopulationRankingRow,
     PopulationRankingTable,
+    ResultDisplayField,
+    ResultPresentation,
+    SemanticResultLineage,
     TableDataResult,
     ToolResult,
 )
@@ -87,6 +93,71 @@ class QueueModelProvider:
     async def complete(self, request: ModelRequest) -> ModelResponse:
         self.requests.append(request)
         return self.responses.pop(0)
+
+
+@pytest.mark.asyncio
+async def test_model_planner_routes_average_from_published_contract_without_model() -> None:
+    semantic_tool = ModelToolDefinition(
+        tool_id="governance.semantic_query",
+        description="语义查询",
+        input_schema={"type": "object"},
+        server_arguments={"catalog_version": "catalog-v1"},
+        semantic_contracts=(population_semantic_contract_v1_2(),),
+    )
+
+    class ContractContextBuilder:
+        async def build(self, **_kwargs) -> ModelRequest:
+            return ModelRequest(
+                messages=(
+                    ModelMessage(
+                        role="user", content="杭州市下辖街道的平均人口是多少"
+                    ),
+                ),
+                tools=(semantic_tool,),
+            )
+
+    area = successful_area_result().model_copy(deep=True)
+    assert area.data_result is not None
+    area.data_result = area.data_result.model_copy(
+        update={
+            "data": AreaCandidatesData(
+                candidates=[
+                    AreaCandidate(area_code="3301", area_name="杭州市", level="city")
+                ],
+                ambiguous=False,
+                resolved_area_code="3301",
+            )
+        }
+    )
+    provider = QueueModelProvider()
+
+    action = await ModelPlanner(
+        provider=provider,
+        context_builder=ContractContextBuilder(),
+        user_id="user-01",
+        auth_context=population_auth_context(),
+    ).decide(HarnessState(tool_results=(area,)))
+
+    assert action == ToolAction(
+        tool_id="governance.semantic_query",
+        arguments={
+            "catalog_version": "catalog-v1",
+            "spec": {
+                "schema_version": "s0.1",
+                "subject": "population",
+                "operator": "avg",
+                "metrics": ["person_count"],
+                "scope": {"area_code": "3301", "include_descendants": True},
+                "group_by": ["descendant_street"],
+                "filters": [],
+                "order_by": [],
+                "limit": 200,
+                "time_range": None,
+                "output": "table",
+            },
+        },
+    )
+    assert provider.requests == []
 
 
 @pytest.mark.asyncio
@@ -194,14 +265,10 @@ async def test_model_planner_routes_city_wide_street_ranking_as_one_bounded_quer
 async def test_model_planner_routes_city_population_community_max_deterministically() -> None:
     semantic_tool = ModelToolDefinition(
         tool_id="governance.semantic_query",
-        description=(
-            "population group_by=['district']；"
-            "group_by=['descendant_street']；"
-            "group_by=['descendant_community']；"
-            "query_shapes=['population_descendant_community_top_table']"
-        ),
+        description="语义查询",
         input_schema={"type": "object"},
         server_arguments={"catalog_version": "catalog-v1"},
+        semantic_contracts=(population_semantic_contract_v1_2(),),
     )
 
     class ContextBuilder:
@@ -239,13 +306,16 @@ async def test_model_planner_routes_city_population_community_max_deterministica
         arguments={
             "catalog_version": "catalog-v1",
             "spec": {
+                "schema_version": "s0.1",
                 "subject": "population",
                 "operator": "top",
                 "metrics": ["person_count"],
-                "scope": {"area_code": "3301"},
+                "scope": {"area_code": "3301", "include_descendants": True},
                 "group_by": ["descendant_community"],
                 "filters": [],
+                "order_by": [],
                 "limit": 1,
+                "time_range": None,
                 "output": "table",
             },
         },
@@ -358,6 +428,25 @@ async def test_model_planner_finishes_city_population_street_max_from_ranked_res
         tool_version="1.0.0",
         status="success",
         summary="查询成功",
+        semantic_lineage=SemanticResultLineage(
+            virtual_tool_id="governance.semantic_query",
+            virtual_tool_version="1.0.0",
+            spec_version="1.0",
+            catalog_version="run-contracts",
+            subject="population",
+            logical_dataset_id="population",
+            canonical_tool_id="governance.query_population_metrics",
+            canonical_tool_version="1.2.0",
+            spec_fingerprint="sha256:spec",
+            plan_fingerprint="sha256:plan",
+            semantic_contract_fingerprint="sha256:contract",
+            semantic_shape_id="population_descendant_street_top",
+            semantic_operator="top",
+            semantic_completeness="complete",
+            semantic_tie_policy="include_all",
+            area_code="3301",
+            output="table",
+        ),
         data_result=TableDataResult(
             result_id="res-population-city-streets",
             data_schema_ref="schema://data/population-ranking-table/1.0.0",
@@ -365,6 +454,23 @@ async def test_model_planner_finishes_city_population_street_max_from_ranked_res
             data=data,
             row_count=2,
             truncated=True,
+            presentation=ResultPresentation(
+                title="人口分布",
+                summary="共2个区划。",
+                status_label="查询完成",
+                fields=[
+                    ResultDisplayField(field="rank", label="排名", role="dimension"),
+                    ResultDisplayField(
+                        field="area_code", label="区划编码", role="identifier"
+                    ),
+                    ResultDisplayField(
+                        field="area_name", label="区划名称", role="dimension"
+                    ),
+                    ResultDisplayField(
+                        field="person_count", label="人口数量", role="metric", unit="人"
+                    ),
+                ],
+            ),
         ),
     )
     provider = QueueModelProvider()
@@ -380,7 +486,7 @@ async def test_model_planner_finishes_city_population_street_max_from_ranked_res
     assert action.structured_finish is not None
     assert action.structured_finish.claims == [
         AnswerClaim(
-            claim_id="population-city-street-rank",
+            claim_id="contract-result-1-rank",
             result_id="res-population-city-streets",
             result_fingerprint="sha256:population-city-streets",
             collection="rows",
@@ -390,7 +496,7 @@ async def test_model_planner_finishes_city_population_street_max_from_ranked_res
             value=1,
         ),
         AnswerClaim(
-            claim_id="population-city-street-count",
+            claim_id="contract-result-1-metric",
             result_id="res-population-city-streets",
             result_fingerprint="sha256:population-city-streets",
             collection="rows",

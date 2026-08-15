@@ -17,8 +17,10 @@
 本模块只提供服务与类型；本轮不接入生产 Registry，生产代码不依赖语义层。
 """
 
+import jsonschema
 from pydantic import ValidationError
 
+from full_view_agent.application.authorization_scope import DynamicToolArguments
 from full_view_agent.application.capability_service import (
     TOOL_INPUT_MODELS,
     PolicyEvaluator,
@@ -134,17 +136,25 @@ class ExecutionGuard:
         # 完整性通过：按真实主题 Tool 契约校验参数并复用生产 Policy 复核。
         input_model = TOOL_INPUT_MODELS.get(step.capability_id)
         if input_model is None:
-            return self._denied(
-                "UNKNOWN_CAPABILITY",
-                f"未知能力 {step.capability_id}。",
-            )
-        try:
-            arguments = input_model.model_validate(step.arguments)
-        except ValidationError:
-            return self._denied(
-                "PLAN_ARGUMENTS_INVALID",
-                "计划参数不符合目标能力契约。",
-            )
+            try:
+                jsonschema.validate(
+                    instance=step.arguments,
+                    schema=self._registry.get_input_schema(step.capability_id),
+                )
+            except (jsonschema.ValidationError, jsonschema.SchemaError):
+                return self._denied(
+                    "PLAN_ARGUMENTS_INVALID",
+                    "计划参数不符合目标能力契约。",
+                )
+            arguments = DynamicToolArguments(data=step.arguments)
+        else:
+            try:
+                arguments = input_model.model_validate(step.arguments)
+            except ValidationError:
+                return self._denied(
+                    "PLAN_ARGUMENTS_INVALID",
+                    "计划参数不符合目标能力契约。",
+                )
         decision = self._policy.evaluate(
             manifest=manifest,
             auth_context=auth_context,

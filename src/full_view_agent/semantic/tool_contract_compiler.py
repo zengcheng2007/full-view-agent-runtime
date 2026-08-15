@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from typing import Literal
 
-from pydantic import Field
+from pydantic import Field, JsonValue
 
 from full_view_agent.domain.capability import (
     SemanticFilterOperator,
@@ -58,6 +58,7 @@ class CompiledToolSemanticPlan(ContractModel):
     result_schema_ref: str
     result_row_fields: tuple[str, ...]
     result_fingerprint_domain: str
+    argument_template: dict[str, JsonValue] | None = None
 
 
 class ToolSemanticContractCompiler:
@@ -152,4 +153,5 @@ class ToolSemanticContractCompiler:
             result_schema_ref=shape.result_schema_ref,
             result_row_fields=shape.result_row_fields,
             result_fingerprint_domain=shape.result_fingerprint_domain,
+            argument_template=shape.argument_template,
         )

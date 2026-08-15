@@ -24,7 +24,7 @@ requires_postgres = pytest.mark.skipif(
 
 @requires_postgres
 @pytest.mark.asyncio
-async def test_four_seed_capabilities_are_published() -> None:
+async def test_four_seed_capabilities_are_published(pg_schema) -> None:
     """Prove the 4 seed capabilities exist in the DB as published."""
     from full_view_agent.application.dynamic_tool_bridge import load_published_tools
     from full_view_agent.infrastructure.capability_repository import (
@@ -32,8 +32,8 @@ async def test_four_seed_capabilities_are_published() -> None:
     )
 
     repo = PostgresCapabilityRepository(
-        dsn=DATABASE_URL,
-        schema=os.getenv("FULL_VIEW_POSTGRES_SCHEMA", "full_view_agent"),
+        dsn=pg_schema["dsn"],
+        schema=pg_schema["schema"],
     )
     tools = await load_published_tools(repo)
 
@@ -48,10 +48,16 @@ async def test_four_seed_capabilities_are_published() -> None:
         f"Missing seed capabilities: {expected - tool_ids}"
     )
 
-    for tool in tools:
-        if tool.capability_id in expected:
-            assert tool.status == "published"
-            assert tool.version == "1.0.0"
+    versions_by_id = {
+        tool_id: {tool.version for tool in tools if tool.capability_id == tool_id}
+        for tool_id in expected
+    }
+    assert versions_by_id["governance.query_population_metrics"].issuperset(
+        {"1.0.0", "1.1.0", "1.2.0"}
+    )
+    for tool_id in expected - {"governance.query_population_metrics"}:
+        assert "1.0.0" in versions_by_id[tool_id]
+    assert all(tool.status == "published" for tool in tools if tool.capability_id in expected)
 
 
 @requires_postgres
@@ -114,7 +120,7 @@ async def test_seed_idempotent_no_overwrite() -> None:
 
 @requires_postgres
 @pytest.mark.asyncio
-async def test_capability_snapshot_includes_seed_tools() -> None:
+async def test_capability_snapshot_includes_seed_tools(pg_schema) -> None:
     """Prove the snapshot service includes seed tools in run snapshots."""
     from full_view_agent.application.run_capability_snapshot import (
         RunCapabilitySnapshotService,
@@ -125,8 +131,8 @@ async def test_capability_snapshot_includes_seed_tools() -> None:
     )
 
     repo = PostgresCapabilityRepository(
-        dsn=DATABASE_URL,
-        schema=os.getenv("FULL_VIEW_POSTGRES_SCHEMA", "full_view_agent"),
+        dsn=pg_schema["dsn"],
+        schema=pg_schema["schema"],
     )
     snapshot_service = RunCapabilitySnapshotService(repository=repo)
     base_registry = ToolRegistry.default()
@@ -148,9 +154,15 @@ async def test_capability_snapshot_includes_seed_tools() -> None:
         f"Seed tools missing from snapshot: {seed_ids - snapshot_tool_ids}"
     )
 
-    # All seed tools should be v1.0.0
-    for tool_id in seed_ids:
-        assert snapshot.tool_versions[tool_id] == "1.0.0"
+    expected_versions = {
+        "governance.query_event_metrics": "1.0.0",
+        "governance.query_housing_metrics": "1.0.0",
+        "governance.query_population_metrics": "1.2.0",
+        "governance.resolve_area": "1.0.0",
+    }
+    assert {
+        tool_id: snapshot.tool_versions[tool_id] for tool_id in seed_ids
+    } == expected_versions
 
     await snapshot_service.remove_snapshot("test-snapshot-seed")
 

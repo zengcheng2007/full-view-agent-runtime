@@ -61,6 +61,10 @@ from full_view_agent.domain.models import WorkflowRef
 from full_view_agent.infrastructure.http_connector_executor import (
     ConnectorConnectionTester,
 )
+from full_view_agent.semantic.contract_intent_resolver import (
+    ContractSemanticIntentResolver,
+)
+from full_view_agent.semantic.query_spec import SemanticQuerySpec
 
 _MODEL_MAX_OUTPUT_TOKENS_MIN = 100
 _MODEL_MAX_OUTPUT_TOKENS_MAX = 128_000
@@ -148,12 +152,34 @@ class ToolSemanticValidationData(ContractModel):
     capability_id: str
     version: str
     etag: int
-    valid: Literal[True] = True
+    valid: bool
+    intent_coverage_issues: tuple[str, ...]
     semantic_contract: ToolSemanticContract
 
 
 class ToolSemanticValidationResponse(ContractModel):
     data: ToolSemanticValidationData
+    meta: ResponseMeta
+
+
+class ToolSemanticPreviewBody(ContractModel):
+    expected_etag: int = Field(ge=1)
+    message: str = Field(min_length=1, max_length=500)
+    scope_area_code: str = Field(min_length=4, max_length=15, pattern=r"^\d+$")
+
+
+class ToolSemanticPreviewData(ContractModel):
+    capability_id: str
+    version: str
+    etag: int
+    status: Literal["matched", "unsupported", "ambiguous"]
+    reason_code: str
+    shape_id: str | None = None
+    spec: SemanticQuerySpec | None = None
+
+
+class ToolSemanticPreviewResponse(ContractModel):
+    data: ToolSemanticPreviewData
     meta: ResponseMeta
 
 
@@ -813,12 +839,50 @@ def create_capability_router(
             raise RunStateConflict("capability etag mismatch")
         if tool.semantic_contract is None:
             raise RunStateConflict("tool semantic contract is missing")
+        coverage = ContractSemanticIntentResolver().validate_coverage(
+            tool.semantic_contract
+        )
         return ToolSemanticValidationResponse(
             data=ToolSemanticValidationData(
                 capability_id=tool.capability_id,
                 version=tool.version,
                 etag=tool.etag,
+                valid=coverage.valid,
+                intent_coverage_issues=coverage.issues,
                 semantic_contract=tool.semantic_contract,
+            ),
+            meta=_meta(),
+        )
+
+    @router.post("/tools/{capability_id}/{version}/semantic-contract/preview")
+    async def preview_tool_semantic_contract(
+        capability_id: str,
+        version: str,
+        body: ToolSemanticPreviewBody,
+        user: Annotated[CurrentUser, Depends(require_capability_identity)],
+    ) -> ToolSemanticPreviewResponse:
+        _require(user, ControlPlanePermission.CAPABILITY_MANAGE)
+        tool = await management_service.get(capability_id, version)
+        if not isinstance(tool, ToolCapability):
+            raise ResourceNotFound("tool not found")
+        if tool.etag != body.expected_etag:
+            raise RunStateConflict("capability etag mismatch")
+        if tool.semantic_contract is None:
+            raise RunStateConflict("tool semantic contract is missing")
+        preview = ContractSemanticIntentResolver().preview(
+            message=body.message,
+            scope_area_code=body.scope_area_code,
+            contracts=(tool.semantic_contract,),
+        )
+        return ToolSemanticPreviewResponse(
+            data=ToolSemanticPreviewData(
+                capability_id=tool.capability_id,
+                version=tool.version,
+                etag=tool.etag,
+                status=preview.status,
+                reason_code=preview.reason_code,
+                shape_id=preview.shape_id,
+                spec=preview.spec,
             ),
             meta=_meta(),
         )

@@ -3,6 +3,8 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Literal, Protocol
 
+from full_view_agent.domain.capability import ToolSemanticContract
+
 
 @dataclass(frozen=True)
 class ModelMessage:
@@ -20,6 +22,9 @@ class ModelToolDefinition:
     # Server-owned arguments are never sent to the model. ModelPlanner injects
     # them into the accepted ToolAction before it reaches a durable checkpoint.
     server_arguments: dict[str, object] = field(default_factory=dict)
+    # Exact published contracts are server-only routing authority. Providers
+    # never receive these objects; they are consumed before a model call.
+    semantic_contracts: tuple[ToolSemanticContract, ...] = ()
     # Some catalog subjects are narrower than their historical internal IDs.
     # These server-side requirements prevent the model from silently replacing
     # a broad user request with a specialized dataset (for example, general
