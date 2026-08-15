@@ -12,6 +12,9 @@ from collections.abc import Callable
 import pytest
 
 from full_view_agent.application.context_builder import AgentContextBuilder
+from full_view_agent.application.dynamic_tool_bridge import (
+    build_dynamic_tool_registry_entries,
+)
 from full_view_agent.application.harness import FinishAction, HarnessState, ToolAction
 from full_view_agent.application.native_orchestrator import NativeOrchestrator
 from full_view_agent.application.semantic_wiring import (
@@ -19,10 +22,14 @@ from full_view_agent.application.semantic_wiring import (
 )
 from full_view_agent.application.session_run_service import SessionRunService
 from full_view_agent.application.tool_registry import ToolRegistry
+from full_view_agent.domain.capability import ToolSemanticContract
 from full_view_agent.domain.models import (
     AuthContext,
+    AuthorizedAreaScope,
+    PopulationAggregateTable,
     PopulationMetricRow,
     PopulationMetricTable,
+    PopulationRankingTable,
     RunCreateRequest,
     TableDataResult,
     ToolResult,
@@ -44,18 +51,92 @@ from full_view_agent.semantic.presenter import SemanticToolPresenter
 
 from .test_policy import population_auth_context
 from .test_session_run_service import run_request
+from .test_tool_semantic_contract import _population_contract, _tool
+
+
+def _published_population_registry() -> ToolRegistry:
+    base = ToolRegistry.default(housing_next_area_enabled=False)
+    payload = _population_contract(
+        output_forms=["table", "choropleth"]
+    ).model_dump(mode="python")
+    dimensions = {
+        "district": 4,
+        "descendant_street": 4,
+        "descendant_community": 4,
+        "street": 6,
+        "community": 9,
+        "grid": 12,
+    }
+    payload["dimensions"] = [
+        {
+            "dimension_id": dimension,
+            "label": dimension,
+            "kind": "administrative_area",
+        }
+        for dimension in dimensions
+    ]
+    payload["sort"]["allowed_fields"] = ["person_count", *dimensions]
+    payload["sort"]["tie_breakers"] = []
+    payload["query_shapes"] = []
+    for dimension, scope_level in dimensions.items():
+        for operator in payload["operators"]:
+            aggregate = operator in {"sum", "avg", "min", "max"}
+            ranking = operator in {"top", "bottom", "rank"} or (
+                operator == "list"
+                and dimension in {
+                    "district",
+                    "descendant_street",
+                    "descendant_community",
+                }
+            )
+            for output in payload["output_forms"]:
+                schema_kind = "aggregate" if aggregate else "ranking" if ranking else "metric"
+                fields = (
+                    ["operator", "metric", "value", "area_count", "completeness"]
+                    if aggregate
+                    else ["rank", "area_code", "area_name", "person_count"]
+                    if ranking
+                    else ["area_code", "area_name", "person_count"]
+                )
+                payload["query_shapes"].append(
+                    {
+                        "shape_id": f"population_{dimension}_{operator}_{output}",
+                        "metric_selection": ["person_count"],
+                        "dimension_selection": [dimension],
+                        "operator_selection": [operator],
+                        "scope_levels": [scope_level],
+                        "allowed_filters": ["person_category"],
+                        "output_forms": [output],
+                        "completeness": payload["completeness"],
+                        "result_schema_ref": f"schema://data/population-{schema_kind}-table/1.0.0",
+                        "result_row_fields": fields,
+                        "result_fingerprint_domain": (
+                            f"data-result:population-{schema_kind}-table:1.0.0"
+                        ),
+                    }
+                )
+    tool = _tool(
+        version="1.1.0",
+        contract=ToolSemanticContract.model_validate(payload),
+    )
+    manifests, descriptors = build_dynamic_tool_registry_entries(
+        [tool], base_registry=base
+    )
+    return base.merge_dynamic(manifests=manifests, descriptors=descriptors)
 
 
 def _semantic_args(
     area_code: str = "330106",
     group_by: str = "street",
     output: str = "table",
+    operator: str = "list",
 ) -> dict[str, object]:
     return {
         "catalog_version": SemanticCatalog.default().catalog_version,
         "catalog_fingerprint": SemanticCatalog.default().execution_fingerprint,
         "spec": {
             "subject": "population",
+            "operator": operator,
             "metrics": ["person_count"],
             "scope": {"area_code": area_code},
             "filters": [
@@ -194,7 +275,7 @@ async def _semantic_orchestrator(
     events = InMemoryEventBroker()
     service = SessionRunService(store)
     # 通用语义链路测试使用生产安全默认：住房 next_area 关闭。
-    registry = ToolRegistry.default(housing_next_area_enabled=False)
+    registry = _published_population_registry()
     stack = build_semantic_capability_stack(
         registry=registry,
         adapter=adapter or InMemoryGovernanceAdapter(),
@@ -324,7 +405,11 @@ async def test_context_builder_advertises_semantic_tool_and_prompt_section() -> 
     assert "语义查询入口说明" in prompt
     assert "semantic_query" in prompt
     assert "governance.query_population_metrics" not in prompt
-    assert request.prompt_version == "full-view-governance-readonly-v20"
+    assert request.prompt_version == "runtime-safety-kernel-v1"
+    assert prompt.index("[RUNTIME_SAFETY_KERNEL]") < prompt.index(
+        "[RUN_PUBLISHED_CAPABILITIES]"
+    )
+    assert "full_view.finish_answer" in prompt
 
 
 @pytest.mark.asyncio
@@ -731,6 +816,10 @@ async def test_semantic_query_end_to_end_success_with_lineage_and_commands(
     assert [m.metric_id for m in evidence.metric_definitions] == ["person_count"]
     assert evidence.effective_area_codes == ["330106"]
     assert evidence.tool.tool_id == "governance.query_population_metrics"
+    assert evidence.tool.tool_version == "1.1.0"
+    assert evidence.semantic_contract_fingerprint is not None
+    assert evidence.semantic_shape_id == "population_street_list_table"
+    assert evidence.semantic_operator == "list"
 
     # FrontendCommand：表格面板 + 人口分级设色地图。
     commands = [
@@ -742,6 +831,64 @@ async def test_semantic_query_end_to_end_success_with_lineage_and_commands(
     assert command_types == ["map.render_choropleth", "panel.show_table"]
     for command in commands:
         assert command["preconditions"]["area_code"] == "330106"
+
+
+@pytest.mark.parametrize("operator", ["top", "bottom", "avg"])
+@pytest.mark.asyncio
+async def test_population_operation_end_to_end_has_typed_final_result_on_both_runtimes(
+    orchestrator_type: type,
+    operator: str,
+) -> None:
+    orch, store, _events, run_id, _stack = await _semantic_orchestrator(
+        orchestrator_type=orchestrator_type,
+        planner=_SemanticPlanner(
+            [
+                _semantic_args(
+                    area_code="3301",
+                    group_by="descendant_street",
+                    operator=operator,
+                )
+            ]
+        ),
+        auth=population_auth_context().model_copy(
+            update={
+                "data_scopes": population_auth_context().data_scopes.model_copy(
+                    update={"areas": [AuthorizedAreaScope(area_code="3301")]}
+                )
+            }
+        ),
+    )
+
+    await orch.execute(user_id="user-semantic", run_id=run_id)
+
+    run = await store.get_run(user_id="user-semantic", run_id=run_id)
+    assert (run.status, run.outcome) == ("completed", "success")
+    assert len(store.results) == 1
+    result = next(iter(store.results.values()))
+    assert isinstance(result, TableDataResult)
+    assert result.presentation is not None
+    assert len(store.evidence) == 1
+    evidence = next(iter(store.evidence.values()))
+    assert evidence.tool.tool_id == "governance.query_population_metrics"
+    assert evidence.tool.tool_version == "1.1.0"
+    assert evidence.semantic_contract_fingerprint is not None
+    assert evidence.semantic_shape_id == (
+        f"population_descendant_street_{operator}_table"
+    )
+    assert evidence.semantic_operator == operator
+    assert evidence.semantic_completeness == "complete"
+    assert evidence.semantic_tie_policy == "include_all"
+    assert [item.metric_id for item in evidence.metric_definitions] == [
+        "person_count"
+    ]
+    if operator == "avg":
+        assert isinstance(result.data, PopulationAggregateTable)
+        assert result.data.rows[0].value == 128
+        assert result.data.rows[0].completeness == "complete"
+        assert result.presentation.visualizations[1].kind == "metric"
+    else:
+        assert isinstance(result.data, PopulationRankingTable)
+        assert result.data.rows[0].person_count == 128
 
 
 @pytest.mark.asyncio

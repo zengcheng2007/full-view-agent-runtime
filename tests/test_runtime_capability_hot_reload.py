@@ -27,6 +27,7 @@ from full_view_agent.application.run_capability_snapshot_store import (
     InMemoryRunCapabilitySnapshotStore,
     PersistedRunCapabilitySnapshot,
 )
+from full_view_agent.application.runtime_prompt_registry import RuntimePromptRegistry
 from full_view_agent.application.runtime_skill_registry import RuntimeSkillRegistry
 from full_view_agent.application.runtime_workflow_registry import RuntimeWorkflowRegistry
 from full_view_agent.application.tool_registry import ToolRegistry
@@ -46,6 +47,7 @@ from full_view_agent.domain.capability import (
     WorkflowNodeDefinition,
 )
 from full_view_agent.domain.models import LegacyIdentitySnapshot, Principal, WorkflowRef
+from full_view_agent.domain.prompt_template import RuntimePromptSnapshot
 from full_view_agent.infrastructure.application_registry import (
     InMemoryApplicationRegistry,
 )
@@ -304,17 +306,18 @@ async def test_agent_release_limits_each_run_and_restart_keeps_exact_resource_se
     prompt_versions = {
         ("prompt.alpha", "1.0.0"): "alpha guidance",
         ("prompt.beta", "1.0.0"): "beta guidance",
+        ("application.policy", "3.0.0"): "application-v3",
+        ("application.policy", "4.0.0"): "application-v4",
     }
 
     async def load_prompt(*, prompt_id: str, version: str):
-        from full_view_agent.domain.prompt_template import RuntimePromptSnapshot
-
         content = prompt_versions.get((prompt_id, version))
         if content is None:
             return None
         return RuntimePromptSnapshot(
             prompt_id=prompt_id,
             app_id="full_information_view",
+            layer=("application" if prompt_id == "application.policy" else "agent"),
             version=version,
             content=content,
         )
@@ -339,6 +342,15 @@ async def test_agent_release_limits_each_run_and_restart_keeps_exact_resource_se
                     },
                 )
                 for item in workflows
+            )
+        ),
+        runtime_prompt_registry=RuntimePromptRegistry(
+            RuntimePromptSnapshot(
+                prompt_id="application.policy",
+                app_id="full_information_view",
+                layer="application",
+                version="3.0.0",
+                content="application-v3",
             )
         ),
         prompt_snapshot_loader=load_prompt,
@@ -387,7 +399,10 @@ async def test_agent_release_limits_each_run_and_restart_keeps_exact_resource_se
     assert [item.workflow_id for item in alpha.runtime_workflow_registry.list()] == [
         "workflow.alpha"
     ]
-    assert alpha.runtime_prompt_snapshot.composite_version == "prompt.alpha@1.0.0"  # type: ignore[union-attr]
+    assert alpha.application_prompt_snapshot.composite_version == (  # type: ignore[union-attr]
+        "application.policy@3.0.0"
+    )
+    assert alpha.agent_prompt_snapshot.composite_version == "prompt.alpha@1.0.0"  # type: ignore[union-attr]
     assert alpha.knowledge_base_versions == {"kb.alpha": 1}
     assert beta.tool_versions == {"tool.beta": "1.0.0"}
 
@@ -397,6 +412,15 @@ async def test_agent_release_limits_each_run_and_restart_keeps_exact_resource_se
         application_registry=applications,
         runtime_skill_registry=service._runtime_skill_registry,
         runtime_workflow_registry=service._runtime_workflow_registry,
+        runtime_prompt_registry=RuntimePromptRegistry(
+            RuntimePromptSnapshot(
+                prompt_id="application.policy",
+                app_id="full_information_view",
+                layer="application",
+                version="4.0.0",
+                content="application-v4",
+            )
+        ),
         prompt_snapshot_loader=load_prompt,
     )
     recovered = await restarted.create_snapshot_for_run(
@@ -407,6 +431,10 @@ async def test_agent_release_limits_each_run_and_restart_keeps_exact_resource_se
     )
     assert recovered.tool_versions == {"tool.alpha": "1.0.0"}
     assert recovered.knowledge_base_versions == {"kb.alpha": 1}
+    assert recovered.application_prompt_snapshot.composite_version == (  # type: ignore[union-attr]
+        "application.policy@3.0.0"
+    )
+    assert recovered.agent_prompt_snapshot.composite_version == "prompt.alpha@1.0.0"  # type: ignore[union-attr]
 
 
 @pytest.mark.asyncio
@@ -487,6 +515,51 @@ async def test_snapshot_service_caches_the_persistent_first_writer() -> None:
 
     assert returned.tool_registry.list_tool_ids() == ["governance.resolve_area"]
     assert service.get_snapshot_for_run("run-concurrent-winner") is returned
+
+
+@pytest.mark.asyncio
+async def test_snapshot_persistence_failure_does_not_leave_candidate_cache() -> None:
+    class _FailingStore(InMemoryRunCapabilitySnapshotStore):
+        async def store_if_absent(self, snapshot):
+            raise RuntimeError("persistence unavailable")
+
+    service = RunCapabilitySnapshotService(
+        InMemoryCapabilityRepository(),
+        store=_FailingStore(),
+    )
+
+    with pytest.raises(RuntimeError, match="persistence unavailable"):
+        await service.create_snapshot_for_run(
+            "run-persistence-failed", ToolRegistry.default()
+        )
+
+    assert service.get_snapshot_for_run("run-persistence-failed") is None
+
+
+@pytest.mark.asyncio
+async def test_unrebuildable_persistent_winner_clears_candidate_cache() -> None:
+    class _UnrebuildableWinnerStore(InMemoryRunCapabilitySnapshotStore):
+        async def load(self, run_id: str):
+            return None
+
+        async def store_if_absent(self, snapshot):
+            return PersistedRunCapabilitySnapshot(
+                run_id=snapshot.run_id,
+                tool_versions={"tool.missing": "1.0.0"},
+                captured_at=datetime(2026, 8, 15, tzinfo=UTC),
+            )
+
+    service = RunCapabilitySnapshotService(
+        InMemoryCapabilityRepository(),
+        store=_UnrebuildableWinnerStore(),
+    )
+
+    with pytest.raises(RuntimeError, match="concurrent snapshot"):
+        await service.create_snapshot_for_run(
+            "run-unrebuildable-winner", ToolRegistry.default()
+        )
+
+    assert service.get_snapshot_for_run("run-unrebuildable-winner") is None
 
 
 @pytest.mark.asyncio

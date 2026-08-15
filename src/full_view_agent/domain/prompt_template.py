@@ -10,6 +10,7 @@ from full_view_agent.domain.contract_model import ContractModel
 PromptTemplateStatus = Literal[
     "draft", "testing", "pending_approval", "published", "disabled"
 ]
+PromptLayer = Literal["application", "agent"]
 
 
 class PromptTemplate(ContractModel):
@@ -17,6 +18,7 @@ class PromptTemplate(ContractModel):
 
     prompt_id: str = Field(pattern=r"^[a-z][a-z0-9_.-]{2,127}$")
     app_id: str = Field(min_length=2, max_length=64)
+    layer: PromptLayer = "application"
     name: str = Field(min_length=1, max_length=200)
     version: str = Field(pattern=r"^[0-9]+\.[0-9]+\.[0-9]+$")
     content: str = Field(min_length=1, max_length=20_000)
@@ -50,6 +52,7 @@ class PromptLifecycleEvent(ContractModel):
 class RuntimePromptSnapshot(ContractModel):
     prompt_id: str
     app_id: str
+    layer: PromptLayer = "application"
     version: str
     content: str
 

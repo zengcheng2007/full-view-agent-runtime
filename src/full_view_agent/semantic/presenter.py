@@ -12,7 +12,9 @@ ADR-05 要求 Tool 描述由经过权限过滤的 Catalog 能力生成，Prompt 
 """
 
 from dataclasses import dataclass
+from typing import TYPE_CHECKING
 
+from full_view_agent.application.errors import ResourceNotFound
 from full_view_agent.domain.models import AuthContext
 from full_view_agent.semantic.action_resolver import (
     SEMANTIC_QUERY_TOOL_ID,
@@ -25,6 +27,9 @@ from full_view_agent.semantic.catalog import (
     SemanticCatalog,
     SubjectCapabilityView,
 )
+
+if TYPE_CHECKING:
+    from full_view_agent.application.tool_registry import ToolRegistry
 
 # 区划编码长度即层级 —— 系统通识，不属于某个主题的能力清单。
 _SCOPE_LEVEL_LEGEND = "市4/区县6/街道9/社区12/网格15"
@@ -53,8 +58,10 @@ class SemanticToolPresenter:
         self,
         *,
         catalog: SemanticCatalog,
+        registry: "ToolRegistry | None" = None,
     ) -> None:
         self._catalog = catalog
+        self._registry = registry
 
     @property
     def _bindable_subjects(self) -> frozenset[str]:
@@ -178,6 +185,24 @@ class SemanticToolPresenter:
         ]
         for subject in bindable:
             lines.append(self._describe_subject(subject))
+            if self._registry is not None:
+                binding = self._catalog.binding(subject.subject_id)
+                if binding is not None:
+                    try:
+                        contract = self._registry.get_semantic_contract(
+                            binding.capability_id
+                        )
+                    except ResourceNotFound:
+                        contract = None
+                    if contract is not None:
+                        lines.append(
+                            "该Tool精确版本语义合同："
+                            f"operators={list(contract.operators)}；"
+                            f"tie_policy={contract.sort.tie_policy}；"
+                            f"completeness={contract.completeness.mode}；"
+                            f"limitations={list(contract.limitations)}。"
+                            f"query_shapes={[shape.shape_id for shape in contract.query_shapes]}。"
+                        )
         return "".join(lines)
 
     @staticmethod

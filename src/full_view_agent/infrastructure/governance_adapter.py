@@ -55,6 +55,8 @@ from full_view_agent.domain.models import (
     ObjectProfileField,
     ObjectProfileResult,
     PolicyDecision,
+    PopulationAggregateRow,
+    PopulationAggregateTable,
     PopulationMetricRow,
     PopulationMetricTable,
     PopulationRankingRow,
@@ -206,24 +208,13 @@ class InMemoryGovernanceAdapter:
     ) -> TableDataResult:
         area_code = arguments.query.scope.area_code
         _validate_population_query(arguments)
-        data = PopulationMetricTable(
-            rows=[
-                PopulationMetricRow(
-                    area_code=f"{area_code}001",
-                    area_name="示例街道",
-                    person_count=128,
-                )
-            ][: arguments.query.limit]
-        )
-        return TableDataResult(
-            result_id=new_id("res"),
-            data_schema_ref="schema://data/population-metric-table/1.0.0",
-            result_fingerprint=canonical_fingerprint(
-                domain="data-result:population-metric-table:1.0.0",
-                value=data,
-            ),
-            data=data,
-            row_count=len(data.rows),
+        return _population_result(
+            arguments=arguments,
+            parsed_rows=[(f"{area_code}001", "示例街道", 128)],
+            upstream_truncated=False,
+            ranking=arguments.query.group_by[0] in {
+                "district", "descendant_street", "descendant_community"
+            },
         )
 
     @staticmethod
@@ -1429,52 +1420,11 @@ class HttpGovernanceAdapter:
             raise UpstreamContractError(
                 "legacy population response is malformed"
             ) from exc
-        if arguments.query.order_by:
-            order = arguments.query.order_by[0]
-            parsed_rows.sort(
-                key=lambda row: (row[2], row[0]),
-                reverse=order.direction == "desc",
-            )
-        if arguments.query.group_by == ["district"]:
-            source_rows = [
-                PopulationRankingRow(
-                    rank=index,
-                    area_code=area_code_value,
-                    area_name=area_name,
-                    person_count=person_count,
-                )
-                for index, (area_code_value, area_name, person_count) in enumerate(
-                    parsed_rows, start=1
-                )
-            ]
-            rows = source_rows[: arguments.query.limit]
-            data = PopulationRankingTable(rows=rows)
-            schema_ref = "schema://data/population-ranking-table/1.0.0"
-            fingerprint_domain = "data-result:population-ranking-table:1.0.0"
-        else:
-            rows = [
-                PopulationMetricRow(
-                    area_code=area_code_value,
-                    area_name=area_name,
-                    person_count=person_count,
-                )
-                for area_code_value, area_name, person_count in parsed_rows
-            ][: arguments.query.limit]
-            data = PopulationMetricTable(rows=rows)
-            schema_ref = "schema://data/population-metric-table/1.0.0"
-            fingerprint_domain = "data-result:population-metric-table:1.0.0"
-        return TableDataResult(
-            result_id=new_id("res"),
-            data_schema_ref=schema_ref,
-            result_fingerprint=canonical_fingerprint(
-                domain=fingerprint_domain,
-                value=data,
-            ),
-            data=data,
-            row_count=len(rows),
-            truncated=(
-                upstream_truncated or len(raw_rows) > arguments.query.limit
-            ),
+        return _population_result(
+            arguments=arguments,
+            parsed_rows=parsed_rows,
+            upstream_truncated=upstream_truncated,
+            ranking=arguments.query.group_by == ["district"],
         )
 
     async def _query_population_descendants_http(
@@ -1570,26 +1520,14 @@ class HttpGovernanceAdapter:
                 )
             frontier = next_frontier
 
-        ordered = sorted(
-            source_rows,
-            key=lambda row: (-row.person_count, row.area_code),
-        )
-        ranked = [
-            row.model_copy(update={"rank": index})
-            for index, row in enumerate(ordered, start=1)
-        ]
-        rows = ranked[: arguments.query.limit]
-        data = PopulationRankingTable(rows=rows)
-        return TableDataResult(
-            result_id=new_id("res"),
-            data_schema_ref="schema://data/population-ranking-table/1.0.0",
-            result_fingerprint=canonical_fingerprint(
-                domain="data-result:population-ranking-table:1.0.0",
-                value=data,
-            ),
-            data=data,
-            row_count=len(rows),
-            truncated=len(ranked) > arguments.query.limit,
+        return _population_result(
+            arguments=arguments,
+            parsed_rows=[
+                (row.area_code, row.area_name, row.person_count)
+                for row in source_rows
+            ],
+            upstream_truncated=False,
+            ranking=True,
         )
 
     async def _query_event_metrics_http(
@@ -2837,6 +2775,137 @@ def _validate_population_query(arguments: QueryPopulationMetricsInput) -> str:
             "legacy adapter supports only declared population area groupings"
         )
     return population_kind
+
+
+def _population_result(
+    *,
+    arguments: QueryPopulationMetricsInput,
+    parsed_rows: list[tuple[str, str, int]],
+    upstream_truncated: bool,
+    ranking: bool,
+) -> TableDataResult:
+    """Apply the declared operation once, after the complete safe projection."""
+
+    operator = arguments.query.operator
+    if upstream_truncated and operator in {
+        "sum",
+        "avg",
+        "min",
+        "max",
+        "top",
+        "bottom",
+        "rank",
+    }:
+        raise UpstreamContractError(
+            "population operation requires a complete upstream row set"
+        )
+    if operator in {"sum", "avg", "min", "max"}:
+        values = [row[2] for row in parsed_rows]
+        if not values:
+            raise UpstreamContractError(
+                "population aggregate is undefined for an empty row set"
+            )
+        if operator == "sum":
+            value = float(sum(values))
+        elif operator == "avg":
+            value = sum(values) / len(values)
+        elif operator == "min":
+            value = float(min(values))
+        else:
+            value = float(max(values))
+        data = PopulationAggregateTable(
+            rows=[
+                PopulationAggregateRow(
+                    operator=cast(Literal["sum", "avg", "min", "max"], operator),
+                    metric="person_count",
+                    value=value,
+                    area_count=len(values),
+                    completeness="complete",
+                )
+            ]
+        )
+        schema_ref = "schema://data/population-aggregate-table/1.0.0"
+        return TableDataResult(
+            result_id=new_id("res"),
+            data_schema_ref=schema_ref,
+            result_fingerprint=canonical_fingerprint(
+                domain="data-result:population-aggregate-table:1.0.0",
+                value=data,
+            ),
+            data=data,
+            row_count=1,
+        )
+
+    ordered = list(parsed_rows)
+    if operator in {"top", "rank"}:
+        ordered.sort(key=lambda row: (-row[2], row[0]))
+    elif operator == "bottom":
+        ordered.sort(key=lambda row: (row[2], row[0]))
+    elif arguments.query.order_by:
+        direction = arguments.query.order_by[0].direction
+        ordered.sort(
+            key=(
+                (lambda row: (-row[2], row[0]))
+                if direction == "desc"
+                else (lambda row: (row[2], row[0]))
+            )
+        )
+
+    limit = arguments.query.limit
+    selected = ordered[:limit]
+    if operator in {"top", "bottom", "rank"} and selected and len(ordered) > limit:
+        boundary = selected[-1][2]
+        selected.extend(row for row in ordered[limit:] if row[2] == boundary)
+
+    use_ranking = ranking or operator in {"top", "bottom", "rank"}
+    if use_ranking:
+        ranked_rows: list[PopulationRankingRow] = []
+        previous_value: int | None = None
+        previous_rank = 0
+        for index, (area_code, area_name, person_count) in enumerate(
+            selected, start=1
+        ):
+            rank = previous_rank if person_count == previous_value else index
+            ranked_rows.append(
+                PopulationRankingRow(
+                    rank=rank,
+                    area_code=area_code,
+                    area_name=area_name,
+                    person_count=person_count,
+                )
+            )
+            previous_value = person_count
+            previous_rank = rank
+        data = PopulationRankingTable(rows=ranked_rows)
+        schema_ref = "schema://data/population-ranking-table/1.0.0"
+        domain = "data-result:population-ranking-table:1.0.0"
+    else:
+        data = PopulationMetricTable(
+            rows=[
+                PopulationMetricRow(
+                    area_code=area_code,
+                    area_name=area_name,
+                    person_count=person_count,
+                )
+                for area_code, area_name, person_count in selected
+            ]
+        )
+        schema_ref = "schema://data/population-metric-table/1.0.0"
+        domain = "data-result:population-metric-table:1.0.0"
+    return TableDataResult(
+        result_id=new_id("res"),
+        data_schema_ref=schema_ref,
+        result_fingerprint=canonical_fingerprint(domain=domain, value=data),
+        data=data,
+        row_count=len(selected),
+        truncated=(
+            upstream_truncated
+            or (
+                operator in {"list", "rank"}
+                and len(selected) < len(ordered)
+            )
+        ),
+    )
 
 
 def _validate_housing_descendant_street_query(

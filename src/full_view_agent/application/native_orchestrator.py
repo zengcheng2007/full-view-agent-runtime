@@ -52,6 +52,7 @@ from full_view_agent.application.tool_observation_service import (
     result_reference_label,
 )
 from full_view_agent.application.tool_registry import ToolRegistry
+from full_view_agent.domain.agent_definition import AgentExecutionPolicy
 from full_view_agent.domain.models import (
     AgentMessage,
     AgentRun,
@@ -210,6 +211,9 @@ class NativeOrchestrator(OrchestrationPort):
         run_skill_registry: RuntimeSkillRegistry | None = None
         run_workflow_registry = self._runtime_workflow_registry
         run_prompt_snapshot = None
+        run_application_prompt_snapshot = None
+        run_agent_prompt_snapshot = None
+        run_execution_policy: AgentExecutionPolicy | None = None
         if self._snapshot_service is not None:
             snapshot_auth_context = await self._auth_context_provider.get(
                 user_id=user_id,
@@ -224,6 +228,11 @@ class NativeOrchestrator(OrchestrationPort):
             run_skill_registry = snapshot.runtime_skill_registry
             run_workflow_registry = snapshot.runtime_workflow_registry
             run_prompt_snapshot = snapshot.runtime_prompt_snapshot
+            run_application_prompt_snapshot = snapshot.application_prompt_snapshot
+            run_agent_prompt_snapshot = snapshot.agent_prompt_snapshot
+            run_execution_policy = (
+                snapshot.execution_policy if snapshot.agent_scoped else None
+            )
             logger.info(
                 "Using capability snapshot for run %s (created_at=%s)",
                 run_id,
@@ -239,6 +248,9 @@ class NativeOrchestrator(OrchestrationPort):
                 run_skill_registry=run_skill_registry,
                 run_workflow_registry=run_workflow_registry,
                 run_prompt_snapshot=run_prompt_snapshot,
+                run_application_prompt_snapshot=run_application_prompt_snapshot,
+                run_agent_prompt_snapshot=run_agent_prompt_snapshot,
+                run_execution_policy=run_execution_policy,
             )
         finally:
             # P2-2 / S1-B snapshot lifecycle: snapshots must survive the
@@ -263,6 +275,9 @@ class NativeOrchestrator(OrchestrationPort):
         run_skill_registry: RuntimeSkillRegistry | None = None,
         run_workflow_registry: RuntimeWorkflowRegistry | None = None,
         run_prompt_snapshot=None,
+        run_application_prompt_snapshot=None,
+        run_agent_prompt_snapshot=None,
+        run_execution_policy: AgentExecutionPolicy | None = None,
     ) -> None:
         effective_registry = run_registry or self._registry
         run_harness = self._harness
@@ -309,12 +324,27 @@ class NativeOrchestrator(OrchestrationPort):
                     bind_skills(run_skill_registry),
                 )
         if run_planner_factory is not None:
+            bind_prompt_bundle = getattr(
+                run_planner_factory, "for_prompt_bundle", None
+            )
             bind_prompt = getattr(run_planner_factory, "for_prompt_snapshot", None)
-            if callable(bind_prompt):
+            if callable(bind_prompt_bundle):
+                run_planner_factory = cast(
+                    RunPlannerFactory,
+                    bind_prompt_bundle(
+                        application_prompt_snapshot=(
+                            run_application_prompt_snapshot
+                        ),
+                        agent_prompt_snapshot=run_agent_prompt_snapshot,
+                    ),
+                )
+            elif callable(bind_prompt):
                 run_planner_factory = cast(
                     RunPlannerFactory,
                     bind_prompt(run_prompt_snapshot),
                 )
+        if run_execution_policy is not None:
+            run_harness = run_harness.with_execution_policy(run_execution_policy)
         was_queued = current.status == "queued"
         running = (
             await self._service.start_run(user_id=user_id, run_id=run_id)

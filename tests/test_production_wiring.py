@@ -159,7 +159,6 @@ async def test_production_context_advertises_wired_aggregate_tools() -> None:
     assert "query_housing_metrics" in prompt
     assert "按租赁类型" in prompt
     assert "room_use" in prompt
-    assert "next_area" not in prompt
     housing_tool = next(
         tool
         for tool in request.tools
@@ -173,9 +172,11 @@ async def test_production_context_advertises_wired_aggregate_tools() -> None:
         ensure_ascii=False,
     )
     assert "query_event_metrics" in prompt
-    assert "事件总数月度趋势" in prompt
-    assert "不得表述为上报或处置趋势" in prompt
-    assert "不支持按阈值筛选" in prompt
+    event_tool = next(
+        tool for tool in request.tools if tool.tool_id == "governance.query_event_metrics"
+    )
+    assert event_tool.description in prompt
+    assert "min_finish_rate" not in event_tool.input_schema["properties"]
     assert "get_object_profile" not in prompt
     assert "base_room_lease" not in prompt
     assert "getNextSiteData" not in prompt

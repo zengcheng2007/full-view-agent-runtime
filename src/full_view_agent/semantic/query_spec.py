@@ -50,6 +50,9 @@ class SemanticTimeRange(ContractModel):
 class SemanticQuerySpec(ContractModel):
     schema_version: Literal["s0.1"] = SEMANTIC_SPEC_VERSION
     subject: str = Field(min_length=1, max_length=64)
+    operator: Literal[
+        "list", "sum", "avg", "min", "max", "top", "bottom", "rank"
+    ] = "list"
     metrics: list[str] = Field(min_length=1, max_length=5)
     scope: MetricQueryScope
     group_by: list[str] = Field(default_factory=list, max_length=2)

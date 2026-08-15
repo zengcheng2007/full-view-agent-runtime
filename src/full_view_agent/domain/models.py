@@ -5,6 +5,7 @@ from typing import Annotated, Literal
 from pydantic import ConfigDict, Field, JsonValue, field_validator, model_validator
 
 from full_view_agent.domain.analysis_report import AnalysisReportDataResult
+from full_view_agent.domain.capability import ToolSemanticContract
 from full_view_agent.domain.contract_model import ContractModel
 
 
@@ -103,6 +104,9 @@ class PopulationMetricOrder(ContractModel):
 class PopulationMetricQuerySpec(ContractModel):
     schema_version: Literal["1.1"] = "1.1"
     metrics: list[Literal["person_count"]] = Field(min_length=1, max_length=1)
+    operator: Literal[
+        "list", "sum", "avg", "min", "max", "top", "bottom", "rank"
+    ] = "list"
     scope: MetricQueryScope
     filters: list[PopulationMetricFilter] = Field(default_factory=list, max_length=10)
     group_by: list[
@@ -341,6 +345,7 @@ class InternalToolManifest(ContractModel):
     cache_policy: ToolCachePolicy
     policy: ToolPolicyBinding
     adapter_ref: str
+    semantic_contract: ToolSemanticContract | None = None
 
 
 class ModelInputSchemaReference(ContractModel):
@@ -860,6 +865,20 @@ class PopulationRankingTable(ContractModel):
     rows: list[PopulationRankingRow]
 
 
+class PopulationAggregateRow(ContractModel):
+    operator: Literal["sum", "avg", "min", "max"] = Field(title="聚合运算")
+    metric: Literal["person_count"] = Field(title="指标")
+    value: float = Field(ge=0, title="聚合值")
+    area_count: int = Field(ge=0, title="参与聚合区划数")
+    completeness: Literal["complete", "partial", "unknown"] = Field(
+        title="完整性"
+    )
+
+
+class PopulationAggregateTable(ContractModel):
+    rows: list[PopulationAggregateRow]
+
+
 class HousingLeaseTypeRow(ContractModel):
     lease_type: str = Field(min_length=1, max_length=100, title="出租类型")
     dwelling_count: int = Field(
@@ -1123,6 +1142,7 @@ class TableDataResult(ContractModel):
     data: (
         PopulationMetricTable
         | PopulationRankingTable
+        | PopulationAggregateTable
         | HousingLeaseTypeTable
         | HousingAreaGroupTable
         | HousingRoomUseTable
@@ -1275,6 +1295,11 @@ class Evidence(ContractModel):
     dataset_id: str
     dataset_snapshot_version: str | None = None
     semantic_registry_version: str | None = None
+    semantic_contract_fingerprint: str | None = None
+    semantic_shape_id: str | None = None
+    semantic_operator: str | None = None
+    semantic_completeness: str | None = None
+    semantic_tie_policy: str | None = None
     metric_definitions: list[EvidenceMetricDefinition] = Field(default_factory=list)
     effective_area_codes: list[str] = Field(default_factory=list)
     time_range: dict[str, datetime] | None = None
@@ -1328,6 +1353,13 @@ class SemanticResultLineage(ContractModel):
     canonical_tool_version: str = Field(min_length=1, max_length=32)
     spec_fingerprint: str = Field(min_length=1, max_length=200)
     plan_fingerprint: str = Field(min_length=1, max_length=200)
+    semantic_contract_fingerprint: str | None = Field(
+        default=None, min_length=1, max_length=200
+    )
+    semantic_shape_id: str | None = Field(default=None, min_length=1, max_length=64)
+    semantic_operator: str | None = Field(default=None, min_length=1, max_length=32)
+    semantic_completeness: str | None = Field(default=None, min_length=1, max_length=32)
+    semantic_tie_policy: str | None = Field(default=None, min_length=1, max_length=32)
     area_code: str = Field(min_length=1, max_length=32)
     output: str = Field(min_length=1, max_length=32)
     metric_definitions: list[EvidenceMetricDefinition] = Field(default_factory=list)

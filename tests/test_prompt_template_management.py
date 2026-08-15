@@ -204,10 +204,38 @@ async def test_prompt_control_plane_http_lifecycle_and_effective_contract() -> N
             "/capability-api/v1/prompt-templates/"
             "full-view.operator-guidance/audit-events"
         )
+        other_response = await client.post(
+            "/capability-api/v1/prompt-templates",
+            json={
+                "prompt_id": "other-app.operator-guidance",
+                "app_id": "other_application",
+                "name": "其他应用补充指令",
+                "version": "1.0.0",
+                "content": "OTHER_APPLICATION_POLICY",
+                "reason": "初始化",
+            },
+        )
+        assert other_response.status_code == 201
+        other = other_response.json()["data"]
+        for action in ("testing", "approve", "publish"):
+            other_response = await client.post(
+                f"/capability-api/v1/prompt-templates/"
+                f"{other['prompt_id']}/{other['version']}/{action}",
+                json={"expected_etag": other["etag"], "reason": action},
+            )
+            assert other_response.status_code == 200
+            other = other_response.json()["data"]
 
     assert response.status_code == 200
     assert response.json()["data"]["content"] == "统一使用中文业务术语。"
-    assert runtime.runtime_prompt_registry.snapshot() is not None
+    full_view_prompt = runtime.runtime_prompt_registry.snapshot(
+        app_id="full_information_view"
+    )
+    other_prompt = runtime.runtime_prompt_registry.snapshot(app_id="other_application")
+    assert full_view_prompt is not None
+    assert full_view_prompt.content == "统一使用中文业务术语。"
+    assert other_prompt is not None
+    assert other_prompt.content == "OTHER_APPLICATION_POLICY"
     assert audit.status_code == 200
     assert [event["to_status"] for event in audit.json()["data"]] == [
         "draft",

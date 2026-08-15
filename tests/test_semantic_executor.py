@@ -444,8 +444,9 @@ def test_fingerprinter_semantic_call_matches_equivalent_direct_call() -> None:
         tool_id="governance.query_population_metrics",
         arguments={
             "query": {
-                "schema_version": "1.1",
-                "metrics": ["person_count"],
+                    "schema_version": "1.1",
+                    "metrics": ["person_count"],
+                    "operator": "list",
                 "scope": {"area_code": "330106", "include_descendants": True},
                 "filters": [
                     {

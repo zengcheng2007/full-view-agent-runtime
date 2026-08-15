@@ -2,6 +2,7 @@ from copy import deepcopy
 from threading import RLock
 
 from full_view_agent.application.errors import ResourceNotFound
+from full_view_agent.domain.capability import ToolSemanticContract
 from full_view_agent.domain.knowledge import KnowledgeSearchInput
 from full_view_agent.domain.models import (
     GetObjectProfileInput,
@@ -56,6 +57,25 @@ class ToolRegistry:
         self._baseline_descriptors = {
             descriptor.tool_id: descriptor for descriptor in descriptors
         }
+        for tool_id, manifest in self._baseline_manifests.items():
+            contract = manifest.semantic_contract
+            descriptor = self._baseline_descriptors.get(tool_id)
+            if (
+                contract is None
+                or descriptor is None
+                or "Semantic contract Tool@" in descriptor.description
+            ):
+                continue
+            self._baseline_descriptors[tool_id] = descriptor.model_copy(
+                update={
+                    "description": (
+                        f"{descriptor.description} Semantic contract Tool@"
+                        f"{manifest.tool_version}: subject={contract.subject}; "
+                        f"operators={', '.join(contract.operators)}; "
+                        f"completeness={contract.completeness.mode}."
+                    )
+                }
+            )
         self._baseline_dynamic_input_schemas = dict(dynamic_input_schemas or {})
         self._manifests = dict(self._baseline_manifests)
         self._descriptors = dict(self._baseline_descriptors)
@@ -178,6 +198,10 @@ class ToolRegistry:
                     result_kind="table",
                     data_schema_ref=(
                         "schema://data/population-metric-table/1.0.0"
+                    ),
+                    additional_data_schema_refs=(
+                        "schema://data/population-ranking-table/1.0.0",
+                        "schema://data/population-aggregate-table/1.0.0",
                     ),
                     cache_enabled=True,
                     ttl_seconds=60,
@@ -416,6 +440,12 @@ class ToolRegistry:
             raise ResourceNotFound("tool not found")
         return descriptor
 
+    def get_semantic_contract(self, tool_id: str) -> ToolSemanticContract:
+        manifest = self.get_manifest(tool_id)
+        if manifest.semantic_contract is None:
+            raise ResourceNotFound("tool semantic contract not found")
+        return manifest.semantic_contract
+
     def list_tool_ids(self) -> list[str]:
         with self._lock:
             return sorted(self._manifests)
@@ -589,6 +619,7 @@ def _manifest(
     denial_scope: str,
     adapter_ref: str,
     additional_data_schema_refs: tuple[str, ...] = (),
+    semantic_contract: dict[str, object] | None = None,
 ) -> InternalToolManifest:
     return InternalToolManifest.model_validate(
         {
@@ -624,6 +655,7 @@ def _manifest(
                 "denial_scope": denial_scope,
             },
             "adapter_ref": adapter_ref,
+            "semantic_contract": semantic_contract,
         }
     )
 

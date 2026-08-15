@@ -15,7 +15,6 @@ from full_view_agent.application.semantic_wiring import (
     build_semantic_capability_stack,
 )
 from full_view_agent.application.session_run_service import SessionRunService
-from full_view_agent.application.tool_registry import ToolRegistry
 from full_view_agent.domain.models import AuthContext, DataResult
 from full_view_agent.infrastructure.checkpoint_mapping_store import (
     InMemoryCheckpointMappingStore,
@@ -35,6 +34,7 @@ from full_view_agent.semantic.action_resolver import SEMANTIC_QUERY_TOOL_ID
 from full_view_agent.semantic.catalog import SemanticCatalog
 
 from .test_policy import population_auth_context
+from .test_semantic_wiring import _published_population_registry
 from .test_session_run_service import run_request
 
 
@@ -148,7 +148,7 @@ async def test_resume_rejects_checkpointed_semantic_action_after_catalog_drift(
     store = InMemoryAgentStore()
     events = InMemoryEventBroker()
     service = SessionRunService(store)
-    registry = ToolRegistry.default()
+    registry = _published_population_registry()
     adapter = _CountingAdapter()
     checkpoint_manager = InMemoryCheckpointManager()
     checkpoint_mappings = InMemoryCheckpointMappingStore()
@@ -253,7 +253,7 @@ async def test_resume_does_not_repeat_completed_semantic_tool() -> None:
     store = InMemoryAgentStore()
     events = InMemoryEventBroker()
     service = SessionRunService(store)
-    registry = ToolRegistry.default()
+    registry = _published_population_registry()
     adapter = _CountingAdapter()
     checkpoint_manager = InMemoryCheckpointManager()
     checkpoint_mappings = InMemoryCheckpointMappingStore()

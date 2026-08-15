@@ -8,7 +8,12 @@ import pytest
 
 from full_view_agent.api.app import RuntimeContainer, create_app
 from full_view_agent.api.capability_routes import ModelConfigCreateBody
-from full_view_agent.domain.capability import ModelConfig, ToolCapability
+from full_view_agent.domain.capability import (
+    CapabilitySnapshot,
+    Connector,
+    ModelConfig,
+    ToolCapability,
+)
 from full_view_agent.domain.models import LegacyIdentitySnapshot, Principal
 from full_view_agent.infrastructure.credential_broker import InMemoryCredentialBroker
 
@@ -52,6 +57,156 @@ def test_lifecycle_reason_is_required_with_non_empty_openapi_contract() -> None:
         schema = schemas[schema_name]
         assert "reason" in schema["required"]
         assert schema["properties"]["reason"]["minLength"] == 1
+
+
+def test_tool_response_openapi_exposes_only_credential_configured() -> None:
+    openapi = create_app(RuntimeContainer()).openapi()
+    schemas = openapi["components"]["schemas"]
+    public_tool = schemas["ToolDefinitionData"]
+
+    assert "credential_ref" not in public_tool["properties"]
+    assert public_tool["properties"]["credential_configured"]["type"] == "boolean"
+    assert schemas["ToolDefinitionResponse"]["properties"]["data"]["$ref"].endswith(
+        "/ToolDefinitionData"
+    )
+    assert schemas["ToolListResponse"]["properties"]["data"]["items"]["$ref"].endswith(
+        "/ToolDefinitionData"
+    )
+    assert schemas["ToolPublishedSnapshotData"]["properties"]["content"][
+        "$ref"
+    ].endswith("/ToolDefinitionData")
+
+    expected_responses = {
+        ("/capability-api/v1/tools", "get"): "ToolListResponse",
+        ("/capability-api/v1/tools", "post"): "ToolDefinitionResponse",
+        (
+            "/capability-api/v1/tools/{capability_id}/{version}",
+            "get",
+        ): "ToolDefinitionResponse",
+        (
+            "/capability-api/v1/tools/{capability_id}/{version}",
+            "patch",
+        ): "ToolDefinitionResponse",
+        (
+            "/capability-api/v1/tools/{capability_id}/{version}/publish",
+            "post",
+        ): "ToolPublishResponse",
+        (
+            "/capability-api/v1/tools/{capability_id}/rollback",
+            "post",
+        ): "ToolSnapshotResponse",
+        (
+            "/capability-api/v1/tools/{capability_id}/snapshot",
+            "get",
+        ): "ToolSnapshotResponse",
+    }
+    for (path, method), response_schema in expected_responses.items():
+        status = "201" if path == "/capability-api/v1/tools" and method == "post" else "200"
+        schema_ref = openapi["paths"][path][method]["responses"][status]["content"][
+            "application/json"
+        ]["schema"]["$ref"]
+        assert schema_ref.endswith(f"/{response_schema}")
+
+
+@pytest.mark.asyncio
+async def test_tool_control_plane_responses_never_return_credential_ref() -> None:
+    runtime = _admin_runtime()
+    assert runtime.capability_repository is not None
+    await runtime.capability_repository.save_connector(
+        Connector(
+            connector_id="connector.safe-tool-response",
+            name="Safe tool response connector",
+            base_url="https://example.com",
+            allowed_path_prefixes=["/v1"],
+        )
+    )
+    app = create_app(runtime)
+    headers = {"geoToken": "legacy-admin-token"}
+    payload = {
+        "capability_id": "governance.safe_tool_response",
+        "name": "Safe tool response",
+        "owner": "runtime-team",
+        "version": "1.0.0",
+        "connector_ref": "connector.safe-tool-response",
+        "resource_path": "/v1/query",
+        "credential_ref": "opaque-secret-reference",
+        "dataset_ids": ["safe_dataset"],
+    }
+
+    def assert_safe_tool(value: dict[str, object]) -> None:
+        assert "credential_ref" not in value
+        assert value["credential_configured"] is True
+
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=app),
+        base_url="http://test",
+        headers=headers,
+    ) as client:
+        created = await client.post("/capability-api/v1/tools", json=payload)
+        assert created.status_code == 201, created.text
+        assert_safe_tool(created.json()["data"])
+
+        listed = await client.get("/capability-api/v1/tools")
+        assert listed.status_code == 200, listed.text
+        assert_safe_tool(listed.json()["data"][0])
+
+        detail = await client.get(
+            "/capability-api/v1/tools/governance.safe_tool_response/1.0.0"
+        )
+        assert detail.status_code == 200, detail.text
+        assert_safe_tool(detail.json()["data"])
+
+        updated = await client.patch(
+            "/capability-api/v1/tools/governance.safe_tool_response/1.0.0",
+            json={"expected_etag": 1, "description": "updated"},
+        )
+        assert updated.status_code == 200, updated.text
+        assert_safe_tool(updated.json()["data"])
+
+        tool = await runtime.capability_repository.get(
+            "governance.safe_tool_response", "1.0.0"
+        )
+        assert isinstance(tool, ToolCapability)
+        pending = tool.model_copy(update={"status": "pending_approval", "etag": 3})
+        await runtime.capability_repository.save_tool(pending)
+        published = await client.post(
+            "/capability-api/v1/tools/governance.safe_tool_response/1.0.0/publish",
+            json={"expected_etag": 3, "reason": "security contract test"},
+        )
+        assert published.status_code == 200, published.text
+        assert_safe_tool(published.json()["data"]["content"])
+        published_etag = published.json()["data"]["content"]["etag"]
+
+        active = await client.get(
+            "/capability-api/v1/tools/governance.safe_tool_response/snapshot"
+        )
+        assert active.status_code == 200, active.text
+        assert_safe_tool(active.json()["data"]["content"])
+
+        newer = pending.model_copy(
+            update={"version": "2.0.0", "status": "published", "etag": 1}
+        )
+        await runtime.capability_repository.save_tool(newer)
+        await runtime.capability_repository.put_snapshot(
+            CapabilitySnapshot(
+                snapshot_id="snap-safe-tool-response-v2",
+                capability_id=newer.capability_id,
+                capability_type="tool",
+                version=newer.version,
+                published_by="control-admin",
+                content=newer.model_dump(mode="json"),
+            )
+        )
+        rolled_back = await client.post(
+            "/capability-api/v1/tools/governance.safe_tool_response/rollback",
+            json={
+                "to_version": "1.0.0",
+                "expected_etag": published_etag,
+                "reason": "security contract test",
+            },
+        )
+        assert rolled_back.status_code == 200, rolled_back.text
+        assert_safe_tool(rolled_back.json()["data"]["content"])
 
 
 @pytest.mark.asyncio

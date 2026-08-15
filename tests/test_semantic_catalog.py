@@ -259,7 +259,7 @@ def test_result_schemas_are_distinct_per_subject(catalog: SemanticCatalog) -> No
         for subject_id in catalog.subject_ids()
         for shape in catalog.require_subject(subject_id).result_shapes
     }
-    assert len(refs) == 15
+    assert len(refs) == 16
 
 
 # ---------------------------------------------------------------------------

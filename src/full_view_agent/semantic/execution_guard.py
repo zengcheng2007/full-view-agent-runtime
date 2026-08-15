@@ -24,6 +24,7 @@ from full_view_agent.application.capability_service import (
     PolicyEvaluator,
 )
 from full_view_agent.application.errors import ResourceNotFound
+from full_view_agent.application.fingerprints import canonical_fingerprint
 from full_view_agent.application.tool_registry import ToolRegistry
 from full_view_agent.domain.models import AuthContext, ContractModel, PolicyDecision
 from full_view_agent.semantic.catalog import SemanticCatalog
@@ -93,12 +94,6 @@ class ExecutionGuard:
                 f"计划步骤能力 {step.capability_id} 与主题 {plan.subject}"
                 f" 当前绑定能力 {binding.capability_id} 不一致。",
             )
-        if step.capability_version != binding.capability_version:
-            return self._denied(
-                "CAPABILITY_VERSION_MISMATCH",
-                f"计划步骤能力版本 {step.capability_version} 与主题绑定版本"
-                f" {binding.capability_version} 不一致。",
-            )
         try:
             manifest = self._registry.get_manifest(step.capability_id)
         except ResourceNotFound:
@@ -106,12 +101,30 @@ class ExecutionGuard:
                 "UNKNOWN_CAPABILITY",
                 f"绑定能力 {step.capability_id} 未在生产 Registry 注册。",
             )
-        if manifest.tool_version != binding.capability_version:
+        if manifest.tool_version != step.capability_version:
             return self._denied(
                 "CAPABILITY_VERSION_MISMATCH",
-                f"manifest 工具版本 {manifest.tool_version} 与绑定版本"
-                f" {binding.capability_version} 不一致。",
+                f"manifest 工具版本 {manifest.tool_version} 与计划版本"
+                f" {step.capability_version} 不一致。",
             )
+        if plan.semantic_contract_fingerprint is not None:
+            if manifest.semantic_contract is None:
+                return self._denied(
+                    "SEMANTIC_CONTRACT_UNAVAILABLE",
+                    "计划依赖的语义合同在精确 Tool 版本中不存在。",
+                )
+            actual_contract_fingerprint = canonical_fingerprint(
+                domain=(
+                    f"tool-semantic-contract:{manifest.tool_id}:"
+                    f"{manifest.tool_version}"
+                ),
+                value=manifest.semantic_contract,
+            )
+            if actual_contract_fingerprint != plan.semantic_contract_fingerprint:
+                return self._denied(
+                    "SEMANTIC_CONTRACT_MISMATCH",
+                    "计划语义合同指纹与 Run 固化 Tool 合同不一致。",
+                )
         if manifest.dataset_id != plan.logical_dataset_id:
             return self._denied(
                 "LOGICAL_DATASET_MISMATCH",

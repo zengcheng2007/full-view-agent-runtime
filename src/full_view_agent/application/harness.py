@@ -26,6 +26,7 @@ from full_view_agent.application.errors import (
 )
 from full_view_agent.application.fingerprints import canonical_fingerprint
 from full_view_agent.application.session_run_service import new_id
+from full_view_agent.domain.agent_definition import AgentExecutionPolicy
 from full_view_agent.domain.analysis_intent import AnalysisIntentV1
 from full_view_agent.domain.models import AuthContext, ToolResult
 
@@ -620,6 +621,33 @@ class AgentHarness:
         """Expose the framework-neutral action bound to orchestration adapters."""
 
         return self._limits.max_model_turns
+
+    @property
+    def limits(self) -> HarnessLimits:
+        """Expose immutable effective limits for audit and adapters."""
+
+        return self._limits
+
+    def with_execution_policy(
+        self, policy: AgentExecutionPolicy
+    ) -> "AgentHarness":
+        """Clone the controller with limits pinned by an Agent release."""
+
+        return AgentHarness(
+            tool_executor=self._tool_executor,
+            limits=HarnessLimits(
+                max_model_turns=policy.max_model_turns,
+                max_tool_calls=policy.max_tool_calls,
+                max_consecutive_failures=policy.max_consecutive_failures,
+                max_no_progress=policy.max_no_progress,
+                max_elapsed_seconds=policy.max_elapsed_seconds,
+                repeated_call_limit=policy.repeated_call_limit,
+            ),
+            validator=self._validator,
+            clock=self._clock,
+            tool_call_id_factory=self._tool_call_id_factory,
+            call_fingerprinter=self._call_fingerprinter,
+        )
 
     def with_tool_executor(self, tool_executor: HarnessToolExecutor) -> "AgentHarness":
         """Clone controller policy while binding execution to one Run context."""

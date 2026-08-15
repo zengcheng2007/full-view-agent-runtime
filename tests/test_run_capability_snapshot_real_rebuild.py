@@ -27,6 +27,7 @@ from full_view_agent.application.run_capability_snapshot_store import (
     PostgresRunCapabilitySnapshotStore,
 )
 from full_view_agent.application.tool_registry import ToolRegistry
+from full_view_agent.domain.agent_definition import AgentExecutionPolicy
 from full_view_agent.domain.capability import ToolCapability
 from full_view_agent.infrastructure.capability_repository import (
     InMemoryCapabilityRepository,
@@ -94,6 +95,43 @@ def _tool(capability_id: str, version: str) -> ToolCapability:
         cache_enabled=True,
         cache_ttl_seconds=60,
     )
+
+
+@requires_postgres
+@pytest.mark.asyncio
+async def test_postgres_roundtrip_preserves_prompt_policy_and_contract_integrity(
+    clean_cap_snapshot,
+) -> None:
+    schema = clean_cap_snapshot["schema"]
+    dsn = clean_cap_snapshot["dsn"]
+    store = PostgresRunCapabilitySnapshotStore(dsn=dsn, schema=schema)
+    expected = PersistedRunCapabilitySnapshot(
+        run_id="run-cap-rebuild-1",
+        tool_versions={"tool.population": "1.1.0"},
+        captured_at=datetime(2026, 8, 15, tzinfo=UTC),
+        application_prompt_versions={"application.policy": "3.0.0"},
+        agent_prompt_versions={"agent.instruction": "2.0.0"},
+        application_prompt_fingerprints={
+            "application.policy": "sha256:application"
+        },
+        agent_prompt_fingerprints={"agent.instruction": "sha256:agent"},
+        application_id="full_information_view",
+        application_scoped=True,
+        agent_scoped=True,
+        execution_policy=AgentExecutionPolicy(
+            max_model_turns=4,
+            max_tool_calls=6,
+            max_elapsed_seconds=75,
+        ),
+        tool_contract_fingerprints={
+            "tool.population": "sha256:semantic-contract"
+        },
+    )
+
+    await store.store_if_absent(expected)
+    loaded = await store.load(expected.run_id)
+
+    assert loaded == expected
 
 
 @requires_postgres

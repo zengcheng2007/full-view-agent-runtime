@@ -55,6 +55,7 @@ from full_view_agent.application.application_management_service import (
     ApplicationRegistry,
 )
 from full_view_agent.application.auth_context_refresh import RunAuthContextRefresher
+from full_view_agent.application.builtin_capability_seeds import population_tool_v1_1
 from full_view_agent.application.capability_consistency import (
     validate_production_http_capabilities,
 )
@@ -179,6 +180,7 @@ from full_view_agent.domain.models import (
     HousingRoomUseRow,
     HousingStockOverviewRow,
     PendingInputRequest,
+    PopulationAggregateRow,
     PopulationMetricRow,
     PopulationRankingRow,
     ResultMetadata,
@@ -347,7 +349,8 @@ class SessionListResponse(ContractModel):
 
 class ResultItemsResponse(ContractModel):
     data: list[
-        PopulationMetricRow
+        PopulationAggregateRow
+        | PopulationMetricRow
         | PopulationRankingRow
         | HousingLeaseTypeRow
         | HousingAreaGroupRow
@@ -852,6 +855,9 @@ class RuntimeContainer:
             runtime_workflow_registry=self.runtime_workflow_registry,
             runtime_prompt_registry=self.runtime_prompt_registry,
             prompt_snapshot_loader=self.prompt_template_service.load_snapshot,
+            prompt_history_snapshot_loader=(
+                self.prompt_template_service.load_historical_snapshot
+            ),
         )
 
         # ── Async-initialised concerns (require event loop) ──────────
@@ -1127,6 +1133,16 @@ class RuntimeContainer:
         if self.persistence is not None:
             await self.persistence.initialize()
 
+        # The no-DB composition consumes a published control-plane Tool too;
+        # the physical built-in Registry deliberately remains contract-free.
+        if isinstance(self.capability_repository, InMemoryCapabilityRepository):
+            population_seed = population_tool_v1_1()
+            existing_population = await self.capability_repository.get(
+                population_seed.capability_id, population_seed.version
+            )
+            if existing_population is None:
+                await self.capability_repository.save_tool(population_seed)
+
         # Materialise the legacy default Agent as a first-class definition.
         # Existing deployments therefore gain an application-centred control
         # plane without changing any data-plane behavior until an Agent
@@ -1180,11 +1196,9 @@ class RuntimeContainer:
                 await self.agent_management_service.ensure_legacy_baseline_release(
                     app_id="full_information_view",
                     agent_id="governance_general_agent",
-                    prompt_ref=(
-                        effective_prompt.composite_version
-                        if effective_prompt is not None
-                        else None
-                    ),
+                    # Application policy is pinned separately by the Run prompt
+                    # bundle. It must never be disguised as an Agent prompt_ref.
+                    prompt_ref=None,
                     knowledge_base_refs=tuple(knowledge_refs),
                 )
             )
@@ -1714,11 +1728,10 @@ def create_app(runtime: RuntimeContainer | None = None) -> FastAPI:
     if runtime.prompt_template_service is not None:
         prompt_service = runtime.prompt_template_service
 
-        async def refresh_runtime_prompt() -> None:
+        async def refresh_runtime_prompt(app_id: str) -> None:
             runtime.runtime_prompt_registry.activate(
-                await prompt_service.get_effective(
-                    app_id="full_information_view"
-                )
+                await prompt_service.get_effective(app_id=app_id),
+                app_id=app_id,
             )
 
         app.include_router(

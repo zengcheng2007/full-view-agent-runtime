@@ -32,6 +32,17 @@ class AgentDefinition(ContractModel):
         return value
 
 
+class AgentExecutionPolicy(ContractModel):
+    """Versioned server-enforced execution limits for one Agent."""
+
+    max_model_turns: int = Field(default=8, ge=1, le=64)
+    max_tool_calls: int = Field(default=12, ge=1, le=64)
+    max_consecutive_failures: int = Field(default=3, ge=1, le=16)
+    max_no_progress: int = Field(default=3, ge=1, le=16)
+    max_elapsed_seconds: float = Field(default=120.0, gt=0, le=3600)
+    repeated_call_limit: int = Field(default=2, ge=1, le=8)
+
+
 class AgentVersion(ContractModel):
     app_id: str = Field(min_length=2, max_length=64)
     agent_id: str = Field(min_length=2, max_length=64)
@@ -42,6 +53,9 @@ class AgentVersion(ContractModel):
     skill_refs: tuple[str, ...] = ()
     workflow_refs: tuple[str, ...] = ()
     knowledge_base_refs: tuple[str, ...] = ()
+    execution_policy: AgentExecutionPolicy = Field(
+        default_factory=AgentExecutionPolicy
+    )
     created_at: datetime = Field(default_factory=lambda: datetime.now(UTC))
     updated_at: datetime = Field(default_factory=lambda: datetime.now(UTC))
     etag: int = Field(default=1, ge=1)
@@ -83,6 +97,9 @@ class AgentReleaseSnapshot(ContractModel):
     skill_refs: tuple[str, ...] = ()
     workflow_refs: tuple[str, ...] = ()
     knowledge_base_refs: tuple[str, ...] = ()
+    execution_policy: AgentExecutionPolicy = Field(
+        default_factory=AgentExecutionPolicy
+    )
     model_refs: tuple[AgentModelVersionRef, ...]
     published_at: datetime = Field(default_factory=lambda: datetime.now(UTC))
     published_by: str

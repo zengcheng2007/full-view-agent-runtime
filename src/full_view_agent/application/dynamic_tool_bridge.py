@@ -47,7 +47,12 @@ def convert_tool_capability_to_manifest(
     connector_ref and resource_path from the ToolCapability.
     """
     if tool.capability_id in BUILT_IN_TOOL_IDS:
-        return ToolRegistry.default().get_manifest(tool.capability_id)
+        return ToolRegistry.default().get_manifest(tool.capability_id).model_copy(
+            update={
+                "tool_version": tool.version,
+                "semantic_contract": tool.semantic_contract,
+            }
+        )
 
     # Build result schema binding from result_kind
     result_schemas = [
@@ -107,6 +112,7 @@ def convert_tool_capability_to_manifest(
         cache_policy=cache_policy,
         policy=policy,
         adapter_ref=adapter_ref,
+        semantic_contract=tool.semantic_contract,
     )
 
 
@@ -117,17 +123,39 @@ def convert_tool_capability_to_descriptor(
 
     This creates a descriptor that the model can understand for tool selection.
     """
+    semantic_suffix = _semantic_descriptor_suffix(tool)
     if tool.capability_id in BUILT_IN_TOOL_IDS:
-        return ToolRegistry.default().get_model_descriptor(tool.capability_id)
+        descriptor = ToolRegistry.default().get_model_descriptor(tool.capability_id)
+        return descriptor.model_copy(
+            update={
+                "tool_version": tool.version,
+                "description": f"{descriptor.description}{semantic_suffix}",
+            }
+        )
 
     return ModelToolDescriptor(
         tool_id=tool.capability_id,
         tool_version=tool.version,
         name=tool.name,
-        description=tool.description or f"Dynamic tool: {tool.name}",
+        description=(tool.description or f"Dynamic tool: {tool.name}")
+        + semantic_suffix,
         input_schema=ModelInputSchemaReference(
             **{"$ref": f"schema://dynamic/{tool.capability_id}/input/{tool.version}"}
         ),
+    )
+
+
+def _semantic_descriptor_suffix(tool: ToolCapability) -> str:
+    contract = tool.semantic_contract
+    if contract is None:
+        return ""
+    operators = ", ".join(contract.operators)
+    metrics = ", ".join(item.metric_id for item in contract.metrics)
+    dimensions = ", ".join(item.dimension_id for item in contract.dimensions) or "none"
+    return (
+        f" Semantic contract Tool@{tool.version}: subject={contract.subject}; "
+        f"operators={operators}; metrics={metrics}; dimensions={dimensions}; "
+        f"completeness={contract.completeness.mode}."
     )
 
 
@@ -168,8 +196,13 @@ def build_dynamic_tool_registry_entries(
     for tool in tools:
         try:
             if tool.capability_id in BUILT_IN_TOOL_IDS:
-                manifest = canonical_registry.get_manifest(tool.capability_id)
-                descriptor = canonical_registry.get_model_descriptor(tool.capability_id)
+                manifest = canonical_registry.get_manifest(tool.capability_id).model_copy(
+                    update={
+                        "tool_version": tool.version,
+                        "semantic_contract": tool.semantic_contract,
+                    }
+                )
+                descriptor = convert_tool_capability_to_descriptor(tool)
             else:
                 manifest = convert_tool_capability_to_manifest(tool)
                 descriptor = convert_tool_capability_to_descriptor(tool)

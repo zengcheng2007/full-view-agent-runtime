@@ -763,22 +763,21 @@ def _supported_population_city_ranking_followup(
         return None
     descending = not any(term in message for term in ("最少", "最低"))
     limit = 10 if "前十" in message else 1
+    operator = "top" if descending else "bottom"
+    shape_marker = f"population_{group_by}_{operator}_table"
+    if shape_marker not in semantic_tool.description:
+        return None
     return ToolAction(
         tool_id=SEMANTIC_QUERY_TOOL_ID,
         arguments={
             **semantic_tool.server_arguments,
             "spec": {
                 "subject": "population",
+                "operator": operator,
                 "metrics": ["person_count"],
                 "scope": {"area_code": area_code},
                 "group_by": [group_by],
                 "filters": [],
-                "order_by": [
-                    {
-                        "field": "person_count",
-                        "direction": "desc" if descending else "asc",
-                    }
-                ],
                 "limit": limit,
                 "output": "table",
             },
@@ -1365,6 +1364,29 @@ class ModelPlannerFactory:
             context_builder=self._context_builder.for_registry(
                 self._context_builder.registry_snapshot(),
                 prompt_snapshot=prompt_snapshot,
+            ),
+            max_total_tokens=self._max_total_tokens,
+            max_output_tokens=self._max_output_tokens,
+            initial_total_tokens=self._initial_total_tokens,
+            allow_legacy_finish=self._allow_legacy_finish,
+            event_publisher=self._event_publisher,
+        )
+
+    def for_prompt_bundle(
+        self,
+        *,
+        application_prompt_snapshot: RuntimePromptSnapshot | None,
+        agent_prompt_snapshot: RuntimePromptSnapshot | None,
+    ) -> "ModelPlannerFactory":
+        """Bind both immutable prompt authority layers for one Run."""
+
+        return ModelPlannerFactory(
+            provider=self._provider,
+            context_builder=self._context_builder.for_registry(
+                self._context_builder.registry_snapshot(),
+                application_prompt_snapshot=application_prompt_snapshot,
+                agent_prompt_snapshot=agent_prompt_snapshot,
+                pin_application_prompt_snapshot=True,
             ),
             max_total_tokens=self._max_total_tokens,
             max_output_tokens=self._max_output_tokens,

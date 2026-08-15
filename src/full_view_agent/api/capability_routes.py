@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import os
 from collections.abc import Awaitable, Callable
+from datetime import datetime
 from typing import Annotated, Literal
 
 from fastapi import APIRouter, Depends
@@ -50,6 +51,7 @@ from full_view_agent.domain.capability import (
     Connector,
     SkillCapability,
     ToolCapability,
+    ToolSemanticContract,
     WorkflowCapability,
     WorkflowEdgeDefinition,
     WorkflowNodeDefinition,
@@ -114,9 +116,11 @@ class ToolCreateBody(ContractModel):
     credential_ref: str | None = None
     required_permissions: list[str] = []
     dataset_ids: list[str] = Field(min_length=1)
+    semantic_contract: ToolSemanticContract | None = None
 
 
 class ToolUpdateBody(ContractModel):
+    expected_etag: int = Field(ge=1)
     name: str | None = None
     description: str | None = None
     resource_path: str | None = None
@@ -133,6 +137,64 @@ class ToolUpdateBody(ContractModel):
     risk_level: Literal["low", "medium", "high"] | None = None
     required_permissions: list[str] | None = None
     dataset_ids: list[str] | None = None
+    semantic_contract: ToolSemanticContract | None = None
+
+
+class ToolSemanticValidateBody(ContractModel):
+    expected_etag: int = Field(ge=1)
+
+
+class ToolSemanticValidationData(ContractModel):
+    capability_id: str
+    version: str
+    etag: int
+    valid: Literal[True] = True
+    semantic_contract: ToolSemanticContract
+
+
+class ToolSemanticValidationResponse(ContractModel):
+    data: ToolSemanticValidationData
+    meta: ResponseMeta
+
+
+class ToolSemanticEffectiveData(ContractModel):
+    capability_id: str
+    version: str
+    snapshot_id: str
+    semantic_contract: ToolSemanticContract
+
+
+class ToolSemanticEffectiveResponse(ContractModel):
+    data: ToolSemanticEffectiveData
+    meta: ResponseMeta
+
+
+class ToolSemanticDiffData(ContractModel):
+    capability_id: str
+    version: str
+    against_version: str
+    changed_sections: list[
+        Literal[
+            "subject",
+            "metrics",
+            "dimensions",
+            "filters",
+            "operators",
+            "sort",
+            "completeness",
+            "output_forms",
+            "examples",
+            "limitations",
+            "query_shapes",
+        ]
+    ]
+    current: ToolSemanticContract
+    against: ToolSemanticContract
+
+
+class ToolSemanticDiffResponse(ContractModel):
+    data: ToolSemanticDiffData
+    meta: ResponseMeta
 
 
 class StatusTransitionBody(ContractModel):
@@ -267,6 +329,100 @@ class ApplicationLifecycleBody(AuditedActionBody):
 class CapabilityResponse(ContractModel):
     data: dict[str, object]
     meta: ResponseMeta
+
+
+class ToolDefinitionData(ContractModel):
+    """Control-plane safe Tool view; opaque credential references never cross HTTP."""
+
+    capability_id: str
+    name: str
+    capability_type: Literal["tool"] = "tool"
+    domain: str
+    owner: str
+    version: str
+    status: CapabilityStatus
+    risk_level: Literal["low", "medium", "high"]
+    required_permissions: list[str]
+    dataset_ids: list[str]
+    description: str
+    created_at: datetime
+    updated_at: datetime
+    created_by: str
+    updated_by: str
+    etag: int
+    connector_ref: str
+    http_method: Literal["GET", "POST"]
+    resource_path: str
+    input_schema: dict[str, object]
+    output_schema: dict[str, object]
+    parameter_mapping: dict[str, object]
+    result_mapping: dict[str, object]
+    result_kind: Literal["area_candidates", "table", "metric", "object_profile"]
+    data_schema_ref: str
+    timeout_ms: int
+    max_attempts: int
+    max_result_rows: int
+    cache_enabled: bool
+    cache_ttl_seconds: int
+    credential_configured: bool
+    semantic_contract: ToolSemanticContract | None
+
+
+class ToolDefinitionResponse(ContractModel):
+    data: ToolDefinitionData
+    meta: ResponseMeta
+
+
+class ToolListResponse(ContractModel):
+    data: list[ToolDefinitionData]
+    meta: ResponseMeta
+
+
+class ToolPublishedSnapshotData(ContractModel):
+    snapshot_id: str
+    capability_id: str
+    capability_type: Literal["tool"] = "tool"
+    version: str
+    published_at: datetime
+    published_by: str
+    content: ToolDefinitionData
+    is_active: bool
+
+
+class ToolPublishResponse(ContractModel):
+    data: ToolPublishedSnapshotData
+    meta: ResponseMeta
+
+
+class ToolSnapshotResponse(ContractModel):
+    data: ToolPublishedSnapshotData
+    meta: ResponseMeta
+
+
+def _tool_definition_data(tool: ToolCapability) -> ToolDefinitionData:
+    return ToolDefinitionData.model_validate(
+        {
+            **tool.model_dump(mode="python", exclude={"credential_ref"}),
+            "credential_configured": tool.credential_ref is not None,
+        }
+    )
+
+
+def _tool_snapshot_data(snapshot: object) -> ToolPublishedSnapshotData:
+    # Kept local to the HTTP boundary so immutable persistence retains the
+    # opaque reference while every response exposes only its presence.
+    from full_view_agent.domain.capability import CapabilitySnapshot
+
+    typed = CapabilitySnapshot.model_validate(snapshot)
+    return ToolPublishedSnapshotData(
+        snapshot_id=typed.snapshot_id,
+        capability_id=typed.capability_id,
+        version=typed.version,
+        published_at=typed.published_at,
+        published_by=typed.published_by,
+        content=_tool_definition_data(ToolCapability.model_validate(typed.content)),
+        is_active=typed.is_active,
+    )
 
 
 class WorkflowDefinitionResponse(ContractModel):
@@ -515,11 +671,11 @@ def create_capability_router(
     async def list_tools(
         user: Annotated[CurrentUser, Depends(require_capability_identity)],
         status: CapabilityStatus | None = None,
-    ) -> CapabilityListResponse:
+    ) -> ToolListResponse:
         _require(user, ControlPlanePermission.CAPABILITY_READ)
         tools = await management_service.list_capabilities(capability_type="tool", status=status)
-        return CapabilityListResponse(
-            data=[t.model_dump(mode="json") for t in tools],
+        return ToolListResponse(
+            data=[_tool_definition_data(t) for t in tools if isinstance(t, ToolCapability)],
             meta=_meta(),
         )
 
@@ -527,7 +683,7 @@ def create_capability_router(
     async def create_tool(
         body: ToolCreateBody,
         user: Annotated[CurrentUser, Depends(require_capability_identity)],
-    ) -> CapabilityResponse:
+    ) -> ToolDefinitionResponse:
         _require(user, ControlPlanePermission.CAPABILITY_MANAGE)
         tool = await management_service.create_tool(
             capability_id=body.capability_id,
@@ -554,9 +710,10 @@ def create_capability_router(
             credential_ref=body.credential_ref,
             required_permissions=body.required_permissions,
             dataset_ids=body.dataset_ids,
+            semantic_contract=body.semantic_contract,
             created_by=user.user_id,
         )
-        return CapabilityResponse(data=tool.model_dump(mode="json"), meta=_meta())
+        return ToolDefinitionResponse(data=_tool_definition_data(tool), meta=_meta())
 
     # Static audit sub-resources must be registered before the generic
     # ``/{version}`` route. FastAPI resolves same-method routes in declaration
@@ -565,14 +722,14 @@ def create_capability_router(
     async def get_active_snapshot(
         capability_id: str,
         user: Annotated[CurrentUser, Depends(require_capability_identity)],
-    ) -> SnapshotResponse:
+    ) -> ToolSnapshotResponse:
         _require(user, ControlPlanePermission.CAPABILITY_READ)
         snapshot = await management_service.get_active_snapshot(capability_id)
         if snapshot is None:
             from full_view_agent.application.errors import ResourceNotFound
 
             raise ResourceNotFound("no active snapshot")
-        return SnapshotResponse(data=snapshot.model_dump(mode="json"), meta=_meta())
+        return ToolSnapshotResponse(data=_tool_snapshot_data(snapshot), meta=_meta())
 
     @router.get("/tools/{capability_id}/lifecycle")
     async def get_lifecycle_events(
@@ -586,19 +743,41 @@ def create_capability_router(
             meta=_meta(),
         )
 
+    @router.get("/tools/{capability_id}/semantic-contract/effective")
+    async def get_effective_tool_semantic_contract(
+        capability_id: str,
+        user: Annotated[CurrentUser, Depends(require_capability_identity)],
+    ) -> ToolSemanticEffectiveResponse:
+        _require(user, ControlPlanePermission.CAPABILITY_READ)
+        snapshot = await management_service.get_active_snapshot(capability_id)
+        if snapshot is None or snapshot.capability_type != "tool":
+            raise ResourceNotFound("no effective tool semantic contract")
+        tool = ToolCapability.model_validate(snapshot.content)
+        if tool.semantic_contract is None:
+            raise ResourceNotFound("no effective tool semantic contract")
+        return ToolSemanticEffectiveResponse(
+            data=ToolSemanticEffectiveData(
+                capability_id=tool.capability_id,
+                version=tool.version,
+                snapshot_id=snapshot.snapshot_id,
+                semantic_contract=tool.semantic_contract,
+            ),
+            meta=_meta(),
+        )
+
     @router.get("/tools/{capability_id}/{version}")
     async def get_tool(
         capability_id: str,
         version: str,
         user: Annotated[CurrentUser, Depends(require_capability_identity)],
-    ) -> CapabilityResponse:
+    ) -> ToolDefinitionResponse:
         _require(user, ControlPlanePermission.CAPABILITY_READ)
         tool = await management_service.get(capability_id, version)
         if tool is None:
-            from full_view_agent.application.errors import ResourceNotFound
-
             raise ResourceNotFound("tool not found")
-        return CapabilityResponse(data=tool.model_dump(mode="json"), meta=_meta())
+        if not isinstance(tool, ToolCapability):
+            raise ResourceNotFound("tool not found")
+        return ToolDefinitionResponse(data=_tool_definition_data(tool), meta=_meta())
 
     @router.patch("/tools/{capability_id}/{version}")
     async def update_tool(
@@ -606,16 +785,89 @@ def create_capability_router(
         version: str,
         body: ToolUpdateBody,
         user: Annotated[CurrentUser, Depends(require_capability_identity)],
-    ) -> CapabilityResponse:
+    ) -> ToolDefinitionResponse:
         _require(user, ControlPlanePermission.CAPABILITY_MANAGE)
         fields = {k: v for k, v in body.model_dump(mode="python").items() if v is not None}
+        fields.pop("expected_etag")
         tool = await management_service.update_tool(
             capability_id=capability_id,
             version=version,
             updated_by=user.user_id,
+            expected_etag=body.expected_etag,
             **fields,
         )
-        return CapabilityResponse(data=tool.model_dump(mode="json"), meta=_meta())
+        return ToolDefinitionResponse(data=_tool_definition_data(tool), meta=_meta())
+
+    @router.post("/tools/{capability_id}/{version}/semantic-contract/validate")
+    async def validate_tool_semantic_contract(
+        capability_id: str,
+        version: str,
+        body: ToolSemanticValidateBody,
+        user: Annotated[CurrentUser, Depends(require_capability_identity)],
+    ) -> ToolSemanticValidationResponse:
+        _require(user, ControlPlanePermission.CAPABILITY_MANAGE)
+        tool = await management_service.get(capability_id, version)
+        if not isinstance(tool, ToolCapability):
+            raise ResourceNotFound("tool not found")
+        if tool.etag != body.expected_etag:
+            raise RunStateConflict("capability etag mismatch")
+        if tool.semantic_contract is None:
+            raise RunStateConflict("tool semantic contract is missing")
+        return ToolSemanticValidationResponse(
+            data=ToolSemanticValidationData(
+                capability_id=tool.capability_id,
+                version=tool.version,
+                etag=tool.etag,
+                semantic_contract=tool.semantic_contract,
+            ),
+            meta=_meta(),
+        )
+
+    @router.get("/tools/{capability_id}/{version}/semantic-contract/diff")
+    async def diff_tool_semantic_contract(
+        capability_id: str,
+        version: str,
+        against_version: str,
+        user: Annotated[CurrentUser, Depends(require_capability_identity)],
+    ) -> ToolSemanticDiffResponse:
+        _require(user, ControlPlanePermission.CAPABILITY_READ)
+        current = await management_service.get(capability_id, version)
+        against = await management_service.get(capability_id, against_version)
+        if not isinstance(current, ToolCapability) or not isinstance(
+            against, ToolCapability
+        ):
+            raise ResourceNotFound("tool version not found")
+        if current.semantic_contract is None or against.semantic_contract is None:
+            raise ResourceNotFound("tool semantic contract not found")
+        sections = [
+            section
+            for section in (
+                "subject",
+                "metrics",
+                "dimensions",
+                "filters",
+                "operators",
+                "sort",
+                "completeness",
+                "output_forms",
+                "examples",
+                "limitations",
+                "query_shapes",
+            )
+            if getattr(current.semantic_contract, section)
+            != getattr(against.semantic_contract, section)
+        ]
+        return ToolSemanticDiffResponse(
+            data=ToolSemanticDiffData(
+                capability_id=capability_id,
+                version=version,
+                against_version=against_version,
+                changed_sections=sections,  # type: ignore[arg-type]
+                current=current.semantic_contract,
+                against=against.semantic_contract,
+            ),
+            meta=_meta(),
+        )
 
     @router.post("/tools/{capability_id}/{version}/transition")
     async def transition_tool(
@@ -623,7 +875,7 @@ def create_capability_router(
         version: str,
         body: StatusTransitionBody,
         user: Annotated[CurrentUser, Depends(require_capability_identity)],
-    ) -> CapabilityResponse:
+    ) -> ToolDefinitionResponse:
         _require(user, ControlPlanePermission.CAPABILITY_MANAGE)
         result = await management_service.advance_status(
             capability_id=capability_id,
@@ -633,7 +885,10 @@ def create_capability_router(
             reason=body.reason,
             expected_etag=body.expected_etag,
         )
-        return CapabilityResponse(data=result.model_dump(mode="json"), meta=_meta())
+        return ToolDefinitionResponse(
+            data=_tool_definition_data(ToolCapability.model_validate(result)),
+            meta=_meta(),
+        )
 
     @router.post("/tools/{capability_id}/{version}/testing")
     async def mark_tool_testing(
@@ -641,7 +896,7 @@ def create_capability_router(
         version: str,
         body: LifecycleActionBody,
         user: Annotated[CurrentUser, Depends(require_capability_identity)],
-    ) -> CapabilityResponse:
+    ) -> ToolDefinitionResponse:
         _require(user, ControlPlanePermission.CAPABILITY_MANAGE)
         result = await management_service.mark_testing(
             capability_id=capability_id,
@@ -650,7 +905,10 @@ def create_capability_router(
             changed_by=user.user_id,
             reason=body.reason,
         )
-        return CapabilityResponse(data=result.model_dump(mode="json"), meta=_meta())
+        return ToolDefinitionResponse(
+            data=_tool_definition_data(ToolCapability.model_validate(result)),
+            meta=_meta(),
+        )
 
     @router.post("/tools/{capability_id}/{version}/approve")
     async def approve_tool(
@@ -658,7 +916,7 @@ def create_capability_router(
         version: str,
         body: LifecycleActionBody,
         user: Annotated[CurrentUser, Depends(require_capability_identity)],
-    ) -> CapabilityResponse:
+    ) -> ToolDefinitionResponse:
         _require(user, ControlPlanePermission.CAPABILITY_APPROVE)
         result = await management_service.advance_status(
             capability_id=capability_id,
@@ -668,7 +926,10 @@ def create_capability_router(
             reason=body.reason,
             expected_etag=body.expected_etag,
         )
-        return CapabilityResponse(data=result.model_dump(mode="json"), meta=_meta())
+        return ToolDefinitionResponse(
+            data=_tool_definition_data(ToolCapability.model_validate(result)),
+            meta=_meta(),
+        )
 
     @router.post("/tools/{capability_id}/{version}/publish")
     async def publish_tool(
@@ -676,7 +937,7 @@ def create_capability_router(
         version: str,
         body: LifecycleActionBody,
         user: Annotated[CurrentUser, Depends(require_capability_identity)],
-    ) -> SnapshotResponse:
+    ) -> ToolPublishResponse:
         _require(user, ControlPlanePermission.CAPABILITY_PUBLISH)
         await _validate_transition(capability_id, version, "published")
         snapshot = await management_service.publish(
@@ -687,7 +948,20 @@ def create_capability_router(
             expected_etag=body.expected_etag,
         )
         await _reload_runtime()
-        return SnapshotResponse(data=snapshot.model_dump(mode="json"), meta=_meta())
+        return ToolPublishResponse(
+            data=ToolPublishedSnapshotData(
+                snapshot_id=snapshot.snapshot_id,
+                capability_id=snapshot.capability_id,
+                version=snapshot.version,
+                published_at=snapshot.published_at,
+                published_by=snapshot.published_by,
+                content=_tool_definition_data(
+                    ToolCapability.model_validate(snapshot.content)
+                ),
+                is_active=snapshot.is_active,
+            ),
+            meta=_meta(),
+        )
 
     @router.post("/tools/{capability_id}/{version}/disable")
     async def disable_tool(
@@ -695,7 +969,7 @@ def create_capability_router(
         version: str,
         body: LifecycleActionBody,
         user: Annotated[CurrentUser, Depends(require_capability_identity)],
-    ) -> CapabilityResponse:
+    ) -> ToolDefinitionResponse:
         _require(user, ControlPlanePermission.CAPABILITY_MANAGE)
         await _validate_transition(capability_id, version, "disabled")
         result = await management_service.disable(
@@ -706,14 +980,17 @@ def create_capability_router(
             expected_etag=body.expected_etag,
         )
         await _reload_runtime()
-        return CapabilityResponse(data=result.model_dump(mode="json"), meta=_meta())
+        return ToolDefinitionResponse(
+            data=_tool_definition_data(ToolCapability.model_validate(result)),
+            meta=_meta(),
+        )
 
     @router.post("/tools/{capability_id}/rollback")
     async def rollback_tool(
         capability_id: str,
         body: RollbackBody,
         user: Annotated[CurrentUser, Depends(require_capability_identity)],
-    ) -> SnapshotResponse:
+    ) -> ToolSnapshotResponse:
         _require(user, ControlPlanePermission.CAPABILITY_PUBLISH)
         await _validate_rollback(capability_id, body.to_version)
         snapshot = await management_service.rollback(
@@ -724,7 +1001,7 @@ def create_capability_router(
             expected_etag=body.expected_etag,
         )
         await _reload_runtime()
-        return SnapshotResponse(data=snapshot.model_dump(mode="json"), meta=_meta())
+        return ToolSnapshotResponse(data=_tool_snapshot_data(snapshot), meta=_meta())
 
     # ---- Skills ----
 

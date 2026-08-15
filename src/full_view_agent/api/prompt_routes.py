@@ -18,12 +18,18 @@ from full_view_agent.application.control_plane_authorization import (
 from full_view_agent.application.prompt_template_service import PromptTemplateService
 from full_view_agent.application.session_run_service import new_id
 from full_view_agent.domain.contract_model import ContractModel
-from full_view_agent.domain.prompt_template import PromptTemplateStatus
+from full_view_agent.domain.prompt_template import (
+    PromptLayer,
+    PromptLifecycleEvent,
+    PromptTemplate,
+    PromptTemplateStatus,
+)
 
 
 class PromptCreateBody(ContractModel):
     prompt_id: str = Field(min_length=3, max_length=128)
     app_id: str = Field(min_length=2, max_length=64)
+    layer: PromptLayer = "application"
     name: str = Field(min_length=1, max_length=200)
     version: str = Field(min_length=5, max_length=32)
     content: str = Field(min_length=1, max_length=20_000)
@@ -52,19 +58,24 @@ class PromptLifecycleBody(ContractModel):
 
 
 class PromptEnvelope(ContractModel):
-    data: dict[str, object]
+    data: PromptTemplate | None
     meta: ResponseMeta
 
 
 class PromptListEnvelope(ContractModel):
-    data: list[dict[str, object]]
+    data: list[PromptTemplate]
+    meta: ResponseMeta
+
+
+class PromptAuditListEnvelope(ContractModel):
+    data: list[PromptLifecycleEvent]
     meta: ResponseMeta
 
 
 def create_prompt_router(
     service: PromptTemplateService,
     *,
-    refresh_runtime: Callable[[], Awaitable[None]] | None = None,
+    refresh_runtime: Callable[[str], Awaitable[None]] | None = None,
 ) -> APIRouter:
     router = APIRouter(prefix="/capability-api/v1", tags=["prompt-management"])
     authorizer = ControlPlaneAuthorizer.compatibility_default()
@@ -82,12 +93,11 @@ def create_prompt_router(
     async def list_prompts(
         user: Annotated[CurrentUser, Depends(require_capability_identity)],
         app_id: str | None = None,
+        layer: PromptLayer | None = None,
     ) -> PromptListEnvelope:
         require(user, ControlPlanePermission.CAPABILITY_READ)
-        items = await service.list(app_id=app_id)
-        return PromptListEnvelope(
-            data=[item.model_dump(mode="json") for item in items], meta=meta()
-        )
+        items = await service.list(app_id=app_id, layer=layer)
+        return PromptListEnvelope(data=items, meta=meta())
 
     @router.get("/prompt-templates/effective")
     async def effective_prompt(
@@ -97,19 +107,17 @@ def create_prompt_router(
         require(user, ControlPlanePermission.CAPABILITY_READ)
         effective = await service.get_effective_template(app_id=app_id)
         return PromptEnvelope(
-            data=(effective.model_dump(mode="json") if effective else {}), meta=meta()
+            data=effective, meta=meta()
         )
 
     @router.get("/prompt-templates/{prompt_id}/audit-events")
     async def prompt_audit_events(
         prompt_id: str,
         user: Annotated[CurrentUser, Depends(require_capability_identity)],
-    ) -> PromptListEnvelope:
+    ) -> PromptAuditListEnvelope:
         require(user, ControlPlanePermission.CAPABILITY_READ)
         events = await service.list_events(prompt_id=prompt_id)
-        return PromptListEnvelope(
-            data=[event.model_dump(mode="json") for event in events], meta=meta()
-        )
+        return PromptAuditListEnvelope(data=events, meta=meta())
 
     @router.post(
         "/prompt-templates", status_code=status.HTTP_201_CREATED
@@ -124,7 +132,7 @@ def create_prompt_router(
             actor=actor(user),
             reason=body.reason,
         )
-        return PromptEnvelope(data=item.model_dump(mode="json"), meta=meta())
+        return PromptEnvelope(data=item, meta=meta())
 
     async def transition(
         *,
@@ -145,8 +153,8 @@ def create_prompt_router(
             reason=body.reason,
         )
         if target in {"published", "disabled"} and refresh_runtime is not None:
-            await refresh_runtime()
-        return PromptEnvelope(data=item.model_dump(mode="json"), meta=meta())
+            await refresh_runtime(item.app_id)
+        return PromptEnvelope(data=item, meta=meta())
 
     @router.post("/prompt-templates/{prompt_id}/{version}/{action}")
     async def transition_prompt(

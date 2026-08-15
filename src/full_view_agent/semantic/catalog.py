@@ -133,6 +133,10 @@ class ResultShape(ContractModel):
     group_by_selection: tuple[str, ...] | None = None
     # None = 不限指标组合；非 None = 必须精确匹配该受控指标组合。
     metric_selection: tuple[str, ...] | None = None
+    operator_selection: tuple[
+        Literal["list", "sum", "avg", "min", "max", "top", "bottom", "rank"],
+        ...,
+    ] | None = None
     # None = 沿用主题输出形态；非 None = 该精确结果形状进一步收窄输出。
     output_forms: tuple[OutputForm, ...] | None = None
 
@@ -308,6 +312,20 @@ def _population() -> SubjectDefinition:
         supports_order_by=True,
         output_forms=("table", "choropleth"),
         result_shapes=(
+            ResultShape(
+                shape_id="population_aggregate_table",
+                data_schema_ref="schema://data/population-aggregate-table/1.0.0",
+                fingerprint_domain="data-result:population-aggregate-table:1.0.0",
+                grain_label="人口聚合统计",
+                row_fields=(
+                    "operator",
+                    "metric",
+                    "value",
+                    "area_count",
+                    "completeness",
+                ),
+                operator_selection=("sum", "avg", "min", "max"),
+            ),
             ResultShape(
                 shape_id="population_metric_table",
                 data_schema_ref="schema://data/population-metric-table/1.0.0",

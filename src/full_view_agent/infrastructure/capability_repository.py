@@ -307,7 +307,7 @@ class PostgresCapabilityRepository:
                     input_schema, output_schema, parameter_mapping, result_mapping,
                     result_kind, data_schema_ref, timeout_ms, max_attempts,
                     max_result_rows, cache_enabled, cache_ttl_seconds,
-                    credential_ref, created_by, updated_by, etag,
+                    credential_ref, created_by, updated_by, etag, semantic_contract,
                     created_at, updated_at
                 ) VALUES (
                     %(capability_id)s, %(name)s, %(domain)s, %(owner)s,
@@ -318,12 +318,13 @@ class PostgresCapabilityRepository:
                     %(result_mapping)s, %(result_kind)s, %(data_schema_ref)s,
                     %(timeout_ms)s, %(max_attempts)s, %(max_result_rows)s,
                     %(cache_enabled)s, %(cache_ttl_seconds)s, %(credential_ref)s,
-                    %(created_by)s, %(updated_by)s, %(etag)s,
+                    %(created_by)s, %(updated_by)s, %(etag)s, %(semantic_contract)s,
                     %(created_at)s, %(updated_at)s
                 )
                 ON CONFLICT (capability_id, version) DO UPDATE SET
                     name = EXCLUDED.name, status = EXCLUDED.status,
                     description = EXCLUDED.description,
+                    semantic_contract = EXCLUDED.semantic_contract,
                     updated_by = EXCLUDED.updated_by, etag = EXCLUDED.etag,
                     updated_at = EXCLUDED.updated_at
                 """,
@@ -941,6 +942,11 @@ def _tool_params(tool: ToolCapability) -> dict[str, object]:
         "cache_enabled": tool.cache_enabled,
         "cache_ttl_seconds": tool.cache_ttl_seconds,
         "credential_ref": tool.credential_ref,
+        "semantic_contract": (
+            json.dumps(tool.semantic_contract.model_dump(mode="json"))
+            if tool.semantic_contract is not None
+            else None
+        ),
         "created_by": tool.created_by,
         "updated_by": tool.updated_by,
         "etag": tool.etag,
@@ -1052,6 +1058,9 @@ def _tool_from_row(row: tuple[object, ...] | list[object]) -> ToolCapability:
         created_by=_str_field(r[27]) if len(r) > 27 else "system",
         updated_by=_str_field(r[28]) if len(r) > 28 else "system",
         etag=int(r[29]) if len(r) > 29 else 1,  # type: ignore[arg-type]
+        semantic_contract=(
+            _json_field(r[30], None) if len(r) > 30 else None
+        ),
     )
 
 

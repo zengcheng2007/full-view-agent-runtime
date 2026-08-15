@@ -21,6 +21,8 @@ from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Protocol
 
+from full_view_agent.domain.agent_definition import AgentExecutionPolicy
+
 logger = logging.getLogger(__name__)
 
 
@@ -34,21 +36,35 @@ class PersistedRunCapabilitySnapshot:
     skill_versions: dict[str, str] = field(default_factory=dict)
     workflow_versions: dict[str, str] = field(default_factory=dict)
     prompt_versions: dict[str, str] = field(default_factory=dict)
+    application_prompt_versions: dict[str, str] = field(default_factory=dict)
+    agent_prompt_versions: dict[str, str] = field(default_factory=dict)
+    application_prompt_fingerprints: dict[str, str] = field(default_factory=dict)
+    agent_prompt_fingerprints: dict[str, str] = field(default_factory=dict)
     knowledge_base_versions: dict[str, int] = field(default_factory=dict)
     static_tool_versions: dict[str, str] = field(default_factory=dict)
     application_scoped: bool = False
     agent_scoped: bool = False
+    application_id: str | None = None
+    execution_policy: AgentExecutionPolicy = field(default_factory=AgentExecutionPolicy)
+    tool_contract_fingerprints: dict[str, str] = field(default_factory=dict)
 
 
 _EMPTY_SENTINEL_CAPABILITY_ID = "__run_empty_capability_set__"
 _SKILL_PREFIX = "__skill__:"
 _WORKFLOW_PREFIX = "__workflow__:"
 _PROMPT_PREFIX = "__prompt__:"
+_APPLICATION_PROMPT_PREFIX = "__application_prompt__:"
+_AGENT_PROMPT_PREFIX = "__agent_prompt__:"
+_APPLICATION_PROMPT_FINGERPRINT_PREFIX = "__application_prompt_fingerprint__:"
+_AGENT_PROMPT_FINGERPRINT_PREFIX = "__agent_prompt_fingerprint__:"
 _KNOWLEDGE_PREFIX = "__knowledge__:"
 _STATIC_TOOL_PREFIX = "__static_tool__:"
 _APPLICATION_SCOPED_MARKER = "__application_scoped__"
+_APPLICATION_ID_MARKER = "__application_id__"
 _AGENT_SCOPED_MARKER = "__agent_scoped__"
 _SNAPSHOT_HEADER = "__run_snapshot_header__"
+_EXECUTION_POLICY_PREFIX = "__execution_policy__:"
+_TOOL_CONTRACT_PREFIX = "__tool_contract__:"
 
 
 class RunCapabilitySnapshotStore(Protocol):
@@ -128,6 +144,24 @@ class PostgresRunCapabilitySnapshotStore:
             for capability_id, version in snapshot.skill_versions.items()
         )
         rows.extend(
+            (f"{_APPLICATION_PROMPT_PREFIX}{prompt_id}", version)
+            for prompt_id, version in snapshot.application_prompt_versions.items()
+        )
+        rows.extend(
+            (f"{_AGENT_PROMPT_PREFIX}{prompt_id}", version)
+            for prompt_id, version in snapshot.agent_prompt_versions.items()
+        )
+        rows.extend(
+            (f"{_APPLICATION_PROMPT_FINGERPRINT_PREFIX}{prompt_id}", fingerprint)
+            for prompt_id, fingerprint in (
+                snapshot.application_prompt_fingerprints.items()
+            )
+        )
+        rows.extend(
+            (f"{_AGENT_PROMPT_FINGERPRINT_PREFIX}{prompt_id}", fingerprint)
+            for prompt_id, fingerprint in snapshot.agent_prompt_fingerprints.items()
+        )
+        rows.extend(
             (f"{_PROMPT_PREFIX}{prompt_id}", version)
             for prompt_id, version in snapshot.prompt_versions.items()
         )
@@ -145,8 +179,20 @@ class PostgresRunCapabilitySnapshotStore:
         )
         if snapshot.application_scoped:
             rows.append((_APPLICATION_SCOPED_MARKER, "1"))
+        if snapshot.application_id is not None:
+            rows.append((_APPLICATION_ID_MARKER, snapshot.application_id))
         if snapshot.agent_scoped:
             rows.append((_AGENT_SCOPED_MARKER, "1"))
+        rows.append(
+            (
+                _EXECUTION_POLICY_PREFIX,
+                snapshot.execution_policy.model_dump_json(),
+            )
+        )
+        rows.extend(
+            (f"{_TOOL_CONTRACT_PREFIX}{tool_id}", fingerprint)
+            for tool_id, fingerprint in snapshot.tool_contract_fingerprints.items()
+        )
         if not rows:
             rows.append((_EMPTY_SENTINEL_CAPABILITY_ID, ""))
 
@@ -207,11 +253,18 @@ class PostgresRunCapabilitySnapshotStore:
             and not row[0].startswith(_SKILL_PREFIX)
             and not row[0].startswith(_WORKFLOW_PREFIX)
             and not row[0].startswith(_PROMPT_PREFIX)
+            and not row[0].startswith(_APPLICATION_PROMPT_PREFIX)
+            and not row[0].startswith(_AGENT_PROMPT_PREFIX)
+            and not row[0].startswith(_APPLICATION_PROMPT_FINGERPRINT_PREFIX)
+            and not row[0].startswith(_AGENT_PROMPT_FINGERPRINT_PREFIX)
             and not row[0].startswith(_KNOWLEDGE_PREFIX)
             and not row[0].startswith(_STATIC_TOOL_PREFIX)
             and row[0] != _APPLICATION_SCOPED_MARKER
+            and row[0] != _APPLICATION_ID_MARKER
             and row[0] != _AGENT_SCOPED_MARKER
             and row[0] != _SNAPSHOT_HEADER
+            and row[0] != _EXECUTION_POLICY_PREFIX
+            and not row[0].startswith(_TOOL_CONTRACT_PREFIX)
         }
         skill_versions = {
             row[0][len(_SKILL_PREFIX) :]: row[1]
@@ -227,6 +280,26 @@ class PostgresRunCapabilitySnapshotStore:
             row[0][len(_PROMPT_PREFIX) :]: row[1]
             for row in rows
             if row[0].startswith(_PROMPT_PREFIX)
+        }
+        application_prompt_versions = {
+            row[0][len(_APPLICATION_PROMPT_PREFIX) :]: row[1]
+            for row in rows
+            if row[0].startswith(_APPLICATION_PROMPT_PREFIX)
+        }
+        agent_prompt_versions = {
+            row[0][len(_AGENT_PROMPT_PREFIX) :]: row[1]
+            for row in rows
+            if row[0].startswith(_AGENT_PROMPT_PREFIX)
+        }
+        application_prompt_fingerprints = {
+            row[0][len(_APPLICATION_PROMPT_FINGERPRINT_PREFIX) :]: row[1]
+            for row in rows
+            if row[0].startswith(_APPLICATION_PROMPT_FINGERPRINT_PREFIX)
+        }
+        agent_prompt_fingerprints = {
+            row[0][len(_AGENT_PROMPT_FINGERPRINT_PREFIX) :]: row[1]
+            for row in rows
+            if row[0].startswith(_AGENT_PROMPT_FINGERPRINT_PREFIX)
         }
         knowledge_base_versions = {
             row[0][len(_KNOWLEDGE_PREFIX) :]: int(row[1])
@@ -247,12 +320,33 @@ class PostgresRunCapabilitySnapshotStore:
             skill_versions=skill_versions,
             workflow_versions=workflow_versions,
             prompt_versions=prompt_versions,
+            application_prompt_versions=application_prompt_versions,
+            agent_prompt_versions=agent_prompt_versions,
+            application_prompt_fingerprints=application_prompt_fingerprints,
+            agent_prompt_fingerprints=agent_prompt_fingerprints,
             knowledge_base_versions=knowledge_base_versions,
             static_tool_versions=static_tool_versions,
             application_scoped=any(
                 row[0] == _APPLICATION_SCOPED_MARKER for row in rows
             ),
             agent_scoped=any(row[0] == _AGENT_SCOPED_MARKER for row in rows),
+            application_id=next(
+                (row[1] for row in rows if row[0] == _APPLICATION_ID_MARKER),
+                None,
+            ),
+            execution_policy=next(
+                (
+                    AgentExecutionPolicy.model_validate_json(row[1])
+                    for row in rows
+                    if row[0] == _EXECUTION_POLICY_PREFIX
+                ),
+                AgentExecutionPolicy(),
+            ),
+            tool_contract_fingerprints={
+                row[0][len(_TOOL_CONTRACT_PREFIX) :]: row[1]
+                for row in rows
+                if row[0].startswith(_TOOL_CONTRACT_PREFIX)
+            },
         )
 
     async def delete(self, run_id: str) -> None:

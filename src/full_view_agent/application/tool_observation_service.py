@@ -32,6 +32,7 @@ from full_view_agent.domain.models import (
     MapHighlightAreaPayload,
     MapRenderChoroplethPayload,
     PanelShowTablePayload,
+    PopulationAggregateTable,
     PopulationMetricTable,
     PopulationRankingTable,
     ResultDisplayField,
@@ -225,6 +226,23 @@ class ToolObservationService:
                 "dataset_snapshot_version": None,
                 "semantic_registry_version": (
                     lineage.catalog_version if lineage is not None else None
+                ),
+                "semantic_contract_fingerprint": (
+                    lineage.semantic_contract_fingerprint
+                    if lineage is not None
+                    else None
+                ),
+                "semantic_shape_id": (
+                    lineage.semantic_shape_id if lineage is not None else None
+                ),
+                "semantic_operator": (
+                    lineage.semantic_operator if lineage is not None else None
+                ),
+                "semantic_completeness": (
+                    lineage.semantic_completeness if lineage is not None else None
+                ),
+                "semantic_tie_policy": (
+                    lineage.semantic_tie_policy if lineage is not None else None
                 ),
                 "metric_definitions": (
                     [
@@ -477,6 +495,43 @@ def _table_presentation(
         path=f"/agent-api/v1/results/{result.result_id}/download?format=csv",
     )
     table_view = ResultVisualization(kind="table", title="数据表格")
+    if isinstance(result.data, PopulationAggregateTable):
+        row = result.data.rows[0]
+        operation_labels = {
+            "sum": "合计",
+            "avg": "平均值",
+            "min": "最小值",
+            "max": "最大值",
+        }
+        operation_label = operation_labels[row.operator]
+        return ResultPresentation(
+            title=f"人口{operation_label}",
+            summary=(
+                f"基于 {row.area_count} 个完整区划计算，"
+                f"人口{operation_label}为 {row.value:g} 人。"
+            ),
+            status_label="查询完成",
+            fields=[
+                ResultDisplayField(field="operator", label="聚合运算", role="dimension"),
+                ResultDisplayField(field="metric", label="指标", role="dimension"),
+                ResultDisplayField(
+                    field="value", label=f"人口{operation_label}", role="metric", unit="人"
+                ),
+                ResultDisplayField(
+                    field="area_count", label="参与区划数", role="metric", unit="个"
+                ),
+                ResultDisplayField(
+                    field="completeness", label="完整性", role="dimension"
+                ),
+            ],
+            visualizations=[
+                table_view,
+                ResultVisualization(
+                    kind="metric", title=f"人口{operation_label}", value_field="value"
+                ),
+            ],
+            download=download,
+        )
     if isinstance(result.data, (PopulationMetricTable, PopulationRankingTable)):
         total = sum(row.person_count for row in result.data.rows)
         solitary = _population_category(action) == "solitary_elderly"

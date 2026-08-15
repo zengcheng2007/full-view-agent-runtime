@@ -58,6 +58,7 @@ async def test_runtime_backfills_legacy_default_release_idempotently_in_postgres
         "full_information_view", "governance_general_agent"
     )
     assert release.agent_version == "0.0.1"
+    assert release.prompt_ref is None
     assert release.capability_refs
     assert release.model_refs[0].model_config_id == model.config_id
 

@@ -391,18 +391,18 @@ def default_application_registry(
             ApplicationCapabilityBinding(
                 app_id="full_information_view",
                 capability_id=capability_id,
-                capability_version="1.0.0",
+                capability_version=capability_version,
             )
-            for capability_id in (
-                "governance.resolve_area",
-                "governance.query_population_metrics",
-                "governance.query_housing_metrics",
-                "governance.query_event_metrics",
-                "governance.query_enterprise_metrics",
-                "governance.get_governance_overview",
-                "governance.query_governance_power_metrics",
-                "governance.get_object_profile",
-                "knowledge.search",
+            for capability_id, capability_version in (
+                ("governance.resolve_area", "1.0.0"),
+                ("governance.query_population_metrics", "1.1.0"),
+                ("governance.query_housing_metrics", "1.0.0"),
+                ("governance.query_event_metrics", "1.0.0"),
+                ("governance.query_enterprise_metrics", "1.0.0"),
+                ("governance.get_governance_overview", "1.0.0"),
+                ("governance.query_governance_power_metrics", "1.0.0"),
+                ("governance.get_object_profile", "1.0.0"),
+                ("knowledge.search", "1.0.0"),
             )
         ],
     )

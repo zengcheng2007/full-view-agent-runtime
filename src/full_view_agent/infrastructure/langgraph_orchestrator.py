@@ -221,7 +221,7 @@ class LangGraphOrchestrator(NativeOrchestrator):
         # the default eight model turns, so size the framework guard above the
         # authoritative Harness budget.  Harness remains responsible for the
         # user-visible budget/loop outcome.
-        config["recursion_limit"] = (4 * self._harness.model_turn_limit) + 5
+        config["recursion_limit"] = (4 * effective_harness.model_turn_limit) + 5
 
         async with self._checkpoint_manager.saver() as saver:
             compiled = graph.compile(checkpointer=saver)

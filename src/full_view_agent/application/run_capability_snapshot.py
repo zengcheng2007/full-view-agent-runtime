@@ -27,6 +27,7 @@ from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Protocol
 
+from full_view_agent.application.fingerprints import canonical_fingerprint
 from full_view_agent.application.run_capability_snapshot_store import (
     PersistedRunCapabilitySnapshot,
     RunCapabilitySnapshotStore,
@@ -35,7 +36,10 @@ from full_view_agent.application.runtime_prompt_registry import RuntimePromptReg
 from full_view_agent.application.runtime_skill_registry import RuntimeSkillRegistry
 from full_view_agent.application.runtime_workflow_registry import RuntimeWorkflowRegistry
 from full_view_agent.application.tool_registry import ToolRegistry
-from full_view_agent.domain.agent_definition import AgentReleaseSnapshot
+from full_view_agent.domain.agent_definition import (
+    AgentExecutionPolicy,
+    AgentReleaseSnapshot,
+)
 from full_view_agent.domain.application import ApplicationCapabilityBinding
 from full_view_agent.domain.capability import (
     SkillCapability,
@@ -79,8 +83,12 @@ class RunCapabilitySnapshot:
         default_factory=RuntimeWorkflowRegistry
     )
     runtime_prompt_snapshot: RuntimePromptSnapshot | None = None
+    application_prompt_snapshot: RuntimePromptSnapshot | None = None
+    agent_prompt_snapshot: RuntimePromptSnapshot | None = None
     knowledge_base_versions: dict[str, int] = field(default_factory=dict)
     agent_scoped: bool = False
+    execution_policy: AgentExecutionPolicy = field(default_factory=AgentExecutionPolicy)
+    tool_contract_fingerprints: dict[str, str] = field(default_factory=dict)
 
 
 class RunCapabilitySnapshotService:
@@ -101,6 +109,7 @@ class RunCapabilitySnapshotService:
         runtime_workflow_registry: RuntimeWorkflowRegistry | None = None,
         runtime_prompt_registry: RuntimePromptRegistry | None = None,
         prompt_snapshot_loader=None,
+        prompt_history_snapshot_loader=None,
     ) -> None:
         self._repository = repository
         self._snapshots: dict[str, RunCapabilitySnapshot] = {}
@@ -112,6 +121,9 @@ class RunCapabilitySnapshotService:
         )
         self._runtime_prompt_registry = runtime_prompt_registry or RuntimePromptRegistry()
         self._prompt_snapshot_loader = prompt_snapshot_loader
+        self._prompt_history_snapshot_loader = (
+            prompt_history_snapshot_loader or prompt_snapshot_loader
+        )
 
     async def create_snapshot_for_run(
         self,
@@ -167,14 +179,14 @@ class RunCapabilitySnapshotService:
                     run_id=run_id,
                     persisted=persisted,
                     base_registry=base_registry,
+                    app_id=app_id,
                 )
                 if rebuilt is None:
                     raise RuntimeError(
                         f"cannot rebuild capability snapshot for run"
-                        f" {run_id}: one or more pinned tool versions"
-                        f" are no longer available in the capability"
-                        f" repository; refusing to substitute the live"
-                        f" capability set"
+                        f" {run_id}: pinned tool versions or other immutable"
+                        f" resources are unavailable or failed integrity validation;"
+                        f" refusing to substitute live configuration"
                     )
                 self._snapshots[run_id] = rebuilt
                 logger.info(
@@ -253,7 +265,6 @@ class RunCapabilitySnapshotService:
             descriptors=descriptors,
             dynamic_input_schemas=dynamic_input_schemas,
         )
-
         # Build version map
         tool_versions = {
             tool.capability_id: tool.version for tool in published_tools
@@ -277,32 +288,65 @@ class RunCapabilitySnapshotService:
         workflow_versions = {
             workflow.workflow_id: workflow.version for workflow in runtime_workflows
         }
-        prompt_snapshot = self._runtime_prompt_registry.snapshot()
-        if agent_release is not None:
-            prompt_snapshot = None
-            if agent_release.prompt_ref is not None:
-                if self._prompt_snapshot_loader is None:
-                    raise RuntimeError("agent release prompt cannot be loaded")
-                prompt_id, prompt_version = _one_reference(agent_release.prompt_ref)
-                prompt_snapshot = await self._prompt_snapshot_loader(
-                    prompt_id=prompt_id,
-                    version=prompt_version,
-                )
-                if (
-                    prompt_snapshot is None
-                    or prompt_snapshot.app_id != app_id
-                    or prompt_snapshot.version != prompt_version
-                ):
-                    raise RuntimeError("agent release prompt version is unavailable")
+        application_prompt_snapshot = self._runtime_prompt_registry.snapshot(
+            app_id=app_id
+        )
         if (
-            prompt_snapshot is not None
-            and app_id is not None
-            and prompt_snapshot.app_id != app_id
+            application_prompt_snapshot is not None
+            and (
+                application_prompt_snapshot.layer != "application"
+                or (
+                    app_id is not None
+                    and application_prompt_snapshot.app_id != app_id
+                )
+            )
         ):
-            prompt_snapshot = None
-        prompt_versions = (
-            {prompt_snapshot.prompt_id: prompt_snapshot.version}
-            if prompt_snapshot is not None
+            raise RuntimeError("application prompt snapshot does not match the run")
+        agent_prompt_snapshot = None
+        if agent_release is not None and agent_release.prompt_ref is not None:
+            if self._prompt_snapshot_loader is None:
+                raise RuntimeError("agent release prompt cannot be loaded")
+            prompt_id, prompt_version = _one_reference(agent_release.prompt_ref)
+            agent_prompt_snapshot = await self._prompt_snapshot_loader(
+                prompt_id=prompt_id,
+                version=prompt_version,
+            )
+            if (
+                agent_prompt_snapshot is None
+                or agent_prompt_snapshot.layer != "agent"
+                or agent_prompt_snapshot.app_id != app_id
+                or agent_prompt_snapshot.version != prompt_version
+            ):
+                raise RuntimeError("agent release prompt version is unavailable")
+        application_prompt_versions = (
+            {
+                application_prompt_snapshot.prompt_id:
+                    application_prompt_snapshot.version
+            }
+            if application_prompt_snapshot is not None
+            else {}
+        )
+        agent_prompt_versions = (
+            {agent_prompt_snapshot.prompt_id: agent_prompt_snapshot.version}
+            if agent_prompt_snapshot is not None
+            else {}
+        )
+        application_prompt_fingerprints = (
+            {
+                application_prompt_snapshot.prompt_id: _prompt_fingerprint(
+                    application_prompt_snapshot
+                )
+            }
+            if application_prompt_snapshot is not None
+            else {}
+        )
+        agent_prompt_fingerprints = (
+            {
+                agent_prompt_snapshot.prompt_id: _prompt_fingerprint(
+                    agent_prompt_snapshot
+                )
+            }
+            if agent_prompt_snapshot is not None
             else {}
         )
         knowledge_base_versions = (
@@ -315,6 +359,7 @@ class RunCapabilitySnapshotService:
             if agent_release is not None
             else {}
         )
+        tool_contract_fingerprints = _tool_contract_fingerprints(snapshot_registry)
 
         # Create immutable snapshot
         snapshot = RunCapabilitySnapshot(
@@ -324,13 +369,18 @@ class RunCapabilitySnapshotService:
             tool_versions=tool_versions,
             runtime_skill_registry=RuntimeSkillRegistry(runtime_skills),
             runtime_workflow_registry=RuntimeWorkflowRegistry(runtime_workflows),
-            runtime_prompt_snapshot=prompt_snapshot,
+            runtime_prompt_snapshot=agent_prompt_snapshot or application_prompt_snapshot,
+            application_prompt_snapshot=application_prompt_snapshot,
+            agent_prompt_snapshot=agent_prompt_snapshot,
             knowledge_base_versions=knowledge_base_versions,
             agent_scoped=agent_release is not None,
+            execution_policy=(
+                agent_release.execution_policy
+                if agent_release is not None
+                else AgentExecutionPolicy()
+            ),
+            tool_contract_fingerprints=tool_contract_fingerprints,
         )
-
-        # Store snapshot in-memory
-        self._snapshots[run_id] = snapshot
 
         # Persist snapshot for cross-process recovery. Atomic
         # first-write-wins: if another process persisted a snapshot for
@@ -349,11 +399,17 @@ class RunCapabilitySnapshotService:
                 captured_at=snapshot.created_at,
                 skill_versions=skill_versions,
                 workflow_versions=workflow_versions,
-                prompt_versions=prompt_versions,
+                application_prompt_versions=application_prompt_versions,
+                agent_prompt_versions=agent_prompt_versions,
+                application_prompt_fingerprints=application_prompt_fingerprints,
+                agent_prompt_fingerprints=agent_prompt_fingerprints,
                 knowledge_base_versions=knowledge_base_versions,
                 static_tool_versions=static_tool_versions,
                 application_scoped=app_id is not None,
                 agent_scoped=agent_release is not None,
+                application_id=app_id,
+                execution_policy=snapshot.execution_policy,
+                tool_contract_fingerprints=tool_contract_fingerprints,
             )
             winner = await self._store.store_if_absent(persisted_candidate)
             if winner != persisted_candidate:
@@ -364,6 +420,7 @@ class RunCapabilitySnapshotService:
                     run_id=run_id,
                     persisted=winner,
                     base_registry=base_registry,
+                    app_id=app_id,
                 )
                 if rebuilt is None:
                     raise RuntimeError(
@@ -373,7 +430,11 @@ class RunCapabilitySnapshotService:
                         f" capability repository"
                     )
                 snapshot = rebuilt
-                self._snapshots[run_id] = snapshot
+
+        # Publish the in-memory candidate only after durable persistence and
+        # any first-writer reconciliation have succeeded. Failure paths must
+        # not leave a candidate that a retry could mistake for authority.
+        self._snapshots[run_id] = snapshot
 
         logger.info(
             f"Created snapshot for run {run_id} with "
@@ -404,6 +465,8 @@ class RunCapabilitySnapshotService:
         )
 
         if persisted.application_scoped:
+            if app_id is not None and persisted.application_id != app_id:
+                return None
             for tool_id, version in persisted.static_tool_versions.items():
                 try:
                     manifest = base_registry.get_manifest(tool_id)
@@ -442,6 +505,15 @@ class RunCapabilitySnapshotService:
             descriptors=descriptors,
             dynamic_input_schemas=dynamic_input_schemas,
         )
+        if (
+            _tool_contract_fingerprints(snapshot_registry)
+            != persisted.tool_contract_fingerprints
+        ):
+            logger.warning(
+                "Cannot rebuild snapshot for run %s: semantic contract fingerprint drift",
+                run_id,
+            )
+            return None
         from full_view_agent.application.dynamic_skill_workflow_bridge import (
             build_runtime_skill_contract,
             build_runtime_workflow_snapshot,
@@ -476,15 +548,88 @@ class RunCapabilitySnapshotService:
                     allowed_skill_refs=allowed_skill_refs,
                 )
             )
-        rebuilt_prompt = None
-        if persisted.prompt_versions:
-            if len(persisted.prompt_versions) != 1 or self._prompt_snapshot_loader is None:
+        application_prompt_versions = dict(persisted.application_prompt_versions)
+        agent_prompt_versions = dict(persisted.agent_prompt_versions)
+        # Legacy rows used one untyped prompt marker. Preserve the exact version,
+        # then classify by the loaded prompt's migrated layer. Never substitute a
+        # live effective prompt during restart recovery.
+        legacy_prompt_versions = dict(persisted.prompt_versions)
+        all_prompt_count = (
+            len(application_prompt_versions)
+            + len(agent_prompt_versions)
+            + len(legacy_prompt_versions)
+        )
+        if all_prompt_count > 2 or any(
+            len(items) > 1
+            for items in (application_prompt_versions, agent_prompt_versions)
+        ):
+            return None
+        if all_prompt_count and self._prompt_history_snapshot_loader is None:
+            return None
+
+        async def load_prompt(
+            versions: dict[str, str],
+            fingerprints: dict[str, str],
+            expected_layer: str,
+        ) -> RuntimePromptSnapshot | None:
+            if not versions:
                 return None
-            prompt_id, version = next(iter(persisted.prompt_versions.items()))
-            rebuilt_prompt = await self._prompt_snapshot_loader(
+            prompt_id, version = next(iter(versions.items()))
+            loaded = await self._prompt_history_snapshot_loader(  # type: ignore[misc]
                 prompt_id=prompt_id, version=version
             )
-            if rebuilt_prompt is None:
+            if (
+                loaded is None
+                or loaded.prompt_id != prompt_id
+                or loaded.version != version
+                or loaded.layer != expected_layer
+                or (
+                    persisted.application_id is not None
+                    and loaded.app_id != persisted.application_id
+                )
+            ):
+                return None
+            expected_fingerprint = fingerprints.get(prompt_id)
+            if (
+                expected_fingerprint is not None
+                and _prompt_fingerprint(loaded) != expected_fingerprint
+            ):
+                return None
+            return loaded
+
+        rebuilt_application_prompt = await load_prompt(
+            application_prompt_versions,
+            persisted.application_prompt_fingerprints,
+            "application",
+        )
+        rebuilt_agent_prompt = await load_prompt(
+            agent_prompt_versions,
+            persisted.agent_prompt_fingerprints,
+            "agent",
+        )
+        if application_prompt_versions and rebuilt_application_prompt is None:
+            return None
+        if agent_prompt_versions and rebuilt_agent_prompt is None:
+            return None
+        for prompt_id, version in legacy_prompt_versions.items():
+            loaded = await self._prompt_history_snapshot_loader(  # type: ignore[misc]
+                prompt_id=prompt_id, version=version
+            )
+            if (
+                loaded is None
+                or loaded.prompt_id != prompt_id
+                or loaded.version != version
+                or (
+                    persisted.application_id is not None
+                    and loaded.app_id != persisted.application_id
+                )
+            ):
+                return None
+            if loaded.layer == "agent" and rebuilt_agent_prompt is None:
+                rebuilt_agent_prompt = loaded
+            elif loaded.layer == "application" and rebuilt_application_prompt is None:
+                rebuilt_application_prompt = loaded
+            else:
                 return None
         return RunCapabilitySnapshot(
             run_id=run_id,
@@ -495,9 +640,15 @@ class RunCapabilitySnapshotService:
             runtime_workflow_registry=RuntimeWorkflowRegistry(
                 tuple(rebuilt_workflows)
             ),
-            runtime_prompt_snapshot=rebuilt_prompt,
+            runtime_prompt_snapshot=(
+                rebuilt_agent_prompt or rebuilt_application_prompt
+            ),
+            application_prompt_snapshot=rebuilt_application_prompt,
+            agent_prompt_snapshot=rebuilt_agent_prompt,
             knowledge_base_versions=dict(persisted.knowledge_base_versions),
             agent_scoped=persisted.agent_scoped,
+            execution_policy=persisted.execution_policy,
+            tool_contract_fingerprints=dict(persisted.tool_contract_fingerprints),
         )
 
     async def get_or_create_snapshot_for_run(
@@ -621,3 +772,23 @@ def _knowledge_major(version: str) -> int:
     if minor != "0" or patch != "0" or int(major) < 1:
         raise RuntimeError(f"invalid knowledge release version: {version}")
     return int(major)
+
+
+def _tool_contract_fingerprints(registry: ToolRegistry) -> dict[str, str]:
+    fingerprints: dict[str, str] = {}
+    for tool_id in registry.list_tool_ids():
+        manifest = registry.get_manifest(tool_id)
+        if manifest.semantic_contract is None:
+            continue
+        fingerprints[tool_id] = canonical_fingerprint(
+            domain=f"tool-semantic-contract:{tool_id}:{manifest.tool_version}",
+            value=manifest.semantic_contract,
+        )
+    return fingerprints
+
+
+def _prompt_fingerprint(snapshot: RuntimePromptSnapshot) -> str:
+    return canonical_fingerprint(
+        domain="runtime-prompt-snapshot",
+        value=snapshot,
+    )

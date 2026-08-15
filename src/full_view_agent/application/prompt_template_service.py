@@ -6,6 +6,7 @@ from typing import Protocol
 from full_view_agent.application.errors import ResourceNotFound, RunStateConflict
 from full_view_agent.application.session_run_service import new_id
 from full_view_agent.domain.prompt_template import (
+    PromptLayer,
     PromptLifecycleEvent,
     PromptTemplate,
     PromptTemplateStatus,
@@ -40,6 +41,7 @@ class PromptTemplateService:
         *,
         prompt_id: str,
         app_id: str,
+        layer: PromptLayer = "application",
         name: str,
         version: str,
         content: str,
@@ -51,6 +53,7 @@ class PromptTemplateService:
         template = PromptTemplate(
             prompt_id=prompt_id,
             app_id=app_id,
+            layer=layer,
             name=name,
             version=version,
             content=content,
@@ -70,8 +73,13 @@ class PromptTemplateService:
         )
         return template
 
-    async def list(self, *, app_id: str | None = None) -> list[PromptTemplate]:
-        return await self._repository.list(app_id=app_id)
+    async def list(
+        self, *, app_id: str | None = None, layer: PromptLayer | None = None
+    ) -> list[PromptTemplate]:
+        items = await self._repository.list(app_id=app_id)
+        if layer is not None:
+            items = [item for item in items if item.layer == layer]
+        return items
 
     async def get_template(
         self, prompt_id: str, version: str
@@ -103,9 +111,9 @@ class PromptTemplateService:
             raise RunStateConflict(
                 f"invalid prompt transition: {current.status} -> {to_status}"
             )
-        if to_status == "published":
+        if to_status == "published" and current.layer == "application":
             for other in await self._repository.list(app_id=current.app_id):
-                if other.status == "published" and (
+                if other.layer == current.layer and other.status == "published" and (
                     other.prompt_id != prompt_id or other.version != version
                 ):
                     raise RunStateConflict(
@@ -133,25 +141,32 @@ class PromptTemplateService:
         )
         return updated
 
-    async def get_effective_template(self, *, app_id: str) -> PromptTemplate | None:
+    async def get_effective_template(
+        self, *, app_id: str, layer: PromptLayer = "application"
+    ) -> PromptTemplate | None:
+        if layer != "application":
+            raise ValueError("effective prompt exists only for the application layer")
         published = [
             item
             for item in await self._repository.list(app_id=app_id)
-            if item.status == "published"
+            if item.status == "published" and item.layer == layer
         ]
         if not published:
             return None
         if len(published) != 1:
-            raise RuntimeError("multiple published prompts for one application")
+            raise RuntimeError(f"multiple published {layer} prompts for one application")
         return published[0]
 
-    async def get_effective(self, *, app_id: str) -> RuntimePromptSnapshot | None:
-        template = await self.get_effective_template(app_id=app_id)
+    async def get_effective(
+        self, *, app_id: str, layer: PromptLayer = "application"
+    ) -> RuntimePromptSnapshot | None:
+        template = await self.get_effective_template(app_id=app_id, layer=layer)
         if template is None:
             return None
         return RuntimePromptSnapshot(
             prompt_id=template.prompt_id,
             app_id=template.app_id,
+            layer=template.layer,
             version=template.version,
             content=template.content,
         )
@@ -162,9 +177,28 @@ class PromptTemplateService:
         template = await self._repository.get(prompt_id, version)
         if template is None:
             return None
+        if template.status != "published":
+            return None
         return RuntimePromptSnapshot(
             prompt_id=template.prompt_id,
             app_id=template.app_id,
+            layer=template.layer,
+            version=template.version,
+            content=template.content,
+        )
+
+    async def load_historical_snapshot(
+        self, *, prompt_id: str, version: str
+    ) -> RuntimePromptSnapshot | None:
+        """Load an exact prompt once admitted to production for Run recovery."""
+
+        template = await self._repository.get(prompt_id, version)
+        if template is None or template.status not in {"published", "disabled"}:
+            return None
+        return RuntimePromptSnapshot(
+            prompt_id=template.prompt_id,
+            app_id=template.app_id,
+            layer=template.layer,
             version=template.version,
             content=template.content,
         )

@@ -266,6 +266,9 @@ try:
             (22, "seed_knowledge_search"),
             (23, "enterprise_industry_distribution"),
             (24, "application_agents"),
+            (25, "seed_governance_power"),
+            (26, "runtime_observability_indexes"),
+            (27, "tool_semantic_contracts"),
         )
     )
 except FileNotFoundError:

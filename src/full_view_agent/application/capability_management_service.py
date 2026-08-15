@@ -26,6 +26,7 @@ from full_view_agent.domain.capability import (
     ConnectorAuditEvent,
     SkillCapability,
     ToolCapability,
+    ToolSemanticContract,
     WorkflowCapability,
     WorkflowEdgeDefinition,
     WorkflowNodeDefinition,
@@ -86,6 +87,7 @@ class CapabilityManagementService:
         credential_ref: str | None = None,
         required_permissions: list[str] | None = None,
         dataset_ids: list[str] | None = None,
+        semantic_contract: ToolSemanticContract | dict[str, object] | None = None,
         created_by: str = "system",
     ) -> ToolCapability:
         connector = await self._repo.get_connector(connector_ref)
@@ -121,6 +123,11 @@ class CapabilityManagementService:
             cache_enabled=cache_enabled,
             cache_ttl_seconds=cache_ttl_seconds,
             credential_ref=credential_ref,
+            semantic_contract=(
+                ToolSemanticContract.model_validate(semantic_contract)
+                if semantic_contract is not None
+                else None
+            ),
             created_by=created_by,
             updated_by=created_by,
         )
@@ -132,6 +139,7 @@ class CapabilityManagementService:
         capability_id: str,
         version: str,
         updated_by: str,
+        expected_etag: int | None = None,
         **fields: object,
     ) -> ToolCapability:
         existing = await self._repo.get(capability_id, version)
@@ -139,10 +147,16 @@ class CapabilityManagementService:
             raise ResourceNotFound("tool not found")
         if not isinstance(existing, ToolCapability):
             raise ResourceNotFound("not a tool capability")
+        if expected_etag is not None and existing.etag != expected_etag:
+            raise RunStateConflict("capability etag mismatch")
         if existing.status in ("published",):
             raise RunStateConflict("cannot modify a published tool version")
         if existing.status == "disabled":
             raise RunStateConflict("cannot modify a disabled tool version")
+        if fields.get("semantic_contract") is not None:
+            fields["semantic_contract"] = ToolSemanticContract.model_validate(
+                fields["semantic_contract"]
+            )
         updated = existing.model_copy(
             update={
                 **{k: v for k, v in fields.items() if v is not None},
@@ -299,6 +313,19 @@ class CapabilityManagementService:
         reason: str = "",
         expected_etag: int | None = None,
     ) -> CapabilitySnapshot:
+        candidate = await self._repo.get(capability_id, version)
+        if (
+            isinstance(candidate, ToolCapability)
+            and candidate.capability_id == "governance.query_population_metrics"
+            and candidate.semantic_contract is None
+        ):
+            raise RunStateConflict(
+                "tool semantic contract is required before publish"
+            )
+        if isinstance(candidate, ToolCapability) and candidate.semantic_contract is not None:
+            ToolSemanticContract.model_validate(
+                candidate.semantic_contract.model_dump(mode="python")
+            )
         capability = await self.advance_status(
             capability_id=capability_id,
             version=version,

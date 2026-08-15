@@ -239,6 +239,75 @@ async def test_city_street_population_ranking_fans_out_by_district_once_each() -
     assert result.truncated is True
 
 
+@pytest.mark.parametrize(
+    ("operator", "expected_names", "expected_average"),
+    [
+        ("top", ["湖滨街道", "翠苑街道"], None),
+        ("bottom", ["文新街道"], None),
+        ("avg", [], 20 / 3),
+    ],
+)
+@pytest.mark.asyncio
+async def test_city_street_semantic_operations_use_complete_http_row_set(
+    operator: str,
+    expected_names: list[str],
+    expected_average: float | None,
+) -> None:
+    rows_by_area = {
+        "3301": [
+            {"areaCode": "330102", "areaName": "上城区", "total": 20},
+            {"areaCode": "330106", "areaName": "西湖区", "total": 30},
+        ],
+        "330102": [
+            {"areaCode": "330102001", "areaName": "湖滨街道", "total": 10}
+        ],
+        "330106": [
+            {"areaCode": "330106001", "areaName": "翠苑街道", "total": 10},
+            {"areaCode": "330106002", "areaName": "文新街道", "total": 0},
+        ],
+    }
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        area_code = parse_qs(request.content.decode())["areaCode"][0]
+        return httpx.Response(
+            200,
+            json={"state": True, "code": 200, "msg": "", "data": rows_by_area[area_code]},
+        )
+
+    arguments = models.QueryPopulationMetricsInput.model_validate(
+        {
+            "query": {
+                "metrics": ["person_count"],
+                "operator": operator,
+                "scope": {"area_code": "3301", "include_descendants": True},
+                "group_by": ["descendant_street"],
+                "limit": 1,
+            }
+        }
+    )
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        result = await _execute_population(
+            HttpGovernanceAdapter(
+                base_url="http://legacy.test/geo-qxst",
+                credential_broker=RecordingCredentialBroker(),
+                client=client,
+            ),
+            arguments,
+        )
+
+    if expected_average is None:
+        assert isinstance(result.data, models.PopulationRankingTable)
+        assert [row.area_name for row in result.data.rows] == expected_names
+        assert result.truncated is False
+    else:
+        assert isinstance(result.data, models.PopulationAggregateTable)
+        row = result.data.rows[0]
+        assert row.operator == "avg"
+        assert row.value == pytest.approx(expected_average)
+        assert row.area_count == 3
+        assert row.completeness == "complete"
+
+
 @pytest.mark.asyncio
 async def test_city_community_population_ranking_fails_closed_when_fanout_exceeds_bound() -> None:
     calls: list[str] = []

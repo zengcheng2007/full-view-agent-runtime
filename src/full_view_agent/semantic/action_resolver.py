@@ -54,6 +54,9 @@ from full_view_agent.semantic.query_spec import (
     SEMANTIC_SPEC_VERSION,
     SemanticQuerySpec,
 )
+from full_view_agent.semantic.tool_contract_compiler import (
+    ToolSemanticQueryRejected,
+)
 from full_view_agent.semantic.validator import (
     SemanticValidator,
     Violation,
@@ -146,7 +149,9 @@ class SemanticActionResolver:
     ) -> None:
         self._catalog = catalog
         self._validator = validator or SemanticValidator(catalog)
-        self._compiler = compiler or SemanticCompiler(catalog, self._validator)
+        self._compiler = compiler or SemanticCompiler(
+            catalog, self._validator, registry=registry
+        )
         self._guard = guard or ExecutionGuard(
             catalog=catalog, registry=registry, policy=policy
         )
@@ -227,6 +232,11 @@ class SemanticActionResolver:
                     violation.message for violation in exc.violations
                 ),
                 violations=exc.violations,
+            )
+        except ToolSemanticQueryRejected as exc:
+            return RejectedSemanticAction(
+                codes=(exc.code,),
+                user_message=exc.detail,
             )
         lineage = self._build_lineage(spec=spec, plan=plan)
         return ResolvedSemanticAction(spec=spec, plan=plan, lineage=lineage)
@@ -315,6 +325,11 @@ class SemanticActionResolver:
                 domain=f"semantic-plan:{SEMANTIC_SPEC_VERSION}",
                 value=plan,
             ),
+            semantic_contract_fingerprint=plan.semantic_contract_fingerprint,
+            semantic_shape_id=plan.semantic_shape_id,
+            semantic_operator=plan.semantic_operator,
+            semantic_completeness=plan.semantic_completeness,
+            semantic_tie_policy=plan.semantic_tie_policy,
             area_code=spec.scope.area_code,
             output=_output_label(spec.output),
             metric_definitions=[

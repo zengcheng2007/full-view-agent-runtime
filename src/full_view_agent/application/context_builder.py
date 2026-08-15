@@ -17,8 +17,9 @@ from full_view_agent.application.model_provider import (
 )
 from full_view_agent.application.ports import AgentStore
 from full_view_agent.application.prompt_catalog import (
-    FULL_VIEW_SYSTEM_PROMPT_VERSION,
-    build_full_view_system_prompt,
+    RUNTIME_SAFETY_KERNEL_VERSION,
+    build_contract_capability_guidance,
+    build_runtime_safety_kernel,
 )
 from full_view_agent.application.runtime_prompt_registry import RuntimePromptRegistry
 from full_view_agent.application.runtime_skill_registry import (
@@ -75,6 +76,9 @@ class AgentContextBuilder:
         skill_registry: RuntimeSkillRegistry | None = None,
         prompt_registry: RuntimePromptRegistry | None = None,
         prompt_snapshot: RuntimePromptSnapshot | None = None,
+        application_prompt_snapshot: RuntimePromptSnapshot | None = None,
+        agent_prompt_snapshot: RuntimePromptSnapshot | None = None,
+        pin_application_prompt_snapshot: bool = False,
     ) -> None:
         self._store = store
         self._registry = registry
@@ -84,7 +88,16 @@ class AgentContextBuilder:
         self._analysis_intent_presenter = analysis_intent_presenter
         self._skill_registry = skill_registry or RuntimeSkillRegistry()
         self._prompt_registry = prompt_registry or RuntimePromptRegistry()
-        self._prompt_snapshot = prompt_snapshot
+        self._application_prompt_snapshot = application_prompt_snapshot
+        self._application_prompt_pinned = (
+            pin_application_prompt_snapshot or application_prompt_snapshot is not None
+        )
+        self._agent_prompt_snapshot = agent_prompt_snapshot
+        if prompt_snapshot is not None:
+            if prompt_snapshot.layer == "agent":
+                self._agent_prompt_snapshot = prompt_snapshot
+            elif self._application_prompt_snapshot is None:
+                self._application_prompt_snapshot = prompt_snapshot
 
     def for_registry(
         self,
@@ -92,6 +105,9 @@ class AgentContextBuilder:
         *,
         skill_registry: RuntimeSkillRegistry | None = None,
         prompt_snapshot: RuntimePromptSnapshot | None = None,
+        application_prompt_snapshot: RuntimePromptSnapshot | None = None,
+        agent_prompt_snapshot: RuntimePromptSnapshot | None = None,
+        pin_application_prompt_snapshot: bool = False,
     ) -> "AgentContextBuilder":
         """Clone model context construction against the Run-pinned registry."""
 
@@ -104,7 +120,29 @@ class AgentContextBuilder:
             analysis_intent_presenter=self._analysis_intent_presenter,
             skill_registry=(skill_registry or self._skill_registry).snapshot(),
             prompt_registry=self._prompt_registry,
-            prompt_snapshot=prompt_snapshot or self._prompt_snapshot,
+            application_prompt_snapshot=(
+                application_prompt_snapshot
+                if application_prompt_snapshot is not None
+                else self._application_prompt_snapshot
+                if self._application_prompt_pinned
+                else None
+                if pin_application_prompt_snapshot
+                else self._prompt_registry.snapshot()
+            ),
+            agent_prompt_snapshot=(
+                agent_prompt_snapshot
+                or (
+                    prompt_snapshot
+                    if prompt_snapshot is not None and prompt_snapshot.layer == "agent"
+                    else None
+                )
+                or self._agent_prompt_snapshot
+            ),
+            pin_application_prompt_snapshot=(
+                pin_application_prompt_snapshot
+                or application_prompt_snapshot is not None
+                or self._application_prompt_pinned
+            ),
         )
 
     def skill_registry_snapshot(self):
@@ -180,26 +218,42 @@ class AgentContextBuilder:
         available_skills = self._skill_registry.available_for_tools(
             skill_callable_tool_ids
         )
-        prompt_snapshot = self._prompt_snapshot or self._prompt_registry.snapshot()
+        application_prompt = (
+            self._application_prompt_snapshot
+            if self._application_prompt_pinned
+            else self._prompt_registry.snapshot()
+        )
+        agent_prompt = self._agent_prompt_snapshot
+        capability_descriptions = tuple(
+            (
+                tool_id,
+                self._registry.get_model_descriptor(tool_id).description,
+            )
+            for tool_id in authorized_tool_ids
+        )
+        system_sections = [
+            build_runtime_safety_kernel(authorization),
+        ]
+        if application_prompt is not None:
+            system_sections.append(
+                "[APPLICATION_POLICY]\n" + application_prompt.content
+            )
+        if agent_prompt is not None:
+            system_sections.append("[AGENT_INSTRUCTION]\n" + agent_prompt.content)
+        system_sections.append(
+            build_contract_capability_guidance(
+                capability_descriptions,
+                semantic_capabilities=(
+                    semantic_presentation.description
+                    if semantic_presentation is not None
+                    else None
+                ),
+            )
+        )
         messages = [
             ModelMessage(
                 role="system",
-                content=build_full_view_system_prompt(
-                    authorization,
-                    tool_ids=authorized_tool_ids,
-                    semantic_capabilities=(
-                        semantic_presentation.description
-                        if semantic_presentation is not None
-                        else None
-                    ),
-                    housing_next_area_enabled=(
-                        self._registry.housing_next_area_enabled
-                    ),
-                    event_category_enabled=(
-                        self._registry.event_category_enabled
-                    ),
-                    managed_guidance=(prompt_snapshot.content if prompt_snapshot else None),
-                ),
+                content="\n\n".join(system_sections),
             )
         ]
         session_messages = await self._store.list_messages(
@@ -371,10 +425,20 @@ class AgentContextBuilder:
         return ModelRequest(
             messages=tuple(messages),
             tools=tuple(tools),
-            prompt_version=(
-                f"{FULL_VIEW_SYSTEM_PROMPT_VERSION}+{prompt_snapshot.composite_version}"
-                if prompt_snapshot
-                else FULL_VIEW_SYSTEM_PROMPT_VERSION
+            prompt_version="+".join(
+                (
+                    RUNTIME_SAFETY_KERNEL_VERSION,
+                    *(
+                        (application_prompt.composite_version,)
+                        if application_prompt is not None
+                        else ()
+                    ),
+                    *(
+                        (agent_prompt.composite_version,)
+                        if agent_prompt is not None
+                        else ()
+                    ),
+                )
             ),
         )
 

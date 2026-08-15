@@ -197,7 +197,8 @@ async def test_model_planner_routes_city_population_community_max_deterministica
         description=(
             "population group_by=['district']；"
             "group_by=['descendant_street']；"
-            "group_by=['descendant_community']"
+            "group_by=['descendant_community']；"
+            "query_shapes=['population_descendant_community_top_table']"
         ),
         input_schema={"type": "object"},
         server_arguments={"catalog_version": "catalog-v1"},
@@ -239,11 +240,11 @@ async def test_model_planner_routes_city_population_community_max_deterministica
             "catalog_version": "catalog-v1",
             "spec": {
                 "subject": "population",
+                "operator": "top",
                 "metrics": ["person_count"],
                 "scope": {"area_code": "3301"},
                 "group_by": ["descendant_community"],
                 "filters": [],
-                "order_by": [{"field": "person_count", "direction": "desc"}],
                 "limit": 1,
                 "output": "table",
             },

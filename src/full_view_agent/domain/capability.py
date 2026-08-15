@@ -21,6 +21,15 @@ CapabilityStatus = Literal[
 ]
 RiskLevel = Literal["low", "medium", "high"]
 HttpMethod = Literal["GET", "POST"]
+SemanticOperator = Literal[
+    "list", "sum", "avg", "min", "max", "top", "bottom", "rank"
+]
+SemanticFilterOperator = Literal[
+    "eq", "ne", "in", "not_in", "gt", "gte", "lt", "lte", "between"
+]
+SemanticOutputForm = Literal[
+    "table", "metric_card", "bar", "line", "choropleth", "csv"
+]
 
 _VALID_TRANSITIONS: dict[CapabilityStatus, set[CapabilityStatus]] = {
     "draft": {"testing"},
@@ -86,6 +95,139 @@ class ConnectorRef(ContractModel):
     allowed_path_prefixes: list[str] = Field(default_factory=list)
 
 
+class ToolSemanticMetric(ContractModel):
+    metric_id: str = Field(min_length=1, max_length=64, pattern=r"^[a-z][a-z0-9_]*$")
+    label: str = Field(min_length=1, max_length=100)
+    unit: str | None = Field(default=None, max_length=32)
+    value_type: Literal["integer", "number"]
+
+
+class ToolSemanticDimension(ContractModel):
+    dimension_id: str = Field(
+        min_length=1, max_length=64, pattern=r"^[a-z][a-z0-9_]*$"
+    )
+    label: str = Field(min_length=1, max_length=100)
+    kind: Literal["category", "administrative_area", "time"]
+
+
+class ToolSemanticFilter(ContractModel):
+    field: str = Field(min_length=1, max_length=64, pattern=r"^[a-z][a-z0-9_]*$")
+    label: str = Field(min_length=1, max_length=100)
+    operators: tuple[SemanticFilterOperator, ...] = Field(min_length=1)
+    allowed_values: tuple[str | int | float | bool, ...] = ()
+
+
+class ToolSemanticSort(ContractModel):
+    allowed_fields: tuple[str, ...] = Field(min_length=1)
+    default_direction: Literal["asc", "desc"] = "desc"
+    tie_policy: Literal["include_all", "secondary_sort"]
+    tie_breakers: tuple[str, ...] = ()
+
+
+class ToolSemanticCompleteness(ContractModel):
+    mode: Literal["complete", "partial", "unknown"]
+    statement: str = Field(min_length=1, max_length=500)
+
+
+class ToolSemanticExample(ContractModel):
+    question: str = Field(min_length=1, max_length=500)
+    operator: SemanticOperator
+    metric: str = Field(min_length=1, max_length=64)
+    dimension: str | None = Field(default=None, max_length=64)
+
+
+class ToolSemanticQueryShape(ContractModel):
+    shape_id: str = Field(min_length=1, max_length=64, pattern=r"^[a-z][a-z0-9_]*$")
+    metric_selection: tuple[str, ...] = Field(min_length=1)
+    dimension_selection: tuple[str, ...]
+    operator_selection: tuple[SemanticOperator, ...] = Field(min_length=1)
+    scope_levels: tuple[Literal[4, 6, 9, 12, 15], ...] = Field(min_length=1)
+    allowed_filters: tuple[str, ...]
+    output_forms: tuple[SemanticOutputForm, ...] = Field(min_length=1)
+    completeness: ToolSemanticCompleteness
+    result_schema_ref: str = Field(min_length=1, max_length=300)
+    result_row_fields: tuple[str, ...] = Field(min_length=1)
+    result_fingerprint_domain: str = Field(min_length=1, max_length=300)
+
+    @model_validator(mode="after")
+    def require_exact_executable_shape(self) -> ToolSemanticQueryShape:
+        if len(self.operator_selection) != 1:
+            raise ValueError("semantic query shape must declare exactly one operator")
+        if len(self.output_forms) != 1:
+            raise ValueError("semantic query shape must declare exactly one output form")
+        if len(self.result_row_fields) != len(set(self.result_row_fields)):
+            raise ValueError("semantic query shape result fields must be unique")
+        return self
+
+
+class ToolSemanticContract(ContractModel):
+    """Version-owned analytical meaning exposed by one exact Tool version."""
+
+    schema_version: Literal["1.0"] = "1.0"
+    subject: str = Field(min_length=1, max_length=64, pattern=r"^[a-z][a-z0-9_]*$")
+    metrics: tuple[ToolSemanticMetric, ...] = Field(min_length=1)
+    dimensions: tuple[ToolSemanticDimension, ...]
+    filters: tuple[ToolSemanticFilter, ...]
+    operators: tuple[SemanticOperator, ...] = Field(min_length=1)
+    sort: ToolSemanticSort
+    completeness: ToolSemanticCompleteness
+    output_forms: tuple[SemanticOutputForm, ...] = Field(min_length=1)
+    examples: tuple[ToolSemanticExample, ...]
+    limitations: tuple[str, ...]
+    query_shapes: tuple[ToolSemanticQueryShape, ...] = Field(min_length=1)
+
+    @model_validator(mode="after")
+    def validate_references(self) -> ToolSemanticContract:
+        metric_ids = [metric.metric_id for metric in self.metrics]
+        dimension_ids = [dimension.dimension_id for dimension in self.dimensions]
+        filter_fields = [item.field for item in self.filters]
+        if len(metric_ids) != len(set(metric_ids)):
+            raise ValueError("semantic metric ids must be unique")
+        if len(dimension_ids) != len(set(dimension_ids)):
+            raise ValueError("semantic dimension ids must be unique")
+        if len(filter_fields) != len(set(filter_fields)):
+            raise ValueError("semantic filter fields must be unique")
+        if len(self.operators) != len(set(self.operators)):
+            raise ValueError("semantic operators must be unique")
+        known_sort_fields = set(metric_ids).union(dimension_ids)
+        for field in (*self.sort.allowed_fields, *self.sort.tie_breakers):
+            if field not in known_sort_fields:
+                raise ValueError(f"semantic sort field is not declared: {field}")
+        for example in self.examples:
+            if example.operator not in self.operators:
+                raise ValueError("semantic example operator is not supported")
+            if example.metric not in metric_ids:
+                raise ValueError("semantic example metric is not declared")
+            if example.dimension is not None and example.dimension not in dimension_ids:
+                raise ValueError("semantic example dimension is not declared")
+        if any(not item.strip() for item in self.limitations):
+            raise ValueError("semantic limitations must not contain blank values")
+        shape_ids = [shape.shape_id for shape in self.query_shapes]
+        if len(shape_ids) != len(set(shape_ids)):
+            raise ValueError("semantic query shape ids must be unique")
+        for shape in self.query_shapes:
+            if not set(shape.metric_selection).issubset(metric_ids):
+                raise ValueError("semantic query shape references an unknown metric")
+            if not set(shape.dimension_selection).issubset(dimension_ids):
+                raise ValueError("semantic query shape references an unknown dimension")
+            if not set(shape.operator_selection).issubset(self.operators):
+                raise ValueError("semantic query shape references an unknown operator")
+            if not set(shape.allowed_filters).issubset(filter_fields):
+                raise ValueError("semantic query shape references an unknown filter")
+            if not set(shape.output_forms).issubset(self.output_forms):
+                raise ValueError("semantic query shape references an unknown output")
+        for example in self.examples:
+            dimensions = (example.dimension,) if example.dimension is not None else ()
+            if not any(
+                shape.metric_selection == (example.metric,)
+                and shape.dimension_selection == dimensions
+                and example.operator in shape.operator_selection
+                for shape in self.query_shapes
+            ):
+                raise ValueError("semantic example does not match a declared query shape")
+        return self
+
+
 class ToolCapability(CapabilityBase):
     """Atomic read-only HTTP tool capability."""
 
@@ -107,6 +249,7 @@ class ToolCapability(CapabilityBase):
     cache_enabled: bool = True
     cache_ttl_seconds: int = Field(default=60, ge=0, le=86_400)
     credential_ref: str | None = Field(default=None, max_length=128)
+    semantic_contract: ToolSemanticContract | None = None
 
     @field_validator("resource_path")
     @classmethod

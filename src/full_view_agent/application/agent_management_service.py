@@ -15,6 +15,7 @@ from full_view_agent.application.session_run_service import new_id
 from full_view_agent.application.tool_registry import PRODUCTION_HTTP_TOOL_IDS
 from full_view_agent.domain.agent_definition import (
     AgentDefinition,
+    AgentExecutionPolicy,
     AgentModelPolicy,
     AgentModelVersionRef,
     AgentReleaseSnapshot,
@@ -271,6 +272,11 @@ class AgentManagementService:
             skill_refs=desired_skill_refs,
             workflow_refs=desired_workflow_refs,
             knowledge_base_refs=effective_knowledge_refs,
+            execution_policy=(
+                active.execution_policy
+                if active is not None
+                else AgentExecutionPolicy()
+            ),
         )
         existing = await self._repository.get_version(
             app_id, agent_id, version.version
@@ -608,6 +614,17 @@ class AgentManagementService:
                             ),
                         )
                     )
+                elif prompt.layer != "agent":
+                    issues.append(
+                        AgentValidationIssue(
+                            code="PROMPT_LAYER_INVALID",
+                            field="prompt_ref",
+                            message=(
+                                "Agent prompt_ref must reference an exact published "
+                                f"agent-layer prompt: {draft.prompt_ref}"
+                            ),
+                        )
+                    )
 
         for reference in draft.knowledge_base_refs:
             parsed = _try_split_ref(reference)
@@ -694,6 +711,7 @@ class AgentManagementService:
             skill_refs=draft.skill_refs,
             workflow_refs=draft.workflow_refs,
             knowledge_base_refs=draft.knowledge_base_refs,
+            execution_policy=draft.execution_policy,
             model_refs=tuple(model_refs),
             published_at=now,
             published_by=published_by,

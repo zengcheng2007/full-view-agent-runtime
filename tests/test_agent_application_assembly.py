@@ -751,10 +751,13 @@ async def test_release_validates_every_nonempty_versioned_resource_reference() -
         )
 
     class _PromptReader:
+        layer = "application"
+
         async def get_template(self, prompt_id: str, version: str):
             return PromptTemplate(
                 prompt_id=prompt_id,
                 app_id="full_information_view",
+                layer=self.layer,
                 name="全量信息视图提示词",
                 version=version,
                 content="只使用已授权能力回答。",
@@ -784,6 +787,14 @@ async def test_release_validates_every_nonempty_versioned_resource_reference() -
         prompt_reader=_PromptReader(),
         knowledge_reader=_KnowledgeReader(),
     )
+    wrong_layer = await checked.validate_version(
+        app_id=version.app_id,
+        agent_id=version.agent_id,
+        version=version.version,
+    )
+    assert {issue.code for issue in wrong_layer.issues} == {"PROMPT_LAYER_INVALID"}
+
+    _PromptReader.layer = "agent"
     valid = await checked.validate_version(
         app_id=version.app_id,
         agent_id=version.agent_id,

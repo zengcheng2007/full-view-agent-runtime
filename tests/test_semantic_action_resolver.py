@@ -23,7 +23,6 @@ from full_view_agent.domain.models import (
 from full_view_agent.semantic.action_resolver import (
     SEMANTIC_QUERY_TOOL_ID,
     SEMANTIC_QUERY_TOOL_VERSION,
-    DeniedSemanticAction,
     RejectedSemanticAction,
     ResolvedSemanticAction,
     SemanticActionResolver,
@@ -843,7 +842,7 @@ def test_resolver_rejects_spec_version_not_supported_by_catalog() -> None:
     assert "CATALOG_VERSION_INCOMPATIBLE" in resolution.codes
 
 
-def test_resolver_rejects_capability_version_drift_against_registry() -> None:
+def test_resolver_uses_run_registry_version_instead_of_legacy_catalog_version() -> None:
     catalog = SemanticCatalog.default()
     drifted_bindings = dict(catalog.bindings)
     binding = drifted_bindings["population"]
@@ -862,8 +861,8 @@ def test_resolver_rejects_capability_version_drift_against_registry() -> None:
         arguments, auth_context=population_auth_context()
     )
 
-    assert isinstance(resolution, DeniedSemanticAction)
-    assert "CAPABILITY_VERSION_MISMATCH" in resolution.codes
+    assert isinstance(resolution, ResolvedSemanticAction)
+    assert resolution.plan.steps[0].capability_version == "1.0.0"
 
 
 def test_resolver_denies_when_area_not_authorized_at_leaf_level() -> None:

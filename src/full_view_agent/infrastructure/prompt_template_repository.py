@@ -45,15 +45,16 @@ class PostgresPromptTemplateRepository:
             await conn.execute(
                 f"""
                 INSERT INTO {self._schema}.prompt_templates (
-                    prompt_id, app_id, name, version, content, status, etag,
+                    prompt_id, app_id, prompt_layer, name, version, content, status, etag,
                     created_by, updated_by, created_at, updated_at
                 ) VALUES (
-                    %(prompt_id)s, %(app_id)s, %(name)s, %(version)s, %(content)s,
+                    %(prompt_id)s, %(app_id)s, %(layer)s, %(name)s, %(version)s, %(content)s,
                     %(status)s, %(etag)s, %(created_by)s, %(updated_by)s,
                     %(created_at)s, %(updated_at)s
                 )
                 ON CONFLICT (prompt_id, version) DO UPDATE SET
-                    app_id=EXCLUDED.app_id, name=EXCLUDED.name,
+                    app_id=EXCLUDED.app_id, prompt_layer=EXCLUDED.prompt_layer,
+                    name=EXCLUDED.name,
                     content=EXCLUDED.content, status=EXCLUDED.status,
                     etag=EXCLUDED.etag, updated_by=EXCLUDED.updated_by,
                     updated_at=EXCLUDED.updated_at
@@ -81,7 +82,7 @@ class PostgresPromptTemplateRepository:
         async with await psycopg.AsyncConnection.connect(self._dsn) as conn:
             cursor = await conn.execute(
                 f"""
-                SELECT prompt_id, app_id, name, version, content, status, etag,
+                SELECT prompt_id, app_id, prompt_layer, name, version, content, status, etag,
                        created_by, updated_by, created_at, updated_at
                   FROM {self._schema}.prompt_templates {where}
                  ORDER BY app_id, prompt_id, version
@@ -91,9 +92,10 @@ class PostgresPromptTemplateRepository:
             rows = await cursor.fetchall()
         return [
             PromptTemplate(
-                prompt_id=row[0], app_id=row[1], name=row[2], version=row[3],
-                content=row[4], status=row[5], etag=row[6], created_by=row[7],
-                updated_by=row[8], created_at=row[9], updated_at=row[10],
+                prompt_id=row[0], app_id=row[1], layer=row[2], name=row[3],
+                version=row[4], content=row[5], status=row[6], etag=row[7],
+                created_by=row[8], updated_by=row[9], created_at=row[10],
+                updated_at=row[11],
             )
             for row in rows
         ]

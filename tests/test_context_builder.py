@@ -92,7 +92,12 @@ async def test_context_builder_uses_messages_and_only_authorized_tools() -> None
     assert [tool.tool_id for tool in request.tools] == [
         "governance.query_population_metrics"
     ]
-    assert request.prompt_version == "full-view-governance-readonly-v20"
+    assert request.prompt_version == "runtime-safety-kernel-v1"
+    system_prompt = request.messages[0].content or ""
+    assert system_prompt.index("[RUNTIME_SAFETY_KERNEL]") < system_prompt.index(
+        "[RUN_PUBLISHED_CAPABILITIES]"
+    )
+    assert "full_view.finish_answer" in system_prompt
     assert "full_view.finish_answer" in (request.messages[0].content or "")
     assert "每条事实必须绑定 result_id" in (request.messages[0].content or "")
     assert "需要业务数据时必须调用" in request.messages[0].content
@@ -101,7 +106,7 @@ async def test_context_builder_uses_messages_and_only_authorized_tools() -> None
     assert "只能使用 reference_only" in request.messages[0].content
     assert "可以直接基于这些结果排序" not in request.messages[0].content
     assert "solitary_elderly" in request.messages[0].content
-    assert "区县按街道" in request.messages[0].content
+    assert request.tools[0].description in request.messages[0].content
     assert "不代表任何业务指标为零" in request.messages[0].content
     assert request.tools[0].input_schema["type"] == "object"
     assert "query" in request.tools[0].input_schema["properties"]
@@ -178,11 +183,10 @@ async def test_context_builder_does_not_advertise_unimplemented_event_filters() 
     )
 
     prompt = request.messages[0].content
-    assert "事件总数月度趋势" in prompt
-    assert "time_range" in prompt
-    assert "不得表述为上报或处置趋势" in prompt
-    assert "不支持按阈值筛选" in prompt
-    assert "min_finish_rate" not in prompt
+    assert request.tools[0].description in prompt
+    event_schema = json.dumps(request.tools[0].input_schema, ensure_ascii=False)
+    assert "time_range" in event_schema
+    assert "min_finish_rate" not in event_schema
 
 
 @pytest.mark.asyncio
@@ -505,7 +509,10 @@ async def test_context_builder_keeps_unresolved_area_tool_for_refinement() -> No
     )
 
     assert "governance.resolve_area" in {tool.tool_id for tool in request.tools}
-    assert "resolve_area：" in request.messages[0].content
+    resolve_tool = next(
+        tool for tool in request.tools if tool.tool_id == "governance.resolve_area"
+    )
+    assert resolve_tool.description in request.messages[0].content
 
 
 @pytest.mark.asyncio

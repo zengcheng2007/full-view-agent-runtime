@@ -85,7 +85,7 @@ class SemanticCapabilityStack:
                 denial_recorder=denial_recorder,
             ),
             fingerprinter=SemanticToolCallFingerprinter(resolver=resolver),
-            presenter=SemanticToolPresenter(catalog=self.catalog),
+            presenter=SemanticToolPresenter(catalog=self.catalog, registry=registry),
             policy=self.policy,
             denial_ledger=self.denial_ledger,
         )
@@ -142,7 +142,9 @@ def build_semantic_capability_stack(
             denial_recorder=denial_recorder,
         ),
         fingerprinter=SemanticToolCallFingerprinter(resolver=resolver),
-        presenter=SemanticToolPresenter(catalog=effective_catalog),
+        presenter=SemanticToolPresenter(
+            catalog=effective_catalog, registry=registry
+        ),
         policy=effective_policy,
         denial_ledger=denial_ledger,
     )
