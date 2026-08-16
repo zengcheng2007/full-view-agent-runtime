@@ -2,13 +2,18 @@
 
 from __future__ import annotations
 
+import json
+import os
 from typing import Literal
+
+from pydantic import ValidationError
 
 from full_view_agent.application.model_provider import ModelInferenceOptions
 from full_view_agent.domain.agent_definition import AgentExecutionPolicy
 from full_view_agent.domain.capability import (
     ModelConfig,
     ModelConfigWithKey,
+    ModelReasoningCapability,
     ModelReasoningProfile,
 )
 
@@ -26,12 +31,27 @@ _DEEP_ANALYSIS_TERMS = (
 )
 
 
+def model_reasoning_capability_from_environment() -> ModelReasoningCapability:
+    """Load the environment-model reasoning contract without provider guessing."""
+
+    variable = "FULL_VIEW_MODEL_REASONING_CAPABILITY"
+    raw = os.getenv(variable, "").strip()
+    if not raw:
+        return ModelReasoningCapability()
+    try:
+        payload = json.loads(raw)
+        return ModelReasoningCapability.model_validate(payload)
+    except (json.JSONDecodeError, ValidationError, TypeError) as exc:
+        raise ValueError(f"{variable} must contain a valid reasoning capability") from exc
+
+
 def resolve_model_inference_options(
     *,
     requested_mode: InferenceMode | None,
     latest_user_text: str,
     execution_policy: AgentExecutionPolicy,
-    model_config: ModelConfig | ModelConfigWithKey,
+    model_config: ModelConfig | ModelConfigWithKey | None = None,
+    reasoning_capability: ModelReasoningCapability | None = None,
 ) -> ModelInferenceOptions:
     requested_mode = requested_mode or execution_policy.default_inference_mode
     if requested_mode not in execution_policy.allowed_inference_modes:
@@ -41,7 +61,13 @@ def resolve_model_inference_options(
         if requested_mode == "auto"
         else requested_mode
     )
-    capability = model_config.reasoning_capability
+    if model_config is not None and reasoning_capability is not None:
+        raise ValueError("provide model_config or reasoning_capability, not both")
+    capability = (
+        model_config.reasoning_capability
+        if model_config is not None
+        else reasoning_capability or ModelReasoningCapability()
+    )
     if selected == "fast":
         if capability.mode == "reasoning_only":
             raise ValueError("configured model does not support fast mode")

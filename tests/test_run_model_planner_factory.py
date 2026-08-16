@@ -25,7 +25,11 @@ from full_view_agent.domain.agent_definition import (
     AgentModelVersionRef,
     RunAgentReleaseSnapshot,
 )
-from full_view_agent.domain.capability import ModelConfigWithKey
+from full_view_agent.domain.capability import (
+    ModelConfigWithKey,
+    ModelReasoningCapability,
+    ModelReasoningProfile,
+)
 from full_view_agent.infrastructure.memory_store import InMemoryAgentStore
 
 
@@ -179,6 +183,69 @@ async def test_model_config_update_only_affects_subsequent_runs() -> None:
     assert run1._provider.model_name == "model-v1"  # type: ignore[attr-defined]
     assert resumed_run1._provider.model_name == "model-v1"  # type: ignore[attr-defined]
     assert run2._provider.model_name == "model-v2"  # type: ignore[attr-defined]
+
+
+@pytest.mark.asyncio
+async def test_environment_fallback_applies_explicit_reasoning_profile() -> None:
+    registry = ToolRegistry.default()
+    resolver = _MutableResolver(_config("unused", "unused"))
+    resolver.config = None  # type: ignore[assignment]
+    base = ModelPlannerFactory(
+        provider=_Provider("environment-model"),
+        context_builder=AgentContextBuilder(
+            store=InMemoryAgentStore(),
+            registry=registry,
+        ),
+    )
+    factory = RunBoundModelPlannerFactory(
+        base_factory=base,
+        config_resolver=resolver,
+        provider_builder=lambda config: _Provider(config.model_name),
+        fallback_reasoning_capability=ModelReasoningCapability(
+            mode="hybrid",
+            fast_profile=ModelReasoningProfile(enable_thinking=False),
+            deep_profile=ModelReasoningProfile(
+                enable_thinking=True,
+                reasoning_effort="high",
+            ),
+        ),
+    )
+
+    run_factory = await factory.for_run(
+        run_id="run-environment-deep",
+        registry=registry,
+        requested_mode="deep",
+    )
+    planner = run_factory.create(user_id="u", auth_context=_auth_context())
+
+    assert planner._inference_options.effective_mode == "deep"  # type: ignore[attr-defined]
+    assert planner._inference_options.enable_thinking is True  # type: ignore[attr-defined]
+
+
+@pytest.mark.asyncio
+async def test_environment_fallback_rejects_unconfigured_deep_mode() -> None:
+    registry = ToolRegistry.default()
+    resolver = _MutableResolver(_config("unused", "unused"))
+    resolver.config = None  # type: ignore[assignment]
+    base = ModelPlannerFactory(
+        provider=_Provider("environment-model"),
+        context_builder=AgentContextBuilder(
+            store=InMemoryAgentStore(),
+            registry=registry,
+        ),
+    )
+    factory = RunBoundModelPlannerFactory(
+        base_factory=base,
+        config_resolver=resolver,
+        provider_builder=lambda config: _Provider(config.model_name),
+    )
+
+    with pytest.raises(ValueError, match="does not support deep mode"):
+        await factory.for_run(
+            run_id="run-environment-unconfigured-deep",
+            registry=registry,
+            requested_mode="deep",
+        )
 
 
 async def test_agent_release_primary_model_overrides_global_default_for_new_run() -> None:

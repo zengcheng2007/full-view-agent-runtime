@@ -55,7 +55,10 @@ from full_view_agent.domain.analysis_intent import (
     AnalysisIntentV1,
     CurrentAreaScopeIntent,
 )
-from full_view_agent.domain.capability import ModelConfigWithKey
+from full_view_agent.domain.capability import (
+    ModelConfigWithKey,
+    ModelReasoningCapability,
+)
 from full_view_agent.domain.models import (
     AuthContext,
     HousingAreaGroupTable,
@@ -1482,6 +1485,7 @@ class RunBoundModelPlannerFactory:
         provider_builder: Callable[[ModelConfigWithKey], ModelProvider],
         config_repository: _RunModelBindingRepository | None = None,
         agent_release_repository: _RunAgentReleaseReader | None = None,
+        fallback_reasoning_capability: ModelReasoningCapability | None = None,
     ) -> None:
         from full_view_agent.application.model_config_repository import (
             InMemoryRunModelBindingRepository,
@@ -1497,6 +1501,9 @@ class RunBoundModelPlannerFactory:
             config_repository or InMemoryRunModelBindingRepository()
         )
         self._agent_release_repository = agent_release_repository
+        self._fallback_reasoning_capability = (
+            fallback_reasoning_capability or ModelReasoningCapability()
+        )
         self._bindings: dict[str, ModelPlannerFactory] = {}
 
     def create(self, *, user_id: str, auth_context: AuthContext) -> Planner:
@@ -1705,6 +1712,17 @@ class RunBoundModelPlannerFactory:
                     latest_user_text=latest_user_text,
                     execution_policy=execution_policy or AgentExecutionPolicy(),
                     model_config=config,
+                )
+            )
+        else:
+            from full_view_agent.domain.agent_definition import AgentExecutionPolicy
+
+            factory = factory.for_inference_options(
+                resolve_model_inference_options(
+                    requested_mode=requested_mode,  # type: ignore[arg-type]
+                    latest_user_text=latest_user_text,
+                    execution_policy=execution_policy or AgentExecutionPolicy(),
+                    reasoning_capability=self._fallback_reasoning_capability,
                 )
             )
         bound = factory.for_registry(registry)

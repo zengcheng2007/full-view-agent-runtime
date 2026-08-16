@@ -6,6 +6,7 @@ import httpx
 import pytest
 
 from full_view_agent.application.model_inference_policy import (
+    model_reasoning_capability_from_environment,
     resolve_model_inference_options,
 )
 from full_view_agent.application.model_planner import (
@@ -204,6 +205,29 @@ def test_reasoning_only_model_rejects_fast_mode() -> None:
             execution_policy=AgentExecutionPolicy(),
             model_config=config,
         )
+
+
+def test_environment_reasoning_capability_is_explicit_and_typed(monkeypatch) -> None:
+    monkeypatch.setenv(
+        "FULL_VIEW_MODEL_REASONING_CAPABILITY",
+        '{"mode":"hybrid","fast_profile":{"enable_thinking":false},'
+        '"deep_profile":{"enable_thinking":true,"reasoning_effort":"high"}}',
+    )
+
+    capability = model_reasoning_capability_from_environment()
+
+    assert capability.mode == "hybrid"
+    assert capability.fast_profile is not None
+    assert capability.fast_profile.enable_thinking is False
+    assert capability.deep_profile is not None
+    assert capability.deep_profile.reasoning_effort == "high"
+
+
+def test_environment_reasoning_capability_rejects_invalid_json(monkeypatch) -> None:
+    monkeypatch.setenv("FULL_VIEW_MODEL_REASONING_CAPABILITY", "not-json")
+
+    with pytest.raises(ValueError, match="FULL_VIEW_MODEL_REASONING_CAPABILITY"):
+        model_reasoning_capability_from_environment()
 
 
 @pytest.mark.asyncio

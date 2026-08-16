@@ -111,6 +111,9 @@ from full_view_agent.application.model_config_service import (
     InMemoryModelConfigKeyStore,
     ModelConfigService,
 )
+from full_view_agent.application.model_inference_policy import (
+    model_reasoning_capability_from_environment,
+)
 from full_view_agent.application.model_planner import (
     ModelPlannerFactory,
     RunBoundModelPlannerFactory,
@@ -1027,6 +1030,9 @@ class RuntimeContainer:
                 ),
                 config_repository=self.run_model_binding_repository,
                 agent_release_repository=self.agent_repository,
+                fallback_reasoning_capability=(
+                    model_reasoning_capability_from_environment()
+                ),
             )
         self.executor: OrchestrationPort = create_orchestrator(
             service=self.service,

@@ -41,6 +41,9 @@ from full_view_agent.application.dynamic_tool_bridge import (
 )
 from full_view_agent.application.errors import ResourceNotFound, RunStateConflict
 from full_view_agent.application.model_config_service import ModelConfigService
+from full_view_agent.application.model_inference_policy import (
+    model_reasoning_capability_from_environment,
+)
 from full_view_agent.application.runtime_skill_registry import RuntimeSkillRegistry
 from full_view_agent.application.runtime_workflow_registry import RuntimeWorkflowRegistry
 from full_view_agent.application.session_run_service import new_id
@@ -1652,7 +1655,7 @@ def create_capability_router(
                 ),
                 max_output_tokens=_environment_model_max_output_tokens(),
                 max_retries=int(os.getenv("FULL_VIEW_MODEL_MAX_RETRIES", "1")),
-                reasoning_capability=ModelReasoningCapability(),
+                reasoning_capability=model_reasoning_capability_from_environment(),
             ),
             meta=_meta(),
         )
@@ -1684,6 +1687,7 @@ def create_capability_router(
             timeout_seconds=int(os.getenv("FULL_VIEW_MODEL_TIMEOUT_SECONDS", "60")),
             max_output_tokens=_environment_model_max_output_tokens(),
             max_retries=int(os.getenv("FULL_VIEW_MODEL_MAX_RETRIES", "1")),
+            reasoning_capability=model_reasoning_capability_from_environment(),
             notes=body.notes,
             created_by=user.user_id,
         )
