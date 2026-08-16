@@ -109,7 +109,12 @@ async def test_model_planner_persists_only_redacted_request_and_response_metadat
         "finish_reason": "tool_calls",
         "selected_tool_ids": [FINISH_TOOL_ID],
         "content_present": True,
-        "usage": {"prompt_tokens": 10, "completion_tokens": 4, "total_tokens": 14},
+        "usage": {
+            "prompt_tokens": 10,
+            "completion_tokens": 4,
+            "total_tokens": 14,
+            "reasoning_tokens": 0,
+        },
     }
     serialized = json.dumps(events.records, ensure_ascii=False)
     for forbidden in (

@@ -467,12 +467,23 @@ async def test_runtime_timeline_normalizes_references_and_strips_sensitive_paylo
         "workflow",
     }
     model_bound = next(item for item in data["items"] if item["event_type"] == "model.bound")
+    assert model_bound["stage"] == "setup"
+    assert model_bound["detail_level"] == "technical"
     assert model_bound["model_ref"] == {
         "config_id": "model-primary",
         "config_version": 3,
         "model_name": "safe-model-name",
     }
     failed = next(item for item in data["items"] if item["event_type"] == "tool.failed")
+    requested = next(
+        item for item in data["items"] if item["event_type"] == "model.requested"
+    )
+    assert requested["stage"] == "reasoning"
+    assert requested["display_label"] == "第 1 轮模型分析"
+    assert requested["detail_level"] == "summary"
+    assert failed["stage"] == "execution"
+    assert failed["display_label"] == "执行业务能力"
+    assert failed["display_summary"] == "业务能力执行失败。"
     assert failed["stable_error_code"] == "upstream_timeout"
     assert failed["capability_ref"] == {
         "capability_id": "governance.query_population_metrics",

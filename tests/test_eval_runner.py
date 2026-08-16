@@ -739,12 +739,12 @@ async def test_housing_fault_gate_fails_once_before_business_adapter(
 
 
 @pytest.mark.asyncio
-async def test_eval_runner_rejects_forbidden_claim_in_final_answer() -> None:
+async def test_eval_runner_suppresses_forbidden_claim_before_final_answer() -> None:
     case = EvalCase.model_validate(
         {
-            "case_id": "area-empty-no-zero-claim",
-            "description": "空区划不能被解释为人口数量为零",
-            "user_message": "查询不存在区域的独居老人数量",
+            "case_id": "resolved-area-no-zero-claim",
+            "description": "已解析区划也不能凭空解释为人口数量为零",
+            "user_message": "查询西湖区独居老人数量",
             "auth": {
                 "area_codes": ["330106"],
                 "datasets": ["administrative_area"],
@@ -754,17 +754,17 @@ async def test_eval_runner_rejects_forbidden_claim_in_final_answer() -> None:
                 {
                     "type": "tool_call",
                     "tool_id": "governance.resolve_area",
-                    "arguments": {"query": "不存在区域"},
+                    "arguments": {"query": "西湖区"},
                 },
                 {
                     "type": "finish",
-                    "content": "未找到这个区划，因此独居老人数量 = 0。",
+                    "content": "西湖区独居老人数量 = 0。",
                 },
             ],
             "expected": {
-                "terminal_status": "completed",
-                "outcome": "success",
-                "completion_reason_code": "goal_completed",
+                "terminal_status": "failed",
+                "outcome": "failed",
+                "completion_reason_code": "model_contract_error",
                 "tool_ids": ["governance.resolve_area"],
                 "min_evidence_count": 1,
                 "forbidden_answer_substrings": ["因此独居老人数量 = 0"],
@@ -774,9 +774,12 @@ async def test_eval_runner_rejects_forbidden_claim_in_final_answer() -> None:
 
     trace = await EvalRunner().run(case)
 
-    assert trace.passed is False
-    failed = [grade for grade in trace.grades if not grade.passed]
-    assert [grade.name for grade in failed] == ["forbidden_answer_substrings"]
+    assert trace.passed is True
+    forbidden = next(
+        grade for grade in trace.grades if grade.name == "forbidden_answer_substrings"
+    )
+    assert forbidden.passed is True
+    assert forbidden.actual == []
 
 
 @pytest.mark.asyncio

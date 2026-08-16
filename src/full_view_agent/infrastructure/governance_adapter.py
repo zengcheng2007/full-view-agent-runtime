@@ -90,6 +90,13 @@ class InMemoryGovernanceAdapter:
     def __init__(self) -> None:
         self._areas = [
             AreaCandidate(
+                area_code="3301",
+                area_name="杭州市",
+                level="city",
+                parent_area_code=None,
+                bounds=(118.35, 29.18, 120.72, 30.58),
+            ),
+            AreaCandidate(
                 area_code="330106",
                 area_name="西湖区",
                 level="district",
@@ -176,10 +183,11 @@ class InMemoryGovernanceAdapter:
         policy_decision: PolicyDecision,
     ) -> AreaCandidatesResult:
         allowed_area_codes = policy_decision.effective_scope.area_codes
+        normalized_query = arguments.query.replace("杭州全市", "杭州市")
         candidates = [
             area
             for area in self._areas
-            if arguments.query in area.area_name
+            if normalized_query in area.area_name
             and _area_in_scope(area.area_code, allowed_area_codes)
             and (
                 arguments.parent_area_code is None
@@ -2876,7 +2884,11 @@ def _population_result(
             )
             previous_value = person_count
             previous_rank = rank
-        data = PopulationRankingTable(rows=ranked_rows)
+        data = PopulationRankingTable(
+            rows=ranked_rows,
+            candidate_count=len(parsed_rows),
+            tie_policy="include_all",
+        )
         schema_ref = "schema://data/population-ranking-table/1.0.0"
         domain = "data-result:population-ranking-table:1.0.0"
     else:

@@ -306,9 +306,26 @@ class NativeOrchestrator(OrchestrationPort):
                 )
         bind_planner_for_run = getattr(self._planner_factory, "for_run", None)
         if callable(bind_planner_for_run):
+            run_messages = await self._store.list_messages(
+                user_id=user_id,
+                session_id=current.session_id,
+            )
+            latest_user_text = next(
+                (
+                    item.text
+                    for message in run_messages
+                    if message.message_id == current.input_message_id
+                    for item in message.content
+                    if isinstance(item, TextContent)
+                ),
+                "",
+            )
             run_binding = bind_planner_for_run(
                 run_id=run_id,
                 registry=effective_registry,
+                requested_mode=current.inference_mode,
+                latest_user_text=latest_user_text,
+                execution_policy=run_execution_policy or AgentExecutionPolicy(),
             )
             if inspect.isawaitable(run_binding):
                 run_binding = await cast(

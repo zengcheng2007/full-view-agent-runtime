@@ -49,6 +49,8 @@ from full_view_agent.domain.application import AgentApplicationDefinition
 from full_view_agent.domain.capability import (
     CapabilityStatus,
     Connector,
+    ModelConfigMasked,
+    ModelReasoningCapability,
     SkillCapability,
     ToolCapability,
     ToolSemanticContract,
@@ -310,6 +312,9 @@ class ModelConfigCreateBody(ContractModel):
     timeout_seconds: int = Field(default=60, ge=5, le=600)
     max_output_tokens: int = Field(default=32000, ge=100, le=128000)
     max_retries: int = Field(default=1, ge=0, le=5)
+    reasoning_capability: ModelReasoningCapability = Field(
+        default_factory=ModelReasoningCapability
+    )
     notes: str = ""
 
 
@@ -322,6 +327,7 @@ class ModelConfigUpdateBody(ContractModel):
     timeout_seconds: int | None = Field(default=None, ge=5, le=600)
     max_output_tokens: int | None = Field(default=None, ge=100, le=128000)
     max_retries: int | None = Field(default=None, ge=0, le=5)
+    reasoning_capability: ModelReasoningCapability | None = None
     notes: str | None = None
 
 
@@ -489,12 +495,30 @@ class ConnectorListResponse(ContractModel):
 
 
 class ModelConfigResponse(ContractModel):
-    data: dict[str, object]
+    data: ModelConfigMasked
     meta: ResponseMeta
 
 
 class ModelConfigListResponse(ContractModel):
-    data: list[dict[str, object]]
+    data: list[ModelConfigMasked]
+    meta: ResponseMeta
+
+
+class EffectiveModelConfigData(ContractModel):
+    source: Literal["database", "environment"]
+    config_id: str | None
+    name: str
+    api_base_url: str
+    model_name: str
+    protocol: str
+    timeout_seconds: int
+    max_output_tokens: int
+    max_retries: int
+    reasoning_capability: ModelReasoningCapability
+
+
+class EffectiveModelConfigResponse(ContractModel):
+    data: EffectiveModelConfigData
     meta: ResponseMeta
 
 
@@ -1566,7 +1590,7 @@ def create_capability_router(
         _require(user, ControlPlanePermission.MODEL_MANAGE)
         configs = await model_config_service.list_configs()
         return ModelConfigListResponse(
-            data=[c.model_dump(mode="json") for c in configs],
+            data=configs,
             meta=_meta(),
         )
 
@@ -1585,52 +1609,51 @@ def create_capability_router(
             timeout_seconds=body.timeout_seconds,
             max_output_tokens=body.max_output_tokens,
             max_retries=body.max_retries,
+            reasoning_capability=body.reasoning_capability,
             notes=body.notes,
             created_by=user.user_id,
         )
-        return ModelConfigResponse(data=config.model_dump(mode="json"), meta=_meta())
+        return ModelConfigResponse(data=config, meta=_meta())
 
     @router.get("/model-configs/effective")
     async def get_effective_model_config(
         user: Annotated[CurrentUser, Depends(require_capability_identity)],
-    ) -> ModelConfigResponse:
+    ) -> EffectiveModelConfigResponse:
         """Return the model actually selected for new runs, without secrets."""
         _require(user, ControlPlanePermission.MODEL_MANAGE)
         configs = await model_config_service.list_configs()
         enabled = next((config for config in configs if config.is_enabled), None)
         if enabled is not None:
-            return ModelConfigResponse(
-                data={
-                    "source": "database",
-                    "config_id": enabled.config_id,
-                    "name": enabled.name,
-                    "api_base_url": enabled.api_base_url,
-                    "model_name": enabled.model_name,
-                    "protocol": enabled.protocol,
-                    "timeout_seconds": enabled.timeout_seconds,
-                    "max_output_tokens": enabled.max_output_tokens,
-                    "max_retries": enabled.max_retries,
-                },
+            return EffectiveModelConfigResponse(
+                data=EffectiveModelConfigData(
+                    source="database",
+                    config_id=enabled.config_id,
+                    name=enabled.name,
+                    api_base_url=enabled.api_base_url,
+                    model_name=enabled.model_name,
+                    protocol=enabled.protocol,
+                    timeout_seconds=enabled.timeout_seconds,
+                    max_output_tokens=enabled.max_output_tokens,
+                    max_retries=enabled.max_retries,
+                    reasoning_capability=enabled.reasoning_capability,
+                ),
                 meta=_meta(),
             )
-        return ModelConfigResponse(
-            data={
-                "source": "environment",
-                "config_id": None,
-                "name": "环境变量配置",
-                "api_base_url": os.getenv("FULL_VIEW_MODEL_BASE_URL", ""),
-                "model_name": os.getenv("FULL_VIEW_MODEL_NAME", ""),
-                "protocol": os.getenv(
-                    "FULL_VIEW_MODEL_PROVIDER", "deterministic"
-                ),
-                "timeout_seconds": int(
+        return EffectiveModelConfigResponse(
+            data=EffectiveModelConfigData(
+                source="environment",
+                config_id=None,
+                name="环境变量配置",
+                api_base_url=os.getenv("FULL_VIEW_MODEL_BASE_URL", ""),
+                model_name=os.getenv("FULL_VIEW_MODEL_NAME", ""),
+                protocol=os.getenv("FULL_VIEW_MODEL_PROVIDER", "deterministic"),
+                timeout_seconds=int(
                     os.getenv("FULL_VIEW_MODEL_TIMEOUT_SECONDS", "60")
                 ),
-                "max_output_tokens": _environment_model_max_output_tokens(),
-                "max_retries": int(
-                    os.getenv("FULL_VIEW_MODEL_MAX_RETRIES", "1")
-                ),
-            },
+                max_output_tokens=_environment_model_max_output_tokens(),
+                max_retries=int(os.getenv("FULL_VIEW_MODEL_MAX_RETRIES", "1")),
+                reasoning_capability=ModelReasoningCapability(),
+            ),
             meta=_meta(),
         )
 
@@ -1666,7 +1689,7 @@ def create_capability_router(
         )
         await model_config_service.enable_config(config_id=config.config_id)
         enabled = await model_config_service.get_config(config.config_id)
-        return ModelConfigResponse(data=enabled.model_dump(mode="json"), meta=_meta())
+        return ModelConfigResponse(data=enabled, meta=_meta())
 
     @router.get("/model-configs/{config_id}")
     async def get_model_config(
@@ -1675,7 +1698,7 @@ def create_capability_router(
     ) -> ModelConfigResponse:
         _require(user, ControlPlanePermission.MODEL_MANAGE)
         config = await model_config_service.get_config(config_id)
-        return ModelConfigResponse(data=config.model_dump(mode="json"), meta=_meta())
+        return ModelConfigResponse(data=config, meta=_meta())
 
     @router.patch("/model-configs/{config_id}")
     async def update_model_config(
@@ -1695,9 +1718,10 @@ def create_capability_router(
             timeout_seconds=body.timeout_seconds,
             max_output_tokens=body.max_output_tokens,
             max_retries=body.max_retries,
+            reasoning_capability=body.reasoning_capability,
             notes=body.notes,
         )
-        return ModelConfigResponse(data=config.model_dump(mode="json"), meta=_meta())
+        return ModelConfigResponse(data=config, meta=_meta())
 
     @router.post("/model-configs/{config_id}/enable")
     async def enable_model_config(

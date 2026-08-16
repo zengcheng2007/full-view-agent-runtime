@@ -111,6 +111,7 @@ class SessionRunService:
             client_capabilities=request.client,
             status="queued",
             mode=request.mode,
+            inference_mode=request.inference_mode,
             workflow_ref=request.workflow_ref,
             input_message_id=message_id,
             base_context_version=1,

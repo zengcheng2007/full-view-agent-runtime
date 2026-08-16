@@ -62,8 +62,15 @@ class _PopulationPlannerFactory:
         self.bound_run_id: str | None = None
 
     async def for_run(
-        self, *, run_id: str, registry: ToolRegistry
+        self,
+        *,
+        run_id: str,
+        registry: ToolRegistry,
+        requested_mode: object = None,
+        latest_user_text: str = "",
+        execution_policy: object = None,
     ) -> _PopulationPlannerFactory:
+        del requested_mode, latest_user_text, execution_policy
         self.bound_run_id = run_id
         self.bound_registry = registry
         return self

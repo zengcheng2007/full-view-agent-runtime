@@ -51,6 +51,11 @@ class OpenAICompatibleModelProvider:
         }
         if request.max_output_tokens is not None:
             payload["max_tokens"] = request.max_output_tokens
+        if request.inference is not None:
+            if request.inference.enable_thinking is not None:
+                payload["enable_thinking"] = request.inference.enable_thinking
+            if request.inference.reasoning_effort is not None:
+                payload["reasoning_effort"] = request.inference.reasoning_effort
         if request.tools:
             payload.update(
                 {
@@ -173,6 +178,12 @@ def _parse_response(
         prompt_tokens = usage.get("prompt_tokens")
         completion_tokens = usage.get("completion_tokens")
         total_tokens = usage.get("total_tokens")
+        completion_details = usage.get("completion_tokens_details", {})
+        reasoning_tokens = (
+            completion_details.get("reasoning_tokens", 0)
+            if isinstance(completion_details, dict)
+            else 0
+        )
         if (
             not isinstance(prompt_tokens, int)
             or not isinstance(completion_tokens, int)
@@ -180,6 +191,8 @@ def _parse_response(
             or prompt_tokens < 0
             or completion_tokens < 0
             or total_tokens <= 0
+            or not isinstance(reasoning_tokens, int)
+            or reasoning_tokens < 0
         ):
             raise ModelContractError("model response omitted valid token usage")
         return ModelResponse(
@@ -190,6 +203,7 @@ def _parse_response(
                 prompt_tokens=prompt_tokens,
                 completion_tokens=completion_tokens,
                 total_tokens=total_tokens,
+                reasoning_tokens=reasoning_tokens,
             ),
         )
     except ModelContractError:

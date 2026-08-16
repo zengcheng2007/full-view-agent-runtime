@@ -536,9 +536,25 @@ def _table_presentation(
         total = sum(row.person_count for row in result.data.rows)
         solitary = _population_category(action) == "solitary_elderly"
         metric_label = "独居老人数量" if solitary else "人口数量"
+        summary = f"共 {result.row_count} 个区划，{metric_label}合计 {total} 人。"
+        if isinstance(result.data, PopulationRankingTable):
+            operator = _population_operator(action)
+            direction = {"top": "最高", "bottom": "最低", "rank": "排名"}.get(
+                operator, "排名"
+            )
+            candidate_count = result.data.candidate_count
+            compared = (
+                f"已比较 {candidate_count} 个区划"
+                if candidate_count is not None
+                else "已完成区划比较"
+            )
+            summary = (
+                f"{compared}，返回 {result.row_count} 个{direction}结果；"
+                "同值并列时全部返回。"
+            )
         return ResultPresentation(
             title="独居老人分布" if solitary else "人口分布",
-            summary=f"共 {result.row_count} 个区划，{metric_label}合计 {total} 人。",
+            summary=summary,
             status_label="查询完成",
             fields=[
                 *(
@@ -1095,3 +1111,11 @@ def _population_category(action: ToolAction) -> str:
             ):
                 return "solitary_elderly"
     return "general"
+
+
+def _population_operator(action: ToolAction) -> str:
+    for key in ("query", "spec"):
+        container = action.arguments.get(key)
+        if isinstance(container, dict) and isinstance(container.get("operator"), str):
+            return str(container["operator"])
+    return "list"

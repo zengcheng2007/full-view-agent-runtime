@@ -366,6 +366,11 @@ class TestCapabilityCenterPermissions:
             "timeout_seconds": 60,
             "max_output_tokens": 128000,
             "max_retries": 1,
+            "reasoning_capability": {
+                "mode": "unsupported",
+                "fast_profile": None,
+                "deep_profile": None,
+            },
         }
 
     @pytest.mark.asyncio

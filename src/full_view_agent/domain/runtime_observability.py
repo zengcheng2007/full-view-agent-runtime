@@ -106,6 +106,10 @@ class RuntimeTimelineItem(ContractModel):
         "run",
     ]
     event_type: str
+    stage: Literal["setup", "reasoning", "execution", "output", "terminal"]
+    detail_level: Literal["summary", "technical"]
+    display_label: str = Field(min_length=1, max_length=120)
+    display_summary: str = Field(min_length=1, max_length=500)
     status: str | None = None
     duration_ms: int | None = Field(default=None, ge=0)
     stable_error_code: str | None = None

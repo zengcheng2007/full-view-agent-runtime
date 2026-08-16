@@ -35,7 +35,11 @@ from full_view_agent.application.model_config_repository import (
 from full_view_agent.application.model_config_repository import (
     RunModelBindingRepository as _RunModelBindingRepository,
 )
+from full_view_agent.application.model_inference_policy import (
+    resolve_model_inference_options,
+)
 from full_view_agent.application.model_provider import (
+    ModelInferenceOptions,
     ModelProvider,
     ModelRequest,
     ModelToolDefinition,
@@ -91,6 +95,7 @@ class ModelPlanner:
         initial_total_tokens: int = 0,
         allow_legacy_finish: bool = False,
         event_publisher: EventPublisher | None = None,
+        inference_options: ModelInferenceOptions | None = None,
     ) -> None:
         if max_total_tokens <= 0:
             raise ValueError("max_total_tokens must be positive")
@@ -107,6 +112,7 @@ class ModelPlanner:
         self._total_tokens = initial_total_tokens
         self._allow_legacy_finish = allow_legacy_finish
         self._event_publisher = event_publisher
+        self._inference_options = inference_options
 
     @property
     def total_tokens(self) -> int:
@@ -144,10 +150,14 @@ class ModelPlanner:
             )
         if deterministic_finish is not None:
             return deterministic_finish
+        area_resolution_stop = _failed_area_resolution_stop(state=state)
+        if area_resolution_stop is not None:
+            return area_resolution_stop
         deterministic_followup = _supported_housing_stock_followup(
             request=request,
             state=state,
         )
+        request = replace(request, inference=self._inference_options)
         if deterministic_followup is None:
             deterministic_followup = _contract_semantic_followup(
                 request=request,
@@ -376,6 +386,15 @@ def _redacted_model_request_trace(
         "tool_ids": [tool.tool_id for tool in request.tools],
         "tool_descriptor_fingerprint": f"sha256:{hashlib.sha256(canonical).hexdigest()}",
     }
+    if request.inference is not None:
+        data.update(
+            {
+                "requested_inference_mode": request.inference.requested_mode,
+                "effective_inference_mode": request.inference.effective_mode,
+                "thinking_enabled": request.inference.enable_thinking,
+                "reasoning_effort": request.inference.reasoning_effort,
+            }
+        )
     if catalog_version is not None:
         data["catalog_version"] = catalog_version
     if catalog_fingerprint is not None:
@@ -401,6 +420,7 @@ def _redacted_model_response_trace(
             "prompt_tokens": response.usage.prompt_tokens,
             "completion_tokens": response.usage.completion_tokens,
             "total_tokens": response.usage.total_tokens,
+            "reasoning_tokens": response.usage.reasoning_tokens,
         },
     }
 
@@ -665,6 +685,35 @@ def _contract_result_finish(*, state: HarnessState) -> FinishAction | None:
         summary=structured.summary,
         structured_finish=structured,
         legacy=False,
+        server_authored=True,
+    )
+
+
+def _failed_area_resolution_stop(*, state: HarnessState) -> FinishAction | None:
+    """Do not let a model guess an area code after authoritative resolution failed."""
+
+    area_results = [
+        result
+        for result in state.tool_results
+        if result.tool_id == "governance.resolve_area"
+    ]
+    if not area_results:
+        return None
+    latest = area_results[-1]
+    area_data = getattr(getattr(latest, "data_result", None), "data", None)
+    resolved_area_code = getattr(area_data, "resolved_area_code", None)
+    if latest.status in {"success", "partial"} and isinstance(
+        resolved_area_code, str
+    ):
+        return None
+    summary = latest.summary.strip() if latest.summary.strip() else "未能确认查询区划。"
+    return FinishAction(
+        summary=(
+            f"{summary} 当前未找到可查询的授权区划，"
+            "这不代表任何业务指标为零。"
+            " 请补充明确的区划名称后重试。"
+        ),
+        legacy=True,
         server_authored=True,
     )
 
@@ -1186,6 +1235,7 @@ class ModelPlannerFactory:
         initial_total_tokens: int = 0,
         allow_legacy_finish: bool = False,
         event_publisher: EventPublisher | None = None,
+        inference_options: ModelInferenceOptions | None = None,
     ) -> None:
         self._provider = provider
         self._context_builder = context_builder
@@ -1194,6 +1244,7 @@ class ModelPlannerFactory:
         self._initial_total_tokens = initial_total_tokens
         self._allow_legacy_finish = allow_legacy_finish
         self._event_publisher = event_publisher
+        self._inference_options = inference_options
 
     def for_registry(self, registry: ToolRegistry) -> "ModelPlannerFactory":
         """Bind every planner created for a Run to its immutable tool surface."""
@@ -1206,6 +1257,7 @@ class ModelPlannerFactory:
             initial_total_tokens=self._initial_total_tokens,
             allow_legacy_finish=self._allow_legacy_finish,
             event_publisher=self._event_publisher,
+            inference_options=self._inference_options,
         )
 
     def for_skill_registry(
@@ -1222,6 +1274,7 @@ class ModelPlannerFactory:
             initial_total_tokens=self._initial_total_tokens,
             allow_legacy_finish=self._allow_legacy_finish,
             event_publisher=self._event_publisher,
+            inference_options=self._inference_options,
         )
 
     def with_provider(
@@ -1238,6 +1291,7 @@ class ModelPlannerFactory:
             initial_total_tokens=self._initial_total_tokens,
             allow_legacy_finish=self._allow_legacy_finish,
             event_publisher=self._event_publisher,
+            inference_options=self._inference_options,
         )
 
     def for_prompt_snapshot(
@@ -1254,6 +1308,7 @@ class ModelPlannerFactory:
             initial_total_tokens=self._initial_total_tokens,
             allow_legacy_finish=self._allow_legacy_finish,
             event_publisher=self._event_publisher,
+            inference_options=self._inference_options,
         )
 
     def for_prompt_bundle(
@@ -1277,6 +1332,21 @@ class ModelPlannerFactory:
             initial_total_tokens=self._initial_total_tokens,
             allow_legacy_finish=self._allow_legacy_finish,
             event_publisher=self._event_publisher,
+            inference_options=self._inference_options,
+        )
+
+    def for_inference_options(
+        self, inference_options: ModelInferenceOptions
+    ) -> "ModelPlannerFactory":
+        return ModelPlannerFactory(
+            provider=self._provider,
+            context_builder=self._context_builder,
+            max_total_tokens=self._max_total_tokens,
+            max_output_tokens=self._max_output_tokens,
+            initial_total_tokens=self._initial_total_tokens,
+            allow_legacy_finish=self._allow_legacy_finish,
+            event_publisher=self._event_publisher,
+            inference_options=inference_options,
         )
 
     def create(self, *, user_id: str, auth_context: AuthContext) -> Planner:
@@ -1290,6 +1360,7 @@ class ModelPlannerFactory:
             initial_total_tokens=self._initial_total_tokens,
             allow_legacy_finish=self._allow_legacy_finish,
             event_publisher=self._event_publisher,
+            inference_options=self._inference_options,
         )
 
 
@@ -1446,6 +1517,9 @@ class RunBoundModelPlannerFactory:
         *,
         run_id: str,
         registry: ToolRegistry,
+        requested_mode: str = "auto",
+        latest_user_text: str = "",
+        execution_policy=None,
     ) -> ModelPlannerFactory:
         # In-memory cache: survives within-process resume but not restart.
         existing = self._bindings.get(run_id)
@@ -1622,6 +1696,16 @@ class RunBoundModelPlannerFactory:
             factory = factory.with_provider(
                 provider,
                 max_output_tokens=config.max_output_tokens,
+            )
+            from full_view_agent.domain.agent_definition import AgentExecutionPolicy
+
+            factory = factory.for_inference_options(
+                resolve_model_inference_options(
+                    requested_mode=requested_mode,  # type: ignore[arg-type]
+                    latest_user_text=latest_user_text,
+                    execution_policy=execution_policy or AgentExecutionPolicy(),
+                    model_config=config,
+                )
             )
         bound = factory.for_registry(registry)
         self._bindings[run_id] = bound

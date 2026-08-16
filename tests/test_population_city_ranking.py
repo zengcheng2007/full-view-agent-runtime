@@ -298,6 +298,8 @@ async def test_city_street_semantic_operations_use_complete_http_row_set(
     if expected_average is None:
         assert isinstance(result.data, models.PopulationRankingTable)
         assert [row.area_name for row in result.data.rows] == expected_names
+        assert result.data.candidate_count == 3
+        assert result.data.tie_policy == "include_all"
         assert result.truncated is False
     else:
         assert isinstance(result.data, models.PopulationAggregateTable)

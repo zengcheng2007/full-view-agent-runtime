@@ -6,7 +6,7 @@ import re
 from datetime import UTC, datetime
 from typing import Literal
 
-from pydantic import Field, field_validator
+from pydantic import Field, field_validator, model_validator
 
 from full_view_agent.domain.contract_model import ContractModel
 
@@ -41,6 +41,22 @@ class AgentExecutionPolicy(ContractModel):
     max_no_progress: int = Field(default=3, ge=1, le=16)
     max_elapsed_seconds: float = Field(default=120.0, gt=0, le=3600)
     repeated_call_limit: int = Field(default=2, ge=1, le=8)
+    default_inference_mode: Literal["fast", "auto", "deep"] = "auto"
+    allowed_inference_modes: tuple[Literal["fast", "auto", "deep"], ...] = (
+        "fast",
+        "auto",
+        "deep",
+    )
+
+    @model_validator(mode="after")
+    def validate_inference_modes(self) -> AgentExecutionPolicy:
+        if not self.allowed_inference_modes:
+            raise ValueError("at least one inference mode must be allowed")
+        if len(self.allowed_inference_modes) != len(set(self.allowed_inference_modes)):
+            raise ValueError("allowed inference modes must be unique")
+        if self.default_inference_mode not in self.allowed_inference_modes:
+            raise ValueError("default inference mode must be allowed")
+        return self
 
 
 class AgentVersion(ContractModel):

@@ -21,6 +21,7 @@ from full_view_agent.domain.capability import (
     ModelConfig,
     ModelConfigMasked,
     ModelConfigWithKey,
+    ModelReasoningCapability,
 )
 
 if TYPE_CHECKING:
@@ -194,6 +195,7 @@ class ModelConfigService:
         max_output_tokens: int = 32000,
         max_retries: int = 1,
         notes: str = "",
+        reasoning_capability: ModelReasoningCapability | None = None,
         created_by: str = "system",
     ) -> ModelConfigMasked:
         config = ModelConfig(
@@ -205,6 +207,9 @@ class ModelConfigService:
             timeout_seconds=timeout_seconds,
             max_output_tokens=max_output_tokens,
             max_retries=max_retries,
+            reasoning_capability=(
+                reasoning_capability or ModelReasoningCapability()
+            ),
             is_enabled=False,
             notes=notes,
             created_by=created_by,
@@ -239,6 +244,7 @@ class ModelConfigService:
         max_output_tokens: int | None = None,
         max_retries: int | None = None,
         notes: str | None = None,
+        reasoning_capability: ModelReasoningCapability | None = None,
     ) -> ModelConfigMasked:
         config = await self._repo.get(config_id)
         if config is None:
@@ -270,6 +276,8 @@ class ModelConfigService:
             updates["max_retries"] = max_retries
         if notes is not None:
             updates["notes"] = notes
+        if reasoning_capability is not None:
+            updates["reasoning_capability"] = reasoning_capability
         updated = config.model_copy(update=updates)
         await self._repo.save(updated)
         if api_key is not None:
@@ -384,6 +392,7 @@ class ModelConfigService:
             timeout_seconds=enabled.timeout_seconds,
             max_output_tokens=enabled.max_output_tokens,
             max_retries=enabled.max_retries,
+            reasoning_capability=enabled.reasoning_capability,
             is_enabled=enabled.is_enabled,
         )
 
@@ -421,6 +430,7 @@ class ModelConfigService:
             timeout_seconds=config.timeout_seconds,
             max_output_tokens=config.max_output_tokens,
             max_retries=config.max_retries,
+            reasoning_capability=config.reasoning_capability,
             is_enabled=config.is_enabled,
         )
 
@@ -471,6 +481,7 @@ class ModelConfigService:
             timeout_seconds=enabled.timeout_seconds,
             max_output_tokens=enabled.max_output_tokens,
             max_retries=enabled.max_retries,
+            reasoning_capability=enabled.reasoning_capability,
             api_key_ciphertext=ciphertext,
             api_key_nonce=nonce,
         )
@@ -506,6 +517,7 @@ class ModelConfigService:
             timeout_seconds=config.timeout_seconds,
             max_output_tokens=config.max_output_tokens,
             max_retries=config.max_retries,
+            reasoning_capability=config.reasoning_capability,
             api_key_ciphertext=ciphertext,
             api_key_nonce=nonce,
         )
@@ -563,6 +575,7 @@ def _mask_config(config: ModelConfig) -> ModelConfigMasked:
         timeout_seconds=config.timeout_seconds,
         max_output_tokens=config.max_output_tokens,
         max_retries=config.max_retries,
+        reasoning_capability=config.reasoning_capability,
         is_enabled=config.is_enabled,
         notes=config.notes,
         created_at=config.created_at,

@@ -22,11 +22,11 @@ rather than silently picking up a newer config.
 from __future__ import annotations
 
 import logging
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from typing import Protocol
 
-from full_view_agent.domain.capability import ModelConfigWithKey
+from full_view_agent.domain.capability import ModelConfigWithKey, ModelReasoningCapability
 
 logger = logging.getLogger(__name__)
 
@@ -52,6 +52,9 @@ class ModelConfigSnapshot:
     max_retries: int
     api_key_ciphertext: bytes
     api_key_nonce: bytes
+    reasoning_capability: ModelReasoningCapability = field(
+        default_factory=ModelReasoningCapability
+    )
 
     def materialise_with_key(self, *, plaintext_key: str) -> ModelConfigWithKey:
         """Build a ``ModelConfigWithKey`` using an already-resolved plaintext key.
@@ -69,6 +72,7 @@ class ModelConfigSnapshot:
             timeout_seconds=self.timeout_seconds,
             max_output_tokens=self.max_output_tokens,
             max_retries=self.max_retries,
+            reasoning_capability=self.reasoning_capability,
             is_enabled=True,
         )
 
@@ -225,11 +229,13 @@ class PostgresRunModelBindingRepository:
                     config_id, config_version,
                     name, api_base_url, model_name, protocol,
                     timeout_seconds, max_output_tokens, max_retries,
+                    reasoning_capability,
                     api_key_ciphertext, api_key_nonce
                 ) VALUES (
                     %(config_id)s, %(config_version)s,
                     %(name)s, %(api_base_url)s, %(model_name)s, %(protocol)s,
                     %(timeout_seconds)s, %(max_output_tokens)s, %(max_retries)s,
+                    %(reasoning_capability)s::jsonb,
                     %(api_key_ciphertext)s, %(api_key_nonce)s
                 )
                 ON CONFLICT (config_id, config_version) DO NOTHING
@@ -244,6 +250,7 @@ class PostgresRunModelBindingRepository:
                     "timeout_seconds": snapshot.timeout_seconds,
                     "max_output_tokens": snapshot.max_output_tokens,
                     "max_retries": snapshot.max_retries,
+                    "reasoning_capability": snapshot.reasoning_capability.model_dump_json(),
                     "api_key_ciphertext": snapshot.api_key_ciphertext,
                     "api_key_nonce": snapshot.api_key_nonce,
                 },
@@ -296,16 +303,21 @@ class PostgresRunModelBindingRepository:
                     config_id, config_version,
                     name, api_base_url, model_name, protocol,
                     timeout_seconds, max_output_tokens, max_retries,
+                    reasoning_capability,
                     api_key_ciphertext, api_key_nonce
                 ) VALUES (
                     %(config_id)s, %(config_version)s,
                     %(name)s, %(api_base_url)s, %(model_name)s, %(protocol)s,
                     %(timeout_seconds)s, %(max_output_tokens)s, %(max_retries)s,
+                    %(reasoning_capability)s::jsonb,
                     %(api_key_ciphertext)s, %(api_key_nonce)s
                 )
                 ON CONFLICT (config_id, config_version) DO NOTHING
                 """,
-                snapshot.__dict__,
+                {
+                    **snapshot.__dict__,
+                    "reasoning_capability": snapshot.reasoning_capability.model_dump_json(),
+                },
             )
 
     async def promote_binding(
@@ -375,6 +387,7 @@ class PostgresRunModelBindingRepository:
                 SELECT config_id, config_version,
                        name, api_base_url, model_name, protocol,
                        timeout_seconds, max_output_tokens, max_retries,
+                       reasoning_capability,
                        api_key_ciphertext, api_key_nonce
                   FROM {self._schema}.run_model_config_snapshots
                  WHERE config_id = %s AND config_version = %s
@@ -394,6 +407,7 @@ class PostgresRunModelBindingRepository:
             timeout_seconds=row[6],
             max_output_tokens=row[7],
             max_retries=row[8],
-            api_key_ciphertext=bytes(row[9]) if row[9] is not None else b"",
-            api_key_nonce=bytes(row[10]) if row[10] is not None else b"",
+            reasoning_capability=ModelReasoningCapability.model_validate(row[9] or {}),
+            api_key_ciphertext=bytes(row[10]) if row[10] is not None else b"",
+            api_key_nonce=bytes(row[11]) if row[11] is not None else b"",
         )

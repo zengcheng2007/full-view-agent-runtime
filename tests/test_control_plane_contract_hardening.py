@@ -108,6 +108,30 @@ def test_tool_response_openapi_exposes_only_credential_configured() -> None:
         assert schema_ref.endswith(f"/{response_schema}")
 
 
+def test_model_config_responses_use_typed_safe_openapi_contracts() -> None:
+    openapi = create_app(RuntimeContainer()).openapi()
+    schemas = openapi["components"]["schemas"]
+
+    assert schemas["ModelConfigResponse"]["properties"]["data"]["$ref"].endswith(
+        "/ModelConfigMasked"
+    )
+    assert schemas["ModelConfigListResponse"]["properties"]["data"]["items"][
+        "$ref"
+    ].endswith("/ModelConfigMasked")
+    assert schemas["EffectiveModelConfigResponse"]["properties"]["data"][
+        "$ref"
+    ].endswith("/EffectiveModelConfigData")
+    reasoning = schemas["ModelConfigMasked"]["properties"]["reasoning_capability"]
+    assert reasoning["$ref"].endswith("/ModelReasoningCapability")
+    assert "api_key" not in schemas["ModelConfigMasked"]["properties"]
+    assert "api_key_secret" not in schemas["ModelConfigMasked"]["properties"]
+
+    effective_response = openapi["paths"][
+        "/capability-api/v1/model-configs/effective"
+    ]["get"]["responses"]["200"]["content"]["application/json"]["schema"]["$ref"]
+    assert effective_response.endswith("/EffectiveModelConfigResponse")
+
+
 @pytest.mark.asyncio
 async def test_tool_control_plane_responses_never_return_credential_ref() -> None:
     runtime = _admin_runtime()

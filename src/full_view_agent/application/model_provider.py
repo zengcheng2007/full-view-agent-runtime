@@ -53,11 +53,20 @@ class ModelToolDefinition:
 
 
 @dataclass(frozen=True)
+class ModelInferenceOptions:
+    requested_mode: Literal["fast", "auto", "deep"] = "auto"
+    effective_mode: Literal["fast", "deep"] = "fast"
+    enable_thinking: bool | None = None
+    reasoning_effort: Literal["high", "max", "xhigh"] | None = None
+
+
+@dataclass(frozen=True)
 class ModelRequest:
     messages: tuple[ModelMessage, ...]
     tools: tuple[ModelToolDefinition, ...] = ()
     max_output_tokens: int | None = None
     prompt_version: str | None = None
+    inference: ModelInferenceOptions | None = None
 
 
 @dataclass(frozen=True)
@@ -72,6 +81,7 @@ class ModelUsage:
     prompt_tokens: int = 0
     completion_tokens: int = 0
     total_tokens: int = 0
+    reasoning_tokens: int = 0
 
 
 @dataclass(frozen=True)

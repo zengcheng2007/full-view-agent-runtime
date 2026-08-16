@@ -21,7 +21,11 @@ from full_view_agent.application.model_config_repository import (
     ModelConfigSnapshot,
     PostgresRunModelBindingRepository,
 )
-from full_view_agent.domain.capability import ModelConfig
+from full_view_agent.domain.capability import (
+    ModelConfig,
+    ModelReasoningCapability,
+    ModelReasoningProfile,
+)
 from full_view_agent.infrastructure.capability_repository import (
     PostgresModelConfigRepository,
 )
@@ -113,6 +117,14 @@ async def test_real_rebuild_repository_survives_process_restart(
         max_retries=1,
         api_key_ciphertext=ciphertext,
         api_key_nonce=nonce,
+        reasoning_capability=ModelReasoningCapability(
+            mode="hybrid",
+            fast_profile=ModelReasoningProfile(enable_thinking=False),
+            deep_profile=ModelReasoningProfile(
+                enable_thinking=True,
+                reasoning_effort="high",
+            ),
+        ),
     )
     await repo_a.store_binding("run-real-rebuild-1", snapshot_v1)
 
@@ -135,6 +147,11 @@ async def test_real_rebuild_repository_survives_process_restart(
     assert loaded.name == "real-rebuild-v1"
     assert loaded.api_base_url == "https://v1.example/v1"
     assert loaded.model_name == "model-v1"
+    assert loaded.reasoning_capability.mode == "hybrid"
+    assert loaded.reasoning_capability.fast_profile is not None
+    assert loaded.reasoning_capability.fast_profile.enable_thinking is False
+    assert loaded.reasoning_capability.deep_profile is not None
+    assert loaded.reasoning_capability.deep_profile.reasoning_effort == "high"
     # Decrypt the captured ciphertext — should yield the original key.
     decrypted = cipher.decrypt(
         loaded.api_key_nonce,

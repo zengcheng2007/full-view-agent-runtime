@@ -271,6 +271,7 @@ try:
             (27, "tool_semantic_contracts"),
             (28, "prompt_authority_layers"),
             (29, "tool_intent_contracts"),
+            (30, "model_reasoning_profiles"),
         )
     )
 except FileNotFoundError:

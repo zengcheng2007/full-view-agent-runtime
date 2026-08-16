@@ -451,6 +451,7 @@ class RunCreateRequest(ContractModel):
     input: MessageInput
     client: ClientCapabilities
     mode: Literal["agent", "workflow", "analysis"] = "agent"
+    inference_mode: Literal["fast", "auto", "deep"] | None = None
     workflow_ref: WorkflowRef | None = None
 
     @model_validator(mode="after")
@@ -486,6 +487,7 @@ class AgentRun(ContractModel):
     outcome: RunOutcome | None = None
     completion_reason_code: str | None = None
     mode: Literal["agent", "workflow", "analysis"] = "agent"
+    inference_mode: Literal["fast", "auto", "deep"] | None = None
     workflow_ref: WorkflowRef | None = None
     input_message_id: str
     base_context_version: int = Field(ge=1)
@@ -863,6 +865,10 @@ class PopulationRankingRow(ContractModel):
 
 class PopulationRankingTable(ContractModel):
     rows: list[PopulationRankingRow]
+    candidate_count: int | None = Field(default=None, ge=0, title="参与比较区划数")
+    tie_policy: Literal["include_all"] = Field(
+        default="include_all", title="并列处理规则"
+    )
 
 
 class PopulationAggregateRow(ContractModel):

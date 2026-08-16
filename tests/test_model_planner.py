@@ -96,6 +96,63 @@ class QueueModelProvider:
 
 
 @pytest.mark.asyncio
+async def test_model_planner_cannot_bypass_a_failed_area_resolution() -> None:
+    class ContextBuilder:
+        async def build(self, **_kwargs) -> ModelRequest:
+            return ModelRequest(
+                messages=(ModelMessage(role="user", content="杭州市哪个街道人口最少"),),
+                tools=(
+                    ModelToolDefinition(
+                        tool_id="governance.semantic_query",
+                        description="受控人口查询",
+                        input_schema={"type": "object"},
+                    ),
+                ),
+            )
+
+    failed_area = ToolResult(
+        tool_call_id="tc-area-failed",
+        tool_id="governance.resolve_area",
+        tool_version="1.0.0",
+        status="failed",
+        summary="未找到可查询的授权区划。",
+        warnings=["AREA_NOT_FOUND"],
+    )
+    provider = QueueModelProvider(
+        ModelResponse(
+            content=None,
+            tool_calls=(
+                ModelToolCall(
+                    tool_id="governance.semantic_query",
+                    arguments={
+                        "spec": {
+                            "subject": "population",
+                            "operator": "bottom",
+                            "metrics": ["person_count"],
+                            "scope": {"area_code": "3301"},
+                            "group_by": ["descendant_street"],
+                        }
+                    },
+                ),
+            ),
+            finish_reason="tool_calls",
+        )
+    )
+
+    action = await ModelPlanner(
+        provider=provider,
+        context_builder=ContextBuilder(),
+        user_id="user-01",
+        auth_context=population_auth_context(),
+    ).decide(HarnessState(tool_results=(failed_area,)))
+
+    assert isinstance(action, FinishAction)
+    assert action.server_authored is True
+    assert "区划" in action.summary
+    assert provider.requests == []
+
+
+@pytest.mark.asyncio
 async def test_model_planner_routes_average_from_published_contract_without_model() -> None:
     semantic_tool = ModelToolDefinition(
         tool_id="governance.semantic_query",
@@ -512,6 +569,144 @@ async def test_model_planner_finishes_city_population_street_max_from_ranked_res
     assert assessment.status == "accept"
     assert assessment.safe_summary == "瓜沥镇的排名为1。\n瓜沥镇的人口数为2920人。"
     assert provider.requests == []
+
+
+@pytest.mark.asyncio
+async def test_simple_population_ranking_uses_one_model_planning_call_end_to_end() -> None:
+    semantic_tool = ModelToolDefinition(
+        tool_id="governance.semantic_query",
+        description="受控人口语义查询",
+        input_schema={"type": "object"},
+        server_arguments={"catalog_version": "catalog-v1"},
+        semantic_contracts=(population_semantic_contract_v1_2(),),
+    )
+    resolve_tool = ModelToolDefinition(
+        tool_id="governance.resolve_area",
+        description="解析授权区划",
+        input_schema={"type": "object"},
+    )
+
+    class ContextBuilder:
+        async def build(self, **_kwargs) -> ModelRequest:
+            return ModelRequest(
+                messages=(
+                    ModelMessage(role="user", content="杭州市哪个街道人口最少"),
+                ),
+                tools=(resolve_tool, semantic_tool),
+            )
+
+    provider = QueueModelProvider(
+        ModelResponse(
+            content=None,
+            tool_calls=(
+                ModelToolCall(
+                    tool_id="governance.resolve_area",
+                    arguments={"area_name": "杭州市"},
+                ),
+            ),
+            finish_reason="tool_calls",
+        )
+    )
+    planner = ModelPlanner(
+        provider=provider,
+        context_builder=ContextBuilder(),
+        user_id="user-01",
+        auth_context=population_auth_context(),
+    )
+
+    resolve_action = await planner.decide(HarnessState())
+    assert resolve_action == ToolAction(
+        tool_id="governance.resolve_area",
+        arguments={"area_name": "杭州市"},
+    )
+
+    area = successful_area_result().model_copy(deep=True)
+    assert area.data_result is not None
+    area.data_result = area.data_result.model_copy(
+        update={
+            "data": AreaCandidatesData(
+                candidates=[
+                    AreaCandidate(area_code="3301", area_name="杭州市", level="city")
+                ],
+                ambiguous=False,
+                resolved_area_code="3301",
+            )
+        }
+    )
+    query_action = await planner.decide(HarnessState(tool_results=(area,)))
+    assert isinstance(query_action, ToolAction)
+    assert query_action.tool_id == "governance.semantic_query"
+    assert query_action.arguments["spec"]["operator"] == "bottom"
+    assert query_action.arguments["spec"]["group_by"] == ["descendant_street"]
+
+    result = ToolResult(
+        tool_call_id="tc-population-bottom",
+        tool_id="governance.query_population_metrics",
+        tool_version="1.1.0",
+        status="success",
+        summary="查询成功",
+        semantic_lineage=SemanticResultLineage(
+            virtual_tool_id="governance.semantic_query",
+            virtual_tool_version="1.0.0",
+            spec_version="1.0",
+            catalog_version="catalog-v1",
+            subject="population",
+            logical_dataset_id="population",
+            canonical_tool_id="governance.query_population_metrics",
+            canonical_tool_version="1.1.0",
+            spec_fingerprint="sha256:bottom-spec",
+            plan_fingerprint="sha256:bottom-plan",
+            semantic_contract_fingerprint="sha256:bottom-contract",
+            semantic_shape_id="population_descendant_street_bottom",
+            semantic_operator="bottom",
+            semantic_completeness="complete",
+            semantic_tie_policy="include_all",
+            area_code="3301",
+            output="table",
+        ),
+        data_result=TableDataResult(
+            result_id="res-population-bottom",
+            data_schema_ref="schema://data/population-ranking-table/1.0.0",
+            result_fingerprint="sha256:population-bottom",
+            data=PopulationRankingTable(
+                rows=[
+                    PopulationRankingRow(
+                        rank=1,
+                        area_code="330105004",
+                        area_name="和睦街道",
+                        person_count=2026,
+                    )
+                ],
+                candidate_count=191,
+                tie_policy="include_all",
+            ),
+            row_count=1,
+            truncated=True,
+            presentation=ResultPresentation(
+                title="人口分布",
+                summary="已比较191个街道，返回人口最少的1个结果。",
+                status_label="查询完成",
+                fields=[
+                    ResultDisplayField(field="rank", label="排名", role="dimension"),
+                    ResultDisplayField(
+                        field="area_code", label="区划编码", role="identifier"
+                    ),
+                    ResultDisplayField(
+                        field="area_name", label="区划名称", role="dimension"
+                    ),
+                    ResultDisplayField(
+                        field="person_count", label="人口数量", role="metric", unit="人"
+                    ),
+                ],
+            ),
+        ),
+    )
+    finish = await planner.decide(HarnessState(tool_results=(area, result)))
+
+    assert isinstance(finish, FinishAction)
+    assert finish.server_authored is True
+    assert "和睦街道" in finish.summary
+    assert len(provider.requests) == 1
 
 
 @pytest.mark.parametrize("wrapped_by_skill", [False, True])

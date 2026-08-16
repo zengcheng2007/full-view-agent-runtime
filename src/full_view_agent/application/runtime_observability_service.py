@@ -306,6 +306,10 @@ class RuntimeObservabilityService:
                 occurred_at=run.created_at,
                 category="run",
                 event_type="run.created",
+                stage="setup",
+                detail_level="technical",
+                display_label="创建运行任务",
+                display_summary="Runtime 已创建任务并等待执行。",
                 status="queued",
             )
         ]
@@ -332,6 +336,10 @@ class RuntimeObservabilityService:
                         occurred_at=auth_context.issued_at,
                         category="auth",
                         event_type="auth.bound",
+                        stage="setup",
+                        detail_level="technical",
+                        display_label="绑定访问身份",
+                        display_summary="已固定本次运行的身份与数据权限。",
                         status=(
                             "active" if auth_context.expires_at > datetime.now(UTC) else "expired"
                         ),
@@ -352,6 +360,10 @@ class RuntimeObservabilityService:
                         occurred_at=release.bound_at,
                         category="release",
                         event_type="agent_release.bound",
+                        stage="setup",
+                        detail_level="technical",
+                        display_label="固定智能体版本",
+                        display_summary="已固定本次运行使用的智能体发布版本。",
                         status="pinned",
                         details={
                             "release_id": release.release_id,
@@ -369,6 +381,10 @@ class RuntimeObservabilityService:
                         occurred_at=snapshot.captured_at,
                         category="capability",
                         event_type="capability.snapshot.pinned",
+                        stage="setup",
+                        detail_level="technical",
+                        display_label="固定能力清单",
+                        display_summary="已固定本次运行允许使用的能力版本。",
                         status="pinned",
                         details={
                             "tool_count": len(snapshot.tool_versions)
@@ -398,6 +414,10 @@ class RuntimeObservabilityService:
                                 occurred_at=snapshot.captured_at,
                                 category=capability_type,
                                 event_type=f"{capability_type}.pinned",
+                                stage="setup",
+                                detail_level="technical",
+                                display_label="固定能力版本",
+                                display_summary="该能力版本已纳入本次运行快照。",
                                 status="pinned",
                                 capability_ref=RuntimeCapabilityRef(
                                     capability_id=capability_id,
@@ -419,6 +439,10 @@ class RuntimeObservabilityService:
                         occurred_at=binding.bound_at,
                         category="model",
                         event_type="model.bound",
+                        stage="setup",
+                        detail_level="technical",
+                        display_label="固定模型版本",
+                        display_summary="已固定本次运行使用的模型配置版本。",
                         status=("pinned" if model_snapshot is not None else "snapshot_missing"),
                         stable_error_code=(
                             None if model_snapshot is not None else "model_snapshot_missing"
@@ -446,6 +470,10 @@ class RuntimeObservabilityService:
                     occurred_at=run.completed_at,
                     category="run",
                     event_type=f"run.{run.status}",
+                    stage="terminal",
+                    detail_level="summary",
+                    display_label="运行结束",
+                    display_summary="本次运行已结束。",
                     status=run.status,
                     stable_error_code=run.completion_reason_code,
                     duration_ms=_duration_ms(run),
@@ -499,11 +527,18 @@ class RuntimeObservabilityService:
             warnings = _safe_string_list(tool_result.get("warnings"))
             error_code = warnings[0] if warnings else error_code
         details = _safe_details(event.type, data)
+        stage, detail_level, display_label, display_summary = _timeline_display(
+            event.type, data=data, status=status
+        )
         return RuntimeTimelineItem(
             timeline_id=event.event_id,
             occurred_at=event.occurred_at,
             category=category,
             event_type=event.type,
+            stage=stage,
+            detail_level=detail_level,
+            display_label=display_label,
+            display_summary=display_summary,
             status=status,
             duration_ms=duration_ms,
             stable_error_code=error_code,
@@ -907,11 +942,91 @@ def _frontend_command_ids(data: dict[str, object]) -> list[str]:
     return [value] if isinstance(value, str) else []
 
 
+def _timeline_display(
+    event_type: str,
+    *,
+    data: dict[str, object],
+    status: str | None,
+) -> tuple[
+    Literal["setup", "reasoning", "execution", "output", "terminal"],
+    Literal["summary", "technical"],
+    str,
+    str,
+]:
+    if event_type.startswith("model."):
+        turn = _safe_scalar(data.get("model_turn")) or "?"
+        if event_type == "model.requested":
+            return (
+                "reasoning",
+                "summary",
+                f"第 {turn} 轮模型分析",
+                "模型正在理解当前步骤并选择下一项操作。",
+            )
+        if event_type == "model.responded":
+            return (
+                "reasoning",
+                "summary",
+                f"第 {turn} 轮模型分析",
+                "模型已完成本轮判断。",
+            )
+        return (
+            "reasoning",
+            "summary",
+            f"第 {turn} 轮模型分析",
+            "模型调用失败。",
+        )
+    if event_type.startswith(("tool.", "skill.", "workflow.")):
+        display = data.get("display")
+        tool_result = data.get("tool_result")
+        if not isinstance(display, dict) and isinstance(tool_result, dict):
+            display = tool_result.get("display")
+        label = (
+            _safe_scalar(display.get("label"))
+            if isinstance(display, dict)
+            else None
+        ) or "执行业务能力"
+        if event_type.endswith(".started"):
+            summary = "业务能力正在执行。"
+        elif status in {"failed", "denied"} or event_type.endswith(".failed"):
+            summary = "业务能力执行失败。"
+        else:
+            summary = "业务能力已执行完成。"
+        if isinstance(display, dict):
+            safe_summary = _safe_scalar(display.get("summary"))
+            if safe_summary and any("\u3400" <= char <= "\u9fff" for char in safe_summary):
+                summary = safe_summary
+        return "execution", "summary", label, summary
+    if event_type == "result.available":
+        return "output", "summary", "生成查询结果", "结构化查询结果已生成。"
+    if event_type == "evidence.available":
+        return "output", "summary", "生成证据记录", "结果证据已生成并关联。"
+    if event_type == "assistant.message.completed":
+        return "output", "summary", "生成最终回答", "最终回答已生成。"
+    if event_type == "frontend.command.requested":
+        return "output", "technical", "下发界面联动", "已请求前端执行结果联动。"
+    if event_type in {"run.completed", "run.failed", "run.cancelled"}:
+        summary = {
+            "run.completed": "本次运行已完成。",
+            "run.failed": "本次运行失败。",
+            "run.cancelled": "本次运行已取消。",
+        }[event_type]
+        return "terminal", "summary", "运行结束", summary
+    return "execution", "technical", "运行状态变化", "Runtime 状态已更新。"
+
+
 def _safe_details(
     event_type: str, data: dict[str, object]
 ) -> dict[str, str | int | float | bool | None]:
     allowed = {
-        "model.requested": ("model_turn", "message_count", "prompt_version"),
+        "model.requested": (
+            "model_turn",
+            "message_count",
+            "prompt_version",
+            "requested_inference_mode",
+            "effective_inference_mode",
+            "thinking_enabled",
+            "reasoning_effort",
+        ),
         "model.responded": ("model_turn", "finish_reason", "content_present"),
         "run.completed": ("status", "outcome", "completion_reason_code", "warning_count"),
         "run.failed": ("status", "outcome", "error_code"),
@@ -921,6 +1036,18 @@ def _safe_details(
         value = data.get(key)
         if value is None or isinstance(value, (str, int, float, bool)):
             details[key] = value[:256] if isinstance(value, str) else value
+    if event_type == "model.responded":
+        usage = data.get("usage")
+        if isinstance(usage, dict):
+            for key in (
+                "prompt_tokens",
+                "completion_tokens",
+                "total_tokens",
+                "reasoning_tokens",
+            ):
+                value = usage.get(key)
+                if isinstance(value, int) and not isinstance(value, bool) and value >= 0:
+                    details[key] = value
     return details
 
 

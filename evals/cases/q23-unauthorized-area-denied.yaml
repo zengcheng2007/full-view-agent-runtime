@@ -1,6 +1,6 @@
 schema_version: "1.0"
 case_id: q23-unauthorized-area-denied
-description: "Q23/X1: 使用无权账号查询非授权区县独居老人（Policy确定性拒绝、下游零调用）"
+description: "Q23/X1: 使用无权账号查询非授权区划（授权区划解析为空后安全停止、下游零调用）"
 user_message: 查询宁波市独居老人数量，并按街道汇总。
 auth:
   area_codes: ["3301"]
@@ -12,23 +12,11 @@ model_steps:
     tool_id: governance.resolve_area
     arguments:
       query: 宁波市
-  - type: tool_call
-    tool_id: governance.semantic_query
-    arguments:
-      spec:
-        subject: population
-        metrics: [person_count]
-        # 海曙区（宁波市辖）：6 位区县层级、授权范围外，语义层确定性拒绝。
-        scope: {area_code: "330203", include_descendants: true}
-        filters:
-          - {field: person_category, operator: eq, value: solitary_elderly}
-        group_by: [street]
-  - type: finish
-    content: 宁波市不在当前账号授权区划范围内，无法查询独居老人数据。
 expected:
   terminal_status: completed
-  outcome: denied
-  completion_reason_code: AREA_OUT_OF_SCOPE
-  tool_ids: [governance.resolve_area, governance.semantic_query]
-  min_evidence_count: 0
-  required_event_types: [tool.completed, run.completed]
+  outcome: success
+  completion_reason_code: goal_completed
+  tool_ids: [governance.resolve_area]
+  min_evidence_count: 1
+  required_event_types: [tool.completed, result.available, evidence.available, run.completed]
+  required_answer_substrings: ["授权区划", "不代表"]

@@ -797,13 +797,15 @@ class PostgresModelConfigRepository:
                     api_key_ciphertext, api_key_nonce,
                     model_name, protocol,
                     timeout_seconds, max_output_tokens, max_retries,
+                    reasoning_capability,
                     is_enabled, notes, created_at, updated_at, created_by, version
                 ) VALUES (
                     %(config_id)s, %(name)s, %(api_base_url)s,
                     ''::bytea, ''::bytea,
                     %(model_name)s,
                     %(protocol)s, %(timeout_seconds)s, %(max_output_tokens)s,
-                    %(max_retries)s, %(is_enabled)s, %(notes)s,
+                    %(max_retries)s, %(reasoning_capability)s::jsonb,
+                    %(is_enabled)s, %(notes)s,
                     %(created_at)s, %(updated_at)s, %(created_by)s, %(version)s
                 )
                 ON CONFLICT (config_id) DO UPDATE SET
@@ -814,6 +816,7 @@ class PostgresModelConfigRepository:
                     timeout_seconds = EXCLUDED.timeout_seconds,
                     max_output_tokens = EXCLUDED.max_output_tokens,
                     max_retries = EXCLUDED.max_retries,
+                    reasoning_capability = EXCLUDED.reasoning_capability,
                     is_enabled = EXCLUDED.is_enabled,
                     notes = EXCLUDED.notes,
                     updated_at = EXCLUDED.updated_at,
@@ -828,6 +831,7 @@ class PostgresModelConfigRepository:
                     "timeout_seconds": config.timeout_seconds,
                     "max_output_tokens": config.max_output_tokens,
                     "max_retries": config.max_retries,
+                    "reasoning_capability": config.reasoning_capability.model_dump_json(),
                     "is_enabled": config.is_enabled,
                     "notes": config.notes,
                     "created_at": config.created_at,
@@ -845,6 +849,7 @@ class PostgresModelConfigRepository:
                 f"""
                 SELECT config_id, name, api_base_url, model_name, protocol,
                        timeout_seconds, max_output_tokens, max_retries,
+                       reasoning_capability,
                        is_enabled, notes, created_at, updated_at,
                        created_by, version
                   FROM {self._schema}.model_configs
@@ -865,6 +870,7 @@ class PostgresModelConfigRepository:
                 f"""
                 SELECT config_id, name, api_base_url, model_name, protocol,
                        timeout_seconds, max_output_tokens, max_retries,
+                       reasoning_capability,
                        is_enabled, notes, created_at, updated_at,
                        created_by, version
                   FROM {self._schema}.model_configs
@@ -1143,10 +1149,11 @@ def _model_config_from_row(row: tuple[object, ...] | list[object]) -> ModelConfi
         timeout_seconds=int(r[5]),  # type: ignore[arg-type]
         max_output_tokens=int(r[6]),  # type: ignore[arg-type]
         max_retries=int(r[7]),  # type: ignore[arg-type]
-        is_enabled=bool(r[8]),
-        notes=_str_field(r[9]),
-        created_at=r[10],  # type: ignore[arg-type]
-        updated_at=r[11],  # type: ignore[arg-type]
-        created_by=_str_field(r[12]),
-        version=int(r[13]),  # type: ignore[arg-type]
+        reasoning_capability=_json_field(r[8], {}),  # type: ignore[arg-type]
+        is_enabled=bool(r[9]),
+        notes=_str_field(r[10]),
+        created_at=r[11],  # type: ignore[arg-type]
+        updated_at=r[12],  # type: ignore[arg-type]
+        created_by=_str_field(r[13]),
+        version=int(r[14]),  # type: ignore[arg-type]
     )

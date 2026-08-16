@@ -483,6 +483,35 @@ class ConnectorAuditEvent(ContractModel):
     changed_at: datetime = Field(default_factory=lambda: datetime.now(UTC))
 
 
+class ModelReasoningProfile(ContractModel):
+    """Provider-neutral reasoning controls for one configured inference profile."""
+
+    enable_thinking: bool | None = None
+    reasoning_effort: Literal["high", "max", "xhigh"] | None = None
+
+
+class ModelReasoningCapability(ContractModel):
+    """Declared reasoning behavior of a concrete provider/model configuration."""
+
+    mode: Literal["unsupported", "hybrid", "reasoning_only"] = "unsupported"
+    fast_profile: ModelReasoningProfile | None = None
+    deep_profile: ModelReasoningProfile | None = None
+
+    @model_validator(mode="after")
+    def validate_profiles(self) -> ModelReasoningCapability:
+        if self.mode == "unsupported":
+            if self.fast_profile is not None or self.deep_profile is not None:
+                raise ValueError("unsupported reasoning capability cannot define profiles")
+            return self
+        if self.deep_profile is None:
+            raise ValueError("reasoning-capable model requires a deep profile")
+        if self.mode == "hybrid" and self.fast_profile is None:
+            raise ValueError("hybrid model requires a fast profile")
+        if self.mode == "reasoning_only" and self.fast_profile is not None:
+            raise ValueError("reasoning-only model cannot define a fast profile")
+        return self
+
+
 class ModelConfig(ContractModel):
     """Simplified model provider configuration (P2-2)."""
 
@@ -494,6 +523,9 @@ class ModelConfig(ContractModel):
     timeout_seconds: int = Field(default=60, ge=5, le=600)
     max_output_tokens: int = Field(default=32000, ge=100, le=128000)
     max_retries: int = Field(default=1, ge=0, le=5)
+    reasoning_capability: ModelReasoningCapability = Field(
+        default_factory=ModelReasoningCapability
+    )
     is_enabled: bool = False
     notes: str = Field(default="", max_length=500)
     created_at: datetime = Field(default_factory=lambda: datetime.now(UTC))
@@ -514,6 +546,9 @@ class ModelConfigMasked(ContractModel):
     timeout_seconds: int
     max_output_tokens: int
     max_retries: int
+    reasoning_capability: ModelReasoningCapability = Field(
+        default_factory=ModelReasoningCapability
+    )
     is_enabled: bool
     notes: str
     created_at: datetime
@@ -534,6 +569,9 @@ class ModelConfigWithKey(ContractModel):
     timeout_seconds: int
     max_output_tokens: int
     max_retries: int
+    reasoning_capability: ModelReasoningCapability = Field(
+        default_factory=ModelReasoningCapability
+    )
     is_enabled: bool
 
 

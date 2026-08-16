@@ -1554,6 +1554,7 @@ class PostgresAgentPersistence:
             "V027_tool_semantic_contracts.sql",
             "V028_prompt_authority_layers.sql",
             "V029_tool_intent_contracts.sql",
+            "V030_model_reasoning_profiles.sql",
         ):
             path = migrations_dir / name
             if path.exists():
