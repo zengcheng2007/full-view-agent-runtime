@@ -496,8 +496,12 @@ async def test_model_enable_and_disable_return_the_common_api_envelope() -> None
             f"/capability-api/v1/model-configs/{config_id}/disable"
         )
 
-    for response in (enabled, disabled):
-        assert response.status_code == 200
-        assert response.json()["data"] == {"status": "ok"}
-        assert response.json()["meta"]["request_id"].startswith("req_")
-        assert response.json()["meta"]["trace_id"].startswith("trc_")
+        assert enabled.status_code == 409
+        assert "required model tests" in enabled.text
+        assert disabled.status_code == 200
+        assert disabled.json()["data"]["lifecycle"] == "draft"
+        assert disabled.json()["data"]["api_key_masked"] == "***"
+        assert enabled.json()["meta"]["request_id"].startswith("req_")
+        assert disabled.json()["meta"]["request_id"].startswith("req_")
+        assert enabled.json()["meta"]["trace_id"].startswith("trc_")
+        assert disabled.json()["meta"]["trace_id"].startswith("trc_")

@@ -5,6 +5,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 
 from full_view_agent.application.errors import RunStateConflict
 from full_view_agent.domain.agent_definition import (
@@ -101,6 +102,13 @@ class InMemoryAgentRepository:
 
     async def get_run_snapshot(self, run_id: str) -> RunAgentReleaseSnapshot | None:
         return self._run_snapshots.get(run_id)
+
+    async def is_model_referenced(self, config_id: str) -> bool:
+        return any(
+            ref.model_config_id == config_id
+            for release in self._releases.values()
+            for ref in release.model_refs
+        )
 
 
 class PostgresAgentRepository:
@@ -256,6 +264,17 @@ class PostgresAgentRepository:
     async def get_run_snapshot(self, run_id: str) -> RunAgentReleaseSnapshot | None:
         row = await self._fetchone("run_agent_release_snapshots", "run_id = %s", (run_id,))
         return RunAgentReleaseSnapshot.model_validate(row[0]) if row else None
+
+    async def is_model_referenced(self, config_id: str) -> bool:
+        import psycopg
+
+        async with await psycopg.AsyncConnection.connect(self._dsn) as conn:
+            cursor = await conn.execute(
+                f'SELECT 1 FROM "{self._schema}".agent_release_snapshots '
+                "WHERE data_json -> 'model_refs' @> %s::jsonb LIMIT 1",
+                (json.dumps([{"model_config_id": config_id}]),),
+            )
+            return await cursor.fetchone() is not None
 
     async def _fetchone(self, table: str, where: str, params: tuple[object, ...]):
         import psycopg

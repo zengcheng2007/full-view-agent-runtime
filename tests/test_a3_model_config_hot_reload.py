@@ -8,12 +8,12 @@ Proves:
 
 from __future__ import annotations
 
-import contextlib
 import os
 
-import psycopg
 import pytest
 from pydantic import SecretStr
+
+from tests.model_resource_helpers import publish_tested_model
 
 pytestmark = pytest.mark.db
 DATABASE_URL = os.getenv("FULL_VIEW_TEST_DATABASE_URL", "")
@@ -32,38 +32,11 @@ requires_postgres = pytest.mark.skipif(
 )
 
 
-@pytest.fixture()
-def clean_model_config():
-    """Ensure test config is cleaned up before and after test."""
-    config_id = "test-a3-model-config"
-    schema = os.getenv("FULL_VIEW_POSTGRES_SCHEMA", "full_view_agent")
-
-    async def _cleanup() -> None:
-        async with await psycopg.AsyncConnection.connect(DATABASE_URL) as conn:
-            await conn.execute(  # pyright: ignore[reportArgumentType]
-                f"DELETE FROM {schema}.model_configs WHERE config_id = %s",
-                (config_id,),
-            )
-
-    import asyncio
-
-    with contextlib.suppress(Exception):
-        asyncio.run(_cleanup())
-    yield config_id
-    with contextlib.suppress(Exception):
-        asyncio.run(_cleanup())
-
-
 @requires_postgres
 @pytest.mark.asyncio
-async def test_model_config_persists_across_runtime_rebuild(
-    clean_model_config: str,
-) -> None:
+async def test_model_config_persists_across_runtime_rebuild() -> None:
     """Prove model config + key survive destroying/rebuilding the full Runtime."""
     from full_view_agent.api.app import RuntimeContainer
-    from full_view_agent.domain.capability import ModelConfig
-
-    config_id = clean_model_config
     os.getenv("FULL_VIEW_POSTGRES_SCHEMA", "full_view_agent")
     _get_credential_key()
     test_api_key = "sk-test-a3-key-12345"
@@ -71,20 +44,15 @@ async def test_model_config_persists_across_runtime_rebuild(
     # --- Phase 1: Create config + store key via first Runtime ---
     runtime1 = RuntimeContainer()
     await runtime1.initialize()
-    # Save model config
-    config = ModelConfig(
-        config_id=config_id,
+    config = await publish_tested_model(
+        runtime1.model_config_service,
         name="A3 Test Config",
         api_base_url="https://api.example.com",
+        api_key=test_api_key,
         model_name="test-model",
-        protocol="openai_compatible",
-        is_enabled=True,
-        created_by="test",
+        legacy_default=True,
     )
-    await runtime1.model_config_service._repo.save(config)
-    await runtime1.model_config_service._keys.store_key(
-        config_id=config_id, api_key=SecretStr(test_api_key)
-    )
+    config_id = config.config_id
 
     # Verify via first runtime
     resolved1 = await runtime1.model_config_service.resolve_for_runtime()
@@ -109,33 +77,22 @@ async def test_model_config_persists_across_runtime_rebuild(
 
 @requires_postgres
 @pytest.mark.asyncio
-async def test_model_config_switch_only_affects_new_run(
-    clean_model_config: str,
-) -> None:
+async def test_model_config_switch_only_affects_new_run() -> None:
     """Prove model config switch only affects new Run (same process)."""
     from full_view_agent.api.app import RuntimeContainer
-    from full_view_agent.domain.capability import ModelConfig
-
-    config_id = clean_model_config
     test_api_key_v1 = "sk-test-a3-v1"
     test_api_key_v2 = "sk-test-a3-v2"
 
     runtime = RuntimeContainer()
     await runtime.initialize()
 
-    # Create v1 config
-    config_v1 = ModelConfig(
-        config_id=config_id,
+    config_v1 = await publish_tested_model(
+        runtime.model_config_service,
         name="A3 Config V1",
         api_base_url="https://api.example.com",
+        api_key=test_api_key_v1,
         model_name="model-v1",
-        protocol="openai_compatible",
-        is_enabled=True,
-        created_by="test",
-    )
-    await runtime.model_config_service._repo.save(config_v1)
-    await runtime.model_config_service._keys.store_key(
-        config_id=config_id, api_key=SecretStr(test_api_key_v1)
+        legacy_default=True,
     )
 
     # Capture resolved config for "old run"
@@ -144,19 +101,15 @@ async def test_model_config_switch_only_affects_new_run(
     assert old_run_config.api_key_secret == test_api_key_v1
     assert old_run_config.model_name == "model-v1"
 
-    # Update config to v2 (different API key and model name)
-    config_v2 = ModelConfig(
-        config_id=config_id,
+    # Publish v2 as a separate immutable resource, then explicitly switch the
+    # legacy default. Existing Runs retain their already-resolved v1 snapshot.
+    config_v2 = await publish_tested_model(
+        runtime.model_config_service,
         name="A3 Config V2",
         api_base_url="https://api.example.com",
+        api_key=test_api_key_v2,
         model_name="model-v2",
-        protocol="openai_compatible",
-        is_enabled=True,
-        created_by="test",
-    )
-    await runtime.model_config_service._repo.save(config_v2)
-    await runtime.model_config_service._keys.store_key(
-        config_id=config_id, api_key=SecretStr(test_api_key_v2)
+        legacy_default=True,
     )
 
     # "Old run" keeps v1 config (its reference is unchanged)
@@ -170,39 +123,32 @@ async def test_model_config_switch_only_affects_new_run(
     assert new_run_config.model_name == "model-v2"
 
     # Cleanup
-    await runtime.model_config_service._keys.delete_key(config_id=config_id)
-    await runtime.model_config_service._repo.delete(config_id)
+    for config_id in (config_v1.config_id, config_v2.config_id):
+        await runtime.model_config_service._keys.delete_key(config_id=config_id)
+        await runtime.model_config_service._repo.delete(config_id)
 
 
 @requires_postgres
 @pytest.mark.asyncio
-async def test_db_config_read_failure_does_not_silently_fall_back(
-    clean_model_config: str,
-) -> None:
+async def test_db_config_read_failure_does_not_silently_fall_back() -> None:
     """Prove that if DB config exists but read fails, we get explicit failure.
 
     This ensures the system doesn't silently fall back to env vars when
     the database has a config but the key can't be decrypted.
     """
     from full_view_agent.api.app import RuntimeContainer
-    from full_view_agent.domain.capability import ModelConfig
-
-    config_id = clean_model_config
-
     runtime = RuntimeContainer()
     await runtime.initialize()
 
-    # Save a config
-    config = ModelConfig(
-        config_id=config_id,
+    config = await publish_tested_model(
+        runtime.model_config_service,
         name="A3 Test Corrupt",
         api_base_url="https://api.example.com",
+        api_key="initial-valid-key",
         model_name="test-model",
-        protocol="openai_compatible",
-        is_enabled=True,
-        created_by="test",
+        legacy_default=True,
     )
-    await runtime.model_config_service._repo.save(config)
+    config_id = config.config_id
 
     # Store key with WRONG encryption key (simulates corruption)
     wrong_key = b"X" * 32

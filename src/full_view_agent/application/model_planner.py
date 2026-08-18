@@ -1,3 +1,4 @@
+import asyncio
 import hashlib
 import json
 import logging
@@ -1389,8 +1390,13 @@ class _RunFailoverModelProvider:
         self._active_index = 0
         self._run_id = run_id
         self._repository = repository
+        self._selection_lock = asyncio.Lock()
 
     async def complete(self, request: ModelRequest):
+        async with self._selection_lock:
+            return await self._complete_with_selected_chain(request)
+
+    async def _complete_with_selected_chain(self, request: ModelRequest):
         last_error: ModelProviderTimeout | ModelProviderUnavailable | None = None
         for index in range(self._active_index, len(self._candidates)):
             provider, snapshot = self._candidates[index]

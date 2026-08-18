@@ -20,6 +20,7 @@ from full_view_agent.api._api_deps import (
     ResponseMeta,
     require_capability_identity,
 )
+from full_view_agent.application.agent_management_service import AgentManagementService
 from full_view_agent.application.application_management_service import (
     ApplicationManagementService,
 )
@@ -52,7 +53,9 @@ from full_view_agent.domain.application import AgentApplicationDefinition
 from full_view_agent.domain.capability import (
     CapabilityStatus,
     Connector,
+    ModelCapabilityDeclaration,
     ModelConfigMasked,
+    ModelParameterProfiles,
     ModelReasoningCapability,
     SkillCapability,
     ToolCapability,
@@ -312,26 +315,64 @@ class ModelConfigCreateBody(ContractModel):
     api_key: str = Field(min_length=1, max_length=1000)
     model_name: str = Field(min_length=1, max_length=100)
     protocol: str = "openai_compatible"
+    provider_type: Literal[
+        "aliyun_bailian", "openai", "anthropic", "openai_compatible"
+    ] = "openai_compatible"
     timeout_seconds: int = Field(default=60, ge=5, le=600)
     max_output_tokens: int = Field(default=32000, ge=100, le=128000)
     max_retries: int = Field(default=1, ge=0, le=5)
     reasoning_capability: ModelReasoningCapability = Field(
         default_factory=ModelReasoningCapability
     )
+    capabilities: ModelCapabilityDeclaration = Field(
+        default_factory=ModelCapabilityDeclaration
+    )
+    parameter_profiles: ModelParameterProfiles = Field(
+        default_factory=ModelParameterProfiles
+    )
     notes: str = ""
 
 
-class ModelConfigUpdateBody(ContractModel):
+class ModelConfigUpdateBody(AuditedActionBody):
+    expected_etag: int = Field(ge=1)
     name: str | None = None
     api_base_url: str | None = None
     api_key: str | None = None
     model_name: str | None = None
     protocol: str | None = None
+    provider_type: Literal[
+        "aliyun_bailian", "openai", "anthropic", "openai_compatible"
+    ] | None = None
     timeout_seconds: int | None = Field(default=None, ge=5, le=600)
     max_output_tokens: int | None = Field(default=None, ge=100, le=128000)
     max_retries: int | None = Field(default=None, ge=0, le=5)
     reasoning_capability: ModelReasoningCapability | None = None
+    capabilities: ModelCapabilityDeclaration | None = None
+    parameter_profiles: ModelParameterProfiles | None = None
     notes: str | None = None
+
+
+class ModelVersionCreateBody(AuditedActionBody):
+    expected_etag: int = Field(ge=1)
+    from_version: int | None = Field(default=None, ge=1)
+    changes: dict[str, object] = Field(default_factory=dict)
+    api_key: str | None = Field(default=None, min_length=1, max_length=1000)
+
+
+class ModelLifecycleBody(AuditedActionBody):
+    expected_etag: int = Field(ge=1)
+
+
+class ModelRollbackBody(ModelLifecycleBody):
+    to_version: int = Field(ge=1)
+
+
+class ModelTestBody(ContractModel):
+    profile: Literal["fast", "standard", "deep"] | None = None
+
+
+class LegacyModelDefaultBody(ModelLifecycleBody):
+    config_id: str = Field(min_length=1, max_length=128)
 
 
 class ModelConfigImportEnvironmentBody(ContractModel):
@@ -508,7 +549,7 @@ class ModelConfigListResponse(ContractModel):
 
 
 class EffectiveModelConfigData(ContractModel):
-    source: Literal["database", "environment"]
+    source: Literal["database", "environment", "none"]
     config_id: str | None
     name: str
     api_base_url: str
@@ -545,6 +586,7 @@ def create_capability_router(
     management_service: CapabilityManagementService,
     application_management_service: ApplicationManagementService,
     model_config_service: ModelConfigService,
+    agent_management_service: AgentManagementService | None = None,
     connector_connection_tester: ConnectorConnectionTester,
     reload_runtime_capabilities: Callable[[], Awaitable[int]] | None = None,
     validate_runtime_transition: Callable[
@@ -1609,10 +1651,13 @@ def create_capability_router(
             api_key=body.api_key,
             model_name=body.model_name,
             protocol=body.protocol,
+            provider_type=body.provider_type,
             timeout_seconds=body.timeout_seconds,
             max_output_tokens=body.max_output_tokens,
             max_retries=body.max_retries,
             reasoning_capability=body.reasoning_capability,
+            capabilities=body.capabilities,
+            parameter_profiles=body.parameter_profiles,
             notes=body.notes,
             created_by=user.user_id,
         )
@@ -1624,8 +1669,7 @@ def create_capability_router(
     ) -> EffectiveModelConfigResponse:
         """Return the model actually selected for new runs, without secrets."""
         _require(user, ControlPlanePermission.MODEL_MANAGE)
-        configs = await model_config_service.list_configs()
-        enabled = next((config for config in configs if config.is_enabled), None)
+        enabled = await model_config_service.get_legacy_default()
         if enabled is not None:
             return EffectiveModelConfigResponse(
                 data=EffectiveModelConfigData(
@@ -1644,23 +1688,22 @@ def create_capability_router(
             )
         return EffectiveModelConfigResponse(
             data=EffectiveModelConfigData(
-                source="environment",
+                source="none",
                 config_id=None,
-                name="环境变量配置",
-                api_base_url=os.getenv("FULL_VIEW_MODEL_BASE_URL", ""),
-                model_name=os.getenv("FULL_VIEW_MODEL_NAME", ""),
-                protocol=os.getenv("FULL_VIEW_MODEL_PROVIDER", "deterministic"),
-                timeout_seconds=int(
-                    os.getenv("FULL_VIEW_MODEL_TIMEOUT_SECONDS", "60")
-                ),
-                max_output_tokens=_environment_model_max_output_tokens(),
-                max_retries=int(os.getenv("FULL_VIEW_MODEL_MAX_RETRIES", "1")),
-                reasoning_capability=model_reasoning_capability_from_environment(),
+                name="未配置旧任务默认模型",
+                api_base_url="",
+                model_name="",
+                protocol="none",
+                timeout_seconds=60,
+                max_output_tokens=32000,
+                max_retries=1,
+                reasoning_capability=ModelReasoningCapability(),
             ),
             meta=_meta(),
         )
 
-    @router.post("/model-configs/import-effective", status_code=201)
+    @router.post("/model-configs/import-environment", status_code=201)
+    @router.post("/model-configs/import-effective", status_code=201, deprecated=True)
     async def import_effective_environment_model(
         body: ModelConfigImportEnvironmentBody,
         user: Annotated[CurrentUser, Depends(require_capability_identity)],
@@ -1691,9 +1734,192 @@ def create_capability_router(
             notes=body.notes,
             created_by=user.user_id,
         )
-        await model_config_service.enable_config(config_id=config.config_id)
-        enabled = await model_config_service.get_config(config.config_id)
-        return ModelConfigResponse(data=enabled, meta=_meta())
+        # Import is deliberately only a draft. It must pass the same persisted
+        # verification suite and publish gate as every other model resource.
+        imported = await model_config_service.get_config(config.config_id)
+        return ModelConfigResponse(data=imported, meta=_meta())
+
+    @router.get("/model-configs/environment-candidate")
+    async def get_environment_model_candidate(
+        user: Annotated[CurrentUser, Depends(require_capability_identity)],
+    ) -> CapabilityResponse:
+        _require(user, ControlPlanePermission.MODEL_MANAGE)
+        configured = bool(
+            os.getenv("FULL_VIEW_MODEL_BASE_URL", "").strip()
+            and os.getenv("FULL_VIEW_MODEL_NAME", "").strip()
+            and os.getenv("FULL_VIEW_MODEL_API_KEY", "")
+        )
+        return CapabilityResponse(
+            data={
+                "status": "pending_import" if configured else "not_configured",
+                "provider_type": os.getenv(
+                    "FULL_VIEW_MODEL_PROVIDER", "openai_compatible"
+                ),
+                "api_base_url": os.getenv("FULL_VIEW_MODEL_BASE_URL", ""),
+                "model_name": os.getenv("FULL_VIEW_MODEL_NAME", ""),
+                "credential_configured": bool(os.getenv("FULL_VIEW_MODEL_API_KEY", "")),
+                "reasoning_capability": model_reasoning_capability_from_environment().model_dump(
+                    mode="json"
+                ),
+            },
+            meta=_meta(),
+        )
+
+    @router.get("/model-configs/legacy-default")
+    async def get_legacy_model_default(
+        user: Annotated[CurrentUser, Depends(require_capability_identity)],
+    ) -> CapabilityResponse:
+        _require(user, ControlPlanePermission.MODEL_MANAGE)
+        config = await model_config_service.get_legacy_default()
+        return CapabilityResponse(
+            data={"configured": config is not None, "config": (
+                config.model_dump(mode="json") if config else None
+            )},
+            meta=_meta(),
+        )
+
+    @router.put("/model-configs/legacy-default")
+    async def set_legacy_model_default(
+        body: LegacyModelDefaultBody,
+        user: Annotated[CurrentUser, Depends(require_capability_identity)],
+    ) -> ModelConfigResponse:
+        _require(user, ControlPlanePermission.MODEL_MANAGE)
+        config = await model_config_service.set_legacy_default(
+            config_id=body.config_id,
+            expected_etag=body.expected_etag,
+            actor=user.user_id,
+            reason=body.reason,
+        )
+        return ModelConfigResponse(data=config, meta=_meta())
+
+    @router.get("/model-configs/{config_id}/versions")
+    async def list_model_versions(
+        config_id: str,
+        user: Annotated[CurrentUser, Depends(require_capability_identity)],
+    ) -> CapabilityListResponse:
+        _require(user, ControlPlanePermission.MODEL_MANAGE)
+        versions = await model_config_service.list_versions(config_id)
+        return CapabilityListResponse(
+            data=[item.model_dump(mode="json") for item in versions], meta=_meta()
+        )
+
+    @router.post("/model-configs/{config_id}/versions", status_code=201)
+    async def create_model_version(
+        config_id: str,
+        body: ModelVersionCreateBody,
+        user: Annotated[CurrentUser, Depends(require_capability_identity)],
+    ) -> ModelConfigResponse:
+        _require(user, ControlPlanePermission.MODEL_MANAGE)
+        config = await model_config_service.create_version(
+            config_id=config_id, expected_etag=body.expected_etag,
+            actor=user.user_id, reason=body.reason,
+            from_version=body.from_version, changes=body.changes,
+            api_key=body.api_key,
+        )
+        return ModelConfigResponse(data=config, meta=_meta())
+
+    @router.get("/model-configs/{config_id}/versions/{version}")
+    async def get_model_version(
+        config_id: str,
+        version: int,
+        user: Annotated[CurrentUser, Depends(require_capability_identity)],
+    ) -> CapabilityResponse:
+        _require(user, ControlPlanePermission.MODEL_MANAGE)
+        item = await model_config_service.get_version(config_id, version)
+        return CapabilityResponse(data=item.model_dump(mode="json"), meta=_meta())
+
+    @router.get("/model-configs/{config_id}/versions/{version}/diff")
+    async def diff_model_versions(
+        config_id: str,
+        version: int,
+        against_version: int,
+        user: Annotated[CurrentUser, Depends(require_capability_identity)],
+    ) -> CapabilityResponse:
+        _require(user, ControlPlanePermission.MODEL_MANAGE)
+        diff = await model_config_service.diff_versions(
+            config_id, version, against_version
+        )
+        return CapabilityResponse(data=diff, meta=_meta())
+
+    @router.post("/model-configs/{config_id}/tests/{kind}")
+    async def run_model_test(
+        config_id: str,
+        kind: Literal[
+            "connection", "chat", "tool_calling", "structured_output", "reasoning"
+        ],
+        body: ModelTestBody,
+        user: Annotated[CurrentUser, Depends(require_capability_identity)],
+    ) -> CapabilityResponse:
+        _require(user, ControlPlanePermission.MODEL_MANAGE)
+        record = await model_config_service.run_test(
+            config_id=config_id, kind=kind, profile=body.profile, tested_by=user.user_id
+        )
+        return CapabilityResponse(data=record.model_dump(mode="json"), meta=_meta())
+
+    @router.get("/model-configs/{config_id}/test-records")
+    async def list_model_test_records(
+        config_id: str,
+        user: Annotated[CurrentUser, Depends(require_capability_identity)],
+    ) -> CapabilityListResponse:
+        _require(user, ControlPlanePermission.MODEL_MANAGE)
+        records = await model_config_service.list_test_records(config_id)
+        return CapabilityListResponse(
+            data=[item.model_dump(mode="json") for item in records], meta=_meta()
+        )
+
+    @router.post("/model-configs/{config_id}/publish")
+    async def publish_model_resource(
+        config_id: str,
+        body: ModelLifecycleBody,
+        user: Annotated[CurrentUser, Depends(require_capability_identity)],
+    ) -> ModelConfigResponse:
+        _require(user, ControlPlanePermission.MODEL_MANAGE)
+        config = await model_config_service.publish_config(
+            config_id=config_id, expected_etag=body.expected_etag,
+            actor=user.user_id, reason=body.reason,
+        )
+        return ModelConfigResponse(data=config, meta=_meta())
+
+    @router.post("/model-configs/{config_id}/rollback")
+    async def rollback_model_resource(
+        config_id: str,
+        body: ModelRollbackBody,
+        user: Annotated[CurrentUser, Depends(require_capability_identity)],
+    ) -> ModelConfigResponse:
+        _require(user, ControlPlanePermission.MODEL_MANAGE)
+        config = await model_config_service.rollback_config(
+            config_id=config_id, to_version=body.to_version,
+            expected_etag=body.expected_etag, actor=user.user_id, reason=body.reason,
+        )
+        return ModelConfigResponse(data=config, meta=_meta())
+
+    @router.get("/model-configs/{config_id}/audit-events")
+    async def list_model_audit_events(
+        config_id: str,
+        user: Annotated[CurrentUser, Depends(require_capability_identity)],
+    ) -> CapabilityListResponse:
+        _require(user, ControlPlanePermission.MODEL_MANAGE)
+        events = await model_config_service.list_audit_events(config_id)
+        return CapabilityListResponse(
+            data=[item.model_dump(mode="json") for item in events], meta=_meta()
+        )
+
+    @router.get("/model-configs/{config_id}/usage")
+    async def list_model_usage(
+        config_id: str,
+        user: Annotated[CurrentUser, Depends(require_capability_identity)],
+        config_version: int | None = None,
+    ) -> CapabilityListResponse:
+        _require(user, ControlPlanePermission.MODEL_MANAGE)
+        usages = (
+            await agent_management_service.list_model_usages(
+                config_id=config_id, config_version=config_version
+            )
+            if agent_management_service is not None else []
+        )
+        return CapabilityListResponse(
+            data=[item.model_dump(mode="json") for item in usages], meta=_meta()
+        )
 
     @router.get("/model-configs/{config_id}")
     async def get_model_config(
@@ -1714,15 +1940,20 @@ def create_capability_router(
         config = await model_config_service.update_config(
             config_id=config_id,
             updated_by=user.user_id,
+            expected_etag=body.expected_etag,
+            reason=body.reason,
             name=body.name,
             api_base_url=body.api_base_url,
             api_key=body.api_key,
             model_name=body.model_name,
             protocol=body.protocol,
+            provider_type=body.provider_type,
             timeout_seconds=body.timeout_seconds,
             max_output_tokens=body.max_output_tokens,
             max_retries=body.max_retries,
             reasoning_capability=body.reasoning_capability,
+            capabilities=body.capabilities,
+            parameter_profiles=body.parameter_profiles,
             notes=body.notes,
         )
         return ModelConfigResponse(data=config, meta=_meta())
@@ -1731,19 +1962,34 @@ def create_capability_router(
     async def enable_model_config(
         config_id: str,
         user: Annotated[CurrentUser, Depends(require_capability_identity)],
-    ) -> OperationStatusResponse:
+    ) -> ModelConfigResponse:
         _require(user, ControlPlanePermission.MODEL_MANAGE)
-        await model_config_service.enable_config(config_id=config_id)
-        return OperationStatusResponse(data={"status": "ok"}, meta=_meta())
+        current = await model_config_service.get_config(config_id)
+        published = await model_config_service.publish_config(
+            config_id=config_id,
+            expected_etag=current.etag,
+            actor=user.user_id,
+            reason="legacy API publish",
+        )
+        return ModelConfigResponse(data=published, meta=_meta())
 
     @router.post("/model-configs/{config_id}/disable")
     async def disable_model_config(
         config_id: str,
         user: Annotated[CurrentUser, Depends(require_capability_identity)],
-    ) -> OperationStatusResponse:
+        body: ModelLifecycleBody | None = None,
+    ) -> ModelConfigResponse:
         _require(user, ControlPlanePermission.MODEL_MANAGE)
-        await model_config_service.disable_config(config_id=config_id)
-        return OperationStatusResponse(data={"status": "ok"}, meta=_meta())
+        if body is None:
+            current = await model_config_service.get_config(config_id)
+            body = ModelLifecycleBody(
+                expected_etag=current.etag, reason="legacy API disable"
+            )
+        config = await model_config_service.disable_config(
+            config_id=config_id, expected_etag=body.expected_etag,
+            actor=user.user_id, reason=body.reason,
+        )
+        return ModelConfigResponse(data=config, meta=_meta())
 
     @router.delete("/model-configs/{config_id}")
     async def delete_model_config(

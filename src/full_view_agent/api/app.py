@@ -245,6 +245,7 @@ from full_view_agent.infrastructure.knowledge_tool_adapter import (
 )
 from full_view_agent.infrastructure.legacy_identity import HttpLegacyIdentityAdapter
 from full_view_agent.infrastructure.memory_store import InMemoryAgentStore
+from full_view_agent.infrastructure.model_provider_factory import build_model_provider
 from full_view_agent.infrastructure.openai_compatible_model import (
     OpenAICompatibleModelProvider,
 )
@@ -828,6 +829,7 @@ class RuntimeContainer:
         self.model_config_service = ModelConfigService(
             repository=model_config_repo,
             key_store=model_config_key_store,
+            agent_release_reader=self.agent_repository,
         )
         self.prompt_template_service = PromptTemplateService(prompt_template_repo)
         self.knowledge_service = KnowledgeService(
@@ -1022,12 +1024,7 @@ class RuntimeContainer:
             planner_factory = RunBoundModelPlannerFactory(
                 base_factory=planner_factory,
                 config_resolver=self.model_config_service,
-                provider_builder=lambda config: OpenAICompatibleModelProvider(
-                    base_url=config.api_base_url,
-                    model=config.model_name,
-                    api_key=SecretStr(config.api_key_secret),
-                    timeout_seconds=float(config.timeout_seconds),
-                ),
+                provider_builder=build_model_provider,
                 config_repository=self.run_model_binding_repository,
                 agent_release_repository=self.agent_repository,
                 fallback_reasoning_capability=(
@@ -1223,44 +1220,26 @@ class RuntimeContainer:
             # Database URL is configured — resolution MUST succeed or raise
             # explicitly.  Silent fallback to env vars is forbidden (A3).
             assert self.model_config_service is not None
-            enabled_config = await self.model_config_service.resolve_for_runtime()
+            enabled_config = await self.model_config_service.resolve_for_runtime(
+                required=False
+            )
             if enabled_config:
                 logger.info(
                     f"Using database model config: {enabled_config.name} "
                     f"({enabled_config.model_name})"
                 )
-                self.model_provider = OpenAICompatibleModelProvider(
-                    base_url=enabled_config.api_base_url,
-                    model=enabled_config.model_name,
-                    api_key=SecretStr(enabled_config.api_key_secret),
-                    timeout_seconds=float(enabled_config.timeout_seconds),
-                )
+                self.model_provider = build_model_provider(enabled_config)
             else:
-                # No enabled config in DB — fall back to env vars.
-                model_base_url = os.getenv("FULL_VIEW_MODEL_BASE_URL")
-                model_name = os.getenv("FULL_VIEW_MODEL_NAME")
-                if not model_base_url:
-                    raise RuntimeError(
-                        "FULL_VIEW_MODEL_BASE_URL is required for openai_compatible "
-                        "when no enabled model config exists in database"
-                    )
-                if not model_name:
-                    raise RuntimeError(
-                        "FULL_VIEW_MODEL_NAME is required for openai_compatible "
-                        "when no enabled model config exists in database"
-                    )
-                model_api_key = os.getenv("FULL_VIEW_MODEL_API_KEY")
-                self.model_provider = OpenAICompatibleModelProvider(
-                    base_url=model_base_url,
-                    model=model_name,
-                    api_key=SecretStr(model_api_key) if model_api_key else None,
-                    timeout_seconds=float(
-                        os.getenv("FULL_VIEW_MODEL_TIMEOUT_SECONDS", "60")
-                    ),
+                logger.warning(
+                    "Model control plane started without an explicit legacy "
+                    "default; legacy model execution remains unavailable until "
+                    "an administrator publishes and selects one"
                 )
-            # Model provider resolved from DB (or env) — rebuild downstream
-            # components with the now-available provider.
-            self._build_downstream_components(database_url)
+            # Rebuild model-dependent components only after a provider is
+            # actually resolved.  Control-plane routes remain available while
+            # the model centre is still unconfigured.
+            if self.model_provider is not None:
+                self._build_downstream_components(database_url)
         # If not deferred (openai_compatible + database_url), downstream
         # components were already built in __post_init__.  Nothing more to do.
 
@@ -1716,6 +1695,7 @@ def create_app(runtime: RuntimeContainer | None = None) -> FastAPI:
             management_service=runtime.capability_management_service,
             application_management_service=runtime.application_management_service,
             model_config_service=runtime.model_config_service,
+            agent_management_service=runtime.agent_management_service,
             connector_connection_tester=ConnectorConnectionTester(
                 runtime.capability_repository,
                 transport=runtime.connector_connection_transport,

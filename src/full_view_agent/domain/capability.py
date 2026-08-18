@@ -512,26 +512,114 @@ class ModelReasoningCapability(ContractModel):
         return self
 
 
+ModelLifecycleStatus = Literal["draft", "tested", "published", "disabled"]
+ModelProviderType = Literal[
+    "aliyun_bailian", "openai", "anthropic", "openai_compatible"
+]
+ModelTestKind = Literal[
+    "connection", "chat", "tool_calling", "structured_output", "reasoning"
+]
+ModelAuditAction = Literal[
+    "create", "update", "test", "publish", "disable",
+    "new_version", "rollback", "set_legacy_default",
+]
+
+
+class ModelCapabilityDeclaration(ContractModel):
+    """Capabilities declared and verified for one concrete model deployment."""
+
+    tool_calling: bool = False
+    structured_output: bool = False
+    streaming: bool = False
+    vision: bool = False
+    context_window_tokens: int = Field(default=32_000, ge=1_024, le=10_000_000)
+    reasoning: ModelReasoningCapability = Field(
+        default_factory=ModelReasoningCapability
+    )
+
+
+class ModelParameterProfile(ContractModel):
+    """Provider-neutral controls plus a small provider-owned extension bag."""
+
+    temperature: float | None = Field(default=None, ge=0, le=2)
+    top_p: float | None = Field(default=None, gt=0, le=1)
+    max_output_tokens: int | None = Field(default=None, ge=1, le=128_000)
+    provider_options: dict[str, JsonValue] = Field(default_factory=dict)
+
+
+class ModelParameterProfiles(ContractModel):
+    fast: ModelParameterProfile = Field(default_factory=ModelParameterProfile)
+    standard: ModelParameterProfile = Field(default_factory=ModelParameterProfile)
+    deep: ModelParameterProfile = Field(default_factory=ModelParameterProfile)
+
+
 class ModelConfig(ContractModel):
-    """Simplified model provider configuration (P2-2)."""
+    """Versioned public model resource; secrets live in the key store."""
 
     config_id: str = Field(min_length=1, max_length=128)
     name: str = Field(min_length=1, max_length=100)
     api_base_url: str = Field(min_length=1, max_length=500)
     model_name: str = Field(min_length=1, max_length=100)
     protocol: str = Field(default="openai_compatible", max_length=50)
+    provider_type: ModelProviderType = "openai_compatible"
     timeout_seconds: int = Field(default=60, ge=5, le=600)
     max_output_tokens: int = Field(default=32000, ge=100, le=128000)
     max_retries: int = Field(default=1, ge=0, le=5)
     reasoning_capability: ModelReasoningCapability = Field(
         default_factory=ModelReasoningCapability
     )
+    capabilities: ModelCapabilityDeclaration = Field(
+        default_factory=ModelCapabilityDeclaration
+    )
+    parameter_profiles: ModelParameterProfiles = Field(
+        default_factory=ModelParameterProfiles
+    )
+    lifecycle: ModelLifecycleStatus = "draft"
     is_enabled: bool = False
+    legacy_default: bool = False
     notes: str = Field(default="", max_length=500)
     created_at: datetime = Field(default_factory=lambda: datetime.now(UTC))
     updated_at: datetime = Field(default_factory=lambda: datetime.now(UTC))
     created_by: str = Field(default="system", max_length=100)
+    updated_by: str = Field(default="system", max_length=100)
     version: int = Field(default=1, ge=1)
+    etag: int = Field(default=1, ge=1)
+
+    @model_validator(mode="after")
+    def validate_provider_options(self) -> ModelConfig:
+        declared = self.capabilities.reasoning
+        compatibility = self.reasoning_capability
+        if declared != compatibility:
+            if declared.mode == "unsupported":
+                self.capabilities = self.capabilities.model_copy(
+                    update={"reasoning": compatibility}
+                )
+            elif compatibility.mode == "unsupported":
+                self.reasoning_capability = declared
+            else:
+                raise ValueError(
+                    "capabilities.reasoning and reasoning_capability must match"
+                )
+        allowed: dict[str, set[str]] = {
+            "aliyun_bailian": {
+                "enable_thinking", "thinking_budget", "reasoning_effort",
+            },
+            "openai": {"reasoning_effort", "verbosity", "parallel_tool_calls"},
+            "anthropic": {"thinking_budget", "tool_choice"},
+            "openai_compatible": {
+                "enable_thinking", "reasoning_effort", "parallel_tool_calls",
+            },
+        }
+        supported = allowed[self.provider_type]
+        for profile_name in ("fast", "standard", "deep"):
+            profile = getattr(self.parameter_profiles, profile_name)
+            unknown = set(profile.provider_options) - supported
+            if unknown:
+                raise ValueError(
+                    f"unsupported {self.provider_type} provider options: "
+                    f"{sorted(unknown)}"
+                )
+        return self
 
 
 class ModelConfigMasked(ContractModel):
@@ -543,18 +631,82 @@ class ModelConfigMasked(ContractModel):
     api_key_masked: str = "***"
     model_name: str
     protocol: str
+    provider_type: ModelProviderType = "openai_compatible"
     timeout_seconds: int
     max_output_tokens: int
     max_retries: int
     reasoning_capability: ModelReasoningCapability = Field(
         default_factory=ModelReasoningCapability
     )
+    capabilities: ModelCapabilityDeclaration = Field(
+        default_factory=ModelCapabilityDeclaration
+    )
+    parameter_profiles: ModelParameterProfiles = Field(
+        default_factory=ModelParameterProfiles
+    )
+    lifecycle: ModelLifecycleStatus = "draft"
     is_enabled: bool
+    legacy_default: bool = False
     notes: str
     created_at: datetime
     updated_at: datetime
     created_by: str
+    updated_by: str = "system"
     version: int
+    etag: int = 1
+
+
+class ModelConfigVersion(ContractModel):
+    config_id: str
+    version: int = Field(ge=1)
+    lifecycle: ModelLifecycleStatus
+    config: ModelConfigMasked
+    created_by: str
+    created_at: datetime = Field(default_factory=lambda: datetime.now(UTC))
+
+
+class ModelTestRecord(ContractModel):
+    test_id: str
+    config_id: str
+    version: int = Field(ge=1)
+    kind: ModelTestKind
+    profile: Literal["fast", "standard", "deep"] | None = None
+    success: bool
+    latency_ms: int | None = Field(default=None, ge=0)
+    actual_parameters: dict[str, JsonValue] = Field(default_factory=dict)
+    prompt_tokens: int | None = Field(default=None, ge=0)
+    completion_tokens: int | None = Field(default=None, ge=0)
+    reasoning_tokens: int | None = Field(default=None, ge=0)
+    error_code: str | None = None
+    error_message: str | None = None
+    tested_by: str
+    tested_at: datetime = Field(default_factory=lambda: datetime.now(UTC))
+
+
+class ModelAuditEvent(ContractModel):
+    event_id: str
+    config_id: str
+    version: int = Field(ge=1)
+    action: ModelAuditAction
+    actor: str
+    reason: str
+    previous_etag: int | None = Field(default=None, ge=1)
+    new_etag: int = Field(ge=1)
+    changed_fields: list[str] = Field(default_factory=list)
+    changed_at: datetime = Field(default_factory=lambda: datetime.now(UTC))
+
+
+class ModelUsage(ContractModel):
+    app_id: str
+    app_name: str
+    agent_id: str
+    agent_name: str
+    agent_version: str = Field(min_length=1, max_length=32)
+    release_id: str = Field(min_length=1, max_length=128)
+    config_version: int = Field(ge=1)
+    role: Literal["primary", "fallback"]
+    fallback_order: int | None = Field(default=None, ge=1)
+    status: str
 
 
 class ModelConfigWithKey(ContractModel):
@@ -566,11 +718,15 @@ class ModelConfigWithKey(ContractModel):
     api_key_secret: str  # resolved plaintext for runtime use only
     model_name: str
     protocol: str
+    provider_type: ModelProviderType = "openai_compatible"
     timeout_seconds: int
     max_output_tokens: int
     max_retries: int
     reasoning_capability: ModelReasoningCapability = Field(
         default_factory=ModelReasoningCapability
+    )
+    parameter_profiles: ModelParameterProfiles = Field(
+        default_factory=ModelParameterProfiles
     )
     is_enabled: bool
 

@@ -24,7 +24,7 @@ from full_view_agent.domain.agent_definition import (
     AgentVersion,
     RunAgentReleaseSnapshot,
 )
-from full_view_agent.domain.capability import SkillCapability, WorkflowCapability
+from full_view_agent.domain.capability import ModelUsage, SkillCapability, WorkflowCapability
 from full_view_agent.domain.prompt_template import PromptTemplate
 
 if TYPE_CHECKING:
@@ -111,6 +111,59 @@ class AgentManagementService:
         if await self._applications.get_application(app_id) is None:
             raise ResourceNotFound("application is not registered")
         return await self._repository.list_agents(app_id)
+
+    async def list_model_usages(
+        self,
+        *,
+        config_id: str,
+        config_version: int | None = None,
+    ) -> list[ModelUsage]:
+        """Reverse-resolve active Agent releases using one exact model version."""
+
+        usages: list[ModelUsage] = []
+        for application in await self._applications.list_applications():
+            for agent in await self._repository.list_agents(application.app_id):
+                release = await self._repository.get_active_release(
+                    application.app_id,
+                    agent.agent_id,
+                )
+                if release is None:
+                    continue
+                for model_ref in release.model_refs:
+                    if model_ref.model_config_id != config_id:
+                        continue
+                    if (
+                        config_version is not None
+                        and model_ref.config_version != config_version
+                    ):
+                        continue
+                    usages.append(
+                        ModelUsage(
+                            app_id=application.app_id,
+                            app_name=application.name,
+                            agent_id=agent.agent_id,
+                            agent_name=agent.name,
+                            agent_version=release.agent_version,
+                            release_id=release.release_id,
+                            config_version=model_ref.config_version,
+                            role=model_ref.role,
+                            fallback_order=(
+                                model_ref.order
+                                if model_ref.role == "fallback"
+                                else None
+                            ),
+                            status=agent.status,
+                        )
+                    )
+        return sorted(
+            usages,
+            key=lambda item: (
+                item.app_id,
+                item.agent_id,
+                item.config_version,
+                item.fallback_order or 0,
+            ),
+        )
 
     async def get_agent(self, app_id: str, agent_id: str) -> AgentDefinition:
         agent = await self._repository.get_agent(app_id, agent_id)
@@ -340,31 +393,15 @@ class AgentManagementService:
         app_id: str,
         agent_id: str,
     ) -> str | None:
-        enabled_models = {
-            item.config_id: item
-            for item in await self._models.list_configs()
-            if item.is_enabled
-        }
-        released_primary_ids: set[str] = set()
-        for agent in await self._repository.list_agents(app_id):
-            if agent.agent_id == agent_id:
-                continue
-            release = await self._repository.get_active_release(
-                app_id, agent.agent_id
-            )
-            if release is None:
-                continue
-            primary = next(
-                (item for item in release.model_refs if item.role == "primary"),
-                None,
-            )
-            if primary is not None and primary.model_config_id in enabled_models:
-                released_primary_ids.add(primary.model_config_id)
-        if len(released_primary_ids) == 1:
-            return next(iter(released_primary_ids))
-        if len(enabled_models) == 1:
-            return next(iter(enabled_models))
-        return None
+        del app_id, agent_id
+        legacy_default = await self._models.get_legacy_default()
+        if legacy_default is None:
+            return None
+        await self._models.assert_agent_eligible(
+            legacy_default.config_id,
+            legacy_default.version,
+        )
+        return legacy_default.config_id
 
     async def create_version(self, version: AgentVersion) -> AgentVersion:
         await self.get_agent(version.app_id, version.agent_id)
@@ -441,15 +478,39 @@ class AgentManagementService:
                             message=f"模型配置不存在：{model_id}",
                         )
                     )
-                else:
-                    if not model_config.is_enabled:
-                        issues.append(
-                            AgentValidationIssue(
-                                code="MODEL_CONFIG_DISABLED",
-                                field="model_policy",
-                                message=f"模型配置已停用：{model_id}",
-                            )
+                    continue
+                try:
+                    eligible = await self._models.assert_agent_eligible(
+                        model_id,
+                        model_config.version,
+                    )
+                except (ResourceNotFound, RunStateConflict) as exc:
+                    issues.append(
+                        AgentValidationIssue(
+                            code="MODEL_VERSION_NOT_ELIGIBLE",
+                            field="model_policy",
+                            message=(
+                                f"模型版本未发布或必要测试未通过："
+                                f"{model_id}@{model_config.version}（{exc}）"
+                            ),
                         )
+                    )
+                    continue
+                unsupported_modes = _unsupported_inference_modes(
+                    draft.execution_policy.allowed_inference_modes,
+                    eligible.config.capabilities.reasoning,
+                )
+                if unsupported_modes:
+                    issues.append(
+                        AgentValidationIssue(
+                            code="MODEL_INFERENCE_MODE_UNSUPPORTED",
+                            field="execution_policy.allowed_inference_modes",
+                            message=(
+                                f"模型 {model_id}@{model_config.version} 不支持 Agent "
+                                f"允许的推理模式：{','.join(unsupported_modes)}"
+                            ),
+                        )
+                    )
         for reference in draft.capability_refs:
             capability_id, capability_version = _split_ref(reference)
             capability = await self._capabilities.get(capability_id, capability_version)
@@ -680,6 +741,7 @@ class AgentManagementService:
         model_refs: list[AgentModelVersionRef] = []
         for index, model_id in enumerate(ordered_ids):
             config = await self._models.get_config(model_id)
+            await self._models.assert_agent_eligible(model_id, config.version)
             if self._model_snapshots is not None:
                 snapshot = await self._models.capture_snapshot_by_id(
                     model_id, config.version
@@ -796,3 +858,27 @@ def _invalid_reference(field: str, reference: str) -> AgentValidationIssue:
         field=field,
         message=f"exact semantic version reference required: {reference}",
     )
+
+
+def _unsupported_inference_modes(
+    allowed_modes: tuple[str, ...],
+    reasoning_capability,
+) -> tuple[str, ...]:
+    """Return Agent modes that the concrete model version cannot execute.
+
+    ``auto`` is intentionally stricter than a single request: it may select
+    either the fast or deep path at runtime, so the published model must be
+    capable of both paths.
+    """
+
+    supports_fast = reasoning_capability.mode != "reasoning_only"
+    supports_deep = reasoning_capability.mode != "unsupported"
+    unsupported: list[str] = []
+    for mode in allowed_modes:
+        if (
+            (mode == "fast" and not supports_fast)
+            or (mode == "deep" and not supports_deep)
+            or (mode == "auto" and not (supports_fast and supports_deep))
+        ):
+            unsupported.append(mode)
+    return tuple(unsupported)

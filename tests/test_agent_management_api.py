@@ -8,6 +8,7 @@ import pytest
 
 from full_view_agent.api.app import RuntimeContainer, create_app
 from full_view_agent.domain.models import LegacyIdentitySnapshot, Principal
+from tests.model_resource_helpers import publish_tested_model
 
 
 def _identity_port() -> AsyncMock:
@@ -35,13 +36,11 @@ async def test_agent_control_plane_vertical_api() -> None:
     runtime.capability_identity_port = identity_port
     await runtime.initialize()
     assert runtime.model_config_service is not None
-    model = await runtime.model_config_service.create_config(
+    model = await publish_tested_model(
+        runtime.model_config_service,
         name="公共模型 A",
-        api_base_url="https://models.example/v1",
-        api_key="secret",
         model_name="model-a",
     )
-    await runtime.model_config_service.enable_config(config_id=model.config_id)
     app = create_app(runtime)
     headers = {"geoToken": "admin-token"}
     base = "/capability-api/v1/applications/full_information_view"

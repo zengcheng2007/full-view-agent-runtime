@@ -22,7 +22,10 @@ from full_view_agent.domain.capability import (
     CapabilityType,
     Connector,
     ConnectorAuditEvent,
+    ModelAuditEvent,
     ModelConfig,
+    ModelConfigVersion,
+    ModelTestRecord,
     SkillCapability,
     ToolCapability,
     WorkflowCapability,
@@ -76,6 +79,18 @@ class ModelConfigRepository(Protocol):
     async def list_all(self) -> list[ModelConfig]: ...
     async def delete(self, config_id: str) -> None: ...
     async def disable_all(self) -> None: ...
+    async def save_version(self, version: ModelConfigVersion) -> None: ...
+    async def save_version_key_material(
+        self, *, config_id: str, version: int, ciphertext: bytes, nonce: bytes
+    ) -> None: ...
+    async def load_version_key_material(
+        self, *, config_id: str, version: int
+    ) -> tuple[bytes, bytes] | None: ...
+    async def list_versions(self, config_id: str) -> list[ModelConfigVersion]: ...
+    async def save_test_record(self, record: ModelTestRecord) -> None: ...
+    async def list_test_records(self, config_id: str) -> list[ModelTestRecord]: ...
+    async def save_audit_event(self, event: ModelAuditEvent) -> None: ...
+    async def list_audit_events(self, config_id: str) -> list[ModelAuditEvent]: ...
 
 
 class InMemoryCapabilityRepository:
@@ -241,6 +256,10 @@ class InMemoryModelConfigRepository:
 
     def __init__(self) -> None:
         self._configs: dict[str, ModelConfig] = {}
+        self._versions: dict[tuple[str, int], ModelConfigVersion] = {}
+        self._version_key_material: dict[tuple[str, int], tuple[bytes, bytes]] = {}
+        self._test_records: list[ModelTestRecord] = []
+        self._audit_events: list[ModelAuditEvent] = []
         self._lock = asyncio.Lock()
 
     async def save(self, config: ModelConfig) -> None:
@@ -264,6 +283,51 @@ class InMemoryModelConfigRepository:
                     self._configs[cid] = config.model_copy(
                         update={"is_enabled": False}
                     )
+
+    async def save_version(self, version: ModelConfigVersion) -> None:
+        async with self._lock:
+            key = (version.config_id, version.version)
+            existing = self._versions.get(key)
+            if (
+                existing is not None
+                and existing.lifecycle not in {"draft", "tested"}
+                and existing != version
+            ):
+                raise RunStateConflict("model version is immutable")
+            self._versions[key] = version
+
+    async def save_version_key_material(
+        self, *, config_id: str, version: int, ciphertext: bytes, nonce: bytes
+    ) -> None:
+        async with self._lock:
+            self._version_key_material.setdefault(
+                (config_id, version), (ciphertext, nonce)
+            )
+
+    async def load_version_key_material(
+        self, *, config_id: str, version: int
+    ) -> tuple[bytes, bytes] | None:
+        return self._version_key_material.get((config_id, version))
+
+    async def list_versions(self, config_id: str) -> list[ModelConfigVersion]:
+        return sorted(
+            (item for key, item in self._versions.items() if key[0] == config_id),
+            key=lambda item: item.version,
+        )
+
+    async def save_test_record(self, record: ModelTestRecord) -> None:
+        async with self._lock:
+            self._test_records.append(record)
+
+    async def list_test_records(self, config_id: str) -> list[ModelTestRecord]:
+        return [item for item in self._test_records if item.config_id == config_id]
+
+    async def save_audit_event(self, event: ModelAuditEvent) -> None:
+        async with self._lock:
+            self._audit_events.append(event)
+
+    async def list_audit_events(self, config_id: str) -> list[ModelAuditEvent]:
+        return [item for item in self._audit_events if item.config_id == config_id]
 
 
 def _capability_to_json(capability: CapabilityBase) -> str:
@@ -773,7 +837,6 @@ class PostgresCapabilityRepository:
             for row in rows
         ]
 
-
 class PostgresModelConfigRepository:
     """PostgreSQL-backed model config repository."""
 
@@ -798,15 +861,20 @@ class PostgresModelConfigRepository:
                     model_name, protocol,
                     timeout_seconds, max_output_tokens, max_retries,
                     reasoning_capability,
-                    is_enabled, notes, created_at, updated_at, created_by, version
+                    provider_type, capabilities, parameter_profiles, lifecycle,
+                    is_enabled, legacy_default, notes, created_at, updated_at,
+                    created_by, updated_by, version, etag
                 ) VALUES (
                     %(config_id)s, %(name)s, %(api_base_url)s,
                     ''::bytea, ''::bytea,
                     %(model_name)s,
                     %(protocol)s, %(timeout_seconds)s, %(max_output_tokens)s,
                     %(max_retries)s, %(reasoning_capability)s::jsonb,
-                    %(is_enabled)s, %(notes)s,
-                    %(created_at)s, %(updated_at)s, %(created_by)s, %(version)s
+                    %(provider_type)s, %(capabilities)s::jsonb,
+                    %(parameter_profiles)s::jsonb, %(lifecycle)s,
+                    %(is_enabled)s, %(legacy_default)s, %(notes)s,
+                    %(created_at)s, %(updated_at)s, %(created_by)s,
+                    %(updated_by)s, %(version)s, %(etag)s
                 )
                 ON CONFLICT (config_id) DO UPDATE SET
                     name = EXCLUDED.name,
@@ -817,10 +885,17 @@ class PostgresModelConfigRepository:
                     max_output_tokens = EXCLUDED.max_output_tokens,
                     max_retries = EXCLUDED.max_retries,
                     reasoning_capability = EXCLUDED.reasoning_capability,
+                    provider_type = EXCLUDED.provider_type,
+                    capabilities = EXCLUDED.capabilities,
+                    parameter_profiles = EXCLUDED.parameter_profiles,
+                    lifecycle = EXCLUDED.lifecycle,
                     is_enabled = EXCLUDED.is_enabled,
+                    legacy_default = EXCLUDED.legacy_default,
                     notes = EXCLUDED.notes,
                     updated_at = EXCLUDED.updated_at,
-                    version = EXCLUDED.version
+                    updated_by = EXCLUDED.updated_by,
+                    version = EXCLUDED.version,
+                    etag = EXCLUDED.etag
                 """,
                 {
                     "config_id": config.config_id,
@@ -832,12 +907,19 @@ class PostgresModelConfigRepository:
                     "max_output_tokens": config.max_output_tokens,
                     "max_retries": config.max_retries,
                     "reasoning_capability": config.reasoning_capability.model_dump_json(),
+                    "provider_type": config.provider_type,
+                    "capabilities": config.capabilities.model_dump_json(),
+                    "parameter_profiles": config.parameter_profiles.model_dump_json(),
+                    "lifecycle": config.lifecycle,
                     "is_enabled": config.is_enabled,
+                    "legacy_default": config.legacy_default,
                     "notes": config.notes,
                     "created_at": config.created_at,
                     "updated_at": config.updated_at,
                     "created_by": config.created_by,
+                    "updated_by": config.updated_by,
                     "version": config.version,
+                    "etag": config.etag,
                 },
             )
 
@@ -850,8 +932,9 @@ class PostgresModelConfigRepository:
                 SELECT config_id, name, api_base_url, model_name, protocol,
                        timeout_seconds, max_output_tokens, max_retries,
                        reasoning_capability,
-                       is_enabled, notes, created_at, updated_at,
-                       created_by, version
+                       provider_type, capabilities, parameter_profiles, lifecycle,
+                       is_enabled, legacy_default, notes, created_at, updated_at,
+                       created_by, updated_by, version, etag
                   FROM {self._schema}.model_configs
                  WHERE config_id = %s
                 """,
@@ -871,8 +954,9 @@ class PostgresModelConfigRepository:
                 SELECT config_id, name, api_base_url, model_name, protocol,
                        timeout_seconds, max_output_tokens, max_retries,
                        reasoning_capability,
-                       is_enabled, notes, created_at, updated_at,
-                       created_by, version
+                       provider_type, capabilities, parameter_profiles, lifecycle,
+                       is_enabled, legacy_default, notes, created_at, updated_at,
+                       created_by, updated_by, version, etag
                   FROM {self._schema}.model_configs
                  ORDER BY created_at
                 """
@@ -897,6 +981,174 @@ class PostgresModelConfigRepository:
                 f"UPDATE {self._schema}.model_configs SET is_enabled = false"
                 f" WHERE is_enabled = true"
             )
+
+    async def save_version(self, version: ModelConfigVersion) -> None:
+        import psycopg
+
+        async with await psycopg.AsyncConnection.connect(self._dsn) as conn:
+            cursor = await conn.execute(
+                f"""
+                INSERT INTO {self._schema}.model_config_versions (
+                    config_id, version, lifecycle, config,
+                    api_key_ciphertext, api_key_nonce, created_by, created_at
+                )
+                SELECT %s, %s, %s, %s::jsonb,
+                       api_key_ciphertext, api_key_nonce, %s, %s
+                  FROM {self._schema}.model_configs WHERE config_id = %s
+                ON CONFLICT (config_id, version) DO UPDATE SET
+                    lifecycle = EXCLUDED.lifecycle,
+                    config = EXCLUDED.config,
+                    api_key_ciphertext = EXCLUDED.api_key_ciphertext,
+                    api_key_nonce = EXCLUDED.api_key_nonce,
+                    created_by = EXCLUDED.created_by,
+                    created_at = EXCLUDED.created_at
+                WHERE {self._schema}.model_config_versions.lifecycle IN ('draft', 'tested')
+                """,
+                (
+                    version.config_id,
+                    version.version,
+                    version.lifecycle,
+                    version.config.model_dump_json(),
+                    version.created_by,
+                    version.created_at,
+                    version.config_id,
+                ),
+            )
+            if cursor.rowcount == 0:
+                raise RunStateConflict("model version is immutable")
+
+    async def list_versions(self, config_id: str) -> list[ModelConfigVersion]:
+        import psycopg
+
+        async with await psycopg.AsyncConnection.connect(self._dsn) as conn:
+            cursor = await conn.execute(
+                f"SELECT config_id, version, lifecycle, config, created_by, created_at "
+                f"FROM {self._schema}.model_config_versions "
+                "WHERE config_id=%s ORDER BY version",
+                (config_id,),
+            )
+            rows = await cursor.fetchall()
+        return [
+            ModelConfigVersion(
+                config_id=str(row[0]), version=int(row[1]), lifecycle=str(row[2]),
+                config=_json_field(row[3], {}), created_by=str(row[4]), created_at=row[5],
+            )
+            for row in rows
+        ]
+
+    async def save_version_key_material(
+        self, *, config_id: str, version: int, ciphertext: bytes, nonce: bytes
+    ) -> None:
+        import psycopg
+
+        async with await psycopg.AsyncConnection.connect(self._dsn) as conn:
+            await conn.execute(
+                f"UPDATE {self._schema}.model_config_versions "
+                "SET api_key_ciphertext=%s, api_key_nonce=%s "
+                "WHERE config_id=%s AND version=%s",
+                (ciphertext, nonce, config_id, version),
+            )
+
+    async def load_version_key_material(
+        self, *, config_id: str, version: int
+    ) -> tuple[bytes, bytes] | None:
+        import psycopg
+
+        async with await psycopg.AsyncConnection.connect(self._dsn) as conn:
+            cursor = await conn.execute(
+                f"SELECT api_key_ciphertext, api_key_nonce "
+                f"FROM {self._schema}.model_config_versions "
+                "WHERE config_id=%s AND version=%s",
+                (config_id, version),
+            )
+            row = await cursor.fetchone()
+        if row is None:
+            return None
+        return bytes(row[0]), bytes(row[1])
+
+    async def save_test_record(self, record: ModelTestRecord) -> None:
+        import psycopg
+
+        async with await psycopg.AsyncConnection.connect(self._dsn) as conn:
+            await conn.execute(
+                f"""INSERT INTO {self._schema}.model_test_records (
+                    test_id, config_id, version, kind, profile, success, latency_ms,
+                    actual_parameters, prompt_tokens, completion_tokens,
+                    reasoning_tokens, error_code, error_message, tested_by, tested_at
+                ) VALUES (%s,%s,%s,%s,%s,%s,%s,%s::jsonb,%s,%s,%s,%s,%s,%s,%s)""",
+                (
+                    record.test_id, record.config_id, record.version, record.kind,
+                    record.profile, record.success, record.latency_ms,
+                    json.dumps(record.actual_parameters), record.prompt_tokens,
+                    record.completion_tokens, record.reasoning_tokens,
+                    record.error_code, record.error_message, record.tested_by,
+                    record.tested_at,
+                ),
+            )
+
+    async def list_test_records(self, config_id: str) -> list[ModelTestRecord]:
+        import psycopg
+
+        async with await psycopg.AsyncConnection.connect(self._dsn) as conn:
+            cursor = await conn.execute(
+                f"""SELECT test_id, config_id, version, kind, success, latency_ms,
+                    profile,
+                    actual_parameters, prompt_tokens, completion_tokens,
+                    reasoning_tokens, error_code, error_message, tested_by, tested_at
+                    FROM {self._schema}.model_test_records
+                    WHERE config_id=%s ORDER BY tested_at DESC""",
+                (config_id,),
+            )
+            rows = await cursor.fetchall()
+        return [
+            ModelTestRecord(
+                test_id=str(r[0]), config_id=str(r[1]), version=int(r[2]), kind=str(r[3]),
+                success=bool(r[4]), latency_ms=r[5], profile=r[6],
+                actual_parameters=_json_field(r[7], {}),
+                prompt_tokens=r[8], completion_tokens=r[9], reasoning_tokens=r[10],
+                error_code=r[11], error_message=r[12], tested_by=str(r[13]),
+                tested_at=r[14],
+            )
+            for r in rows
+        ]
+
+    async def save_audit_event(self, event: ModelAuditEvent) -> None:
+        import psycopg
+
+        async with await psycopg.AsyncConnection.connect(self._dsn) as conn:
+            await conn.execute(
+                f"""INSERT INTO {self._schema}.model_audit_events (
+                    event_id, config_id, version, action, actor, reason,
+                    previous_etag, new_etag, changed_fields, changed_at
+                ) VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s::jsonb,%s)""",
+                (
+                    event.event_id, event.config_id, event.version, event.action,
+                    event.actor, event.reason, event.previous_etag, event.new_etag,
+                    json.dumps(event.changed_fields), event.changed_at,
+                ),
+            )
+
+    async def list_audit_events(self, config_id: str) -> list[ModelAuditEvent]:
+        import psycopg
+
+        async with await psycopg.AsyncConnection.connect(self._dsn) as conn:
+            cursor = await conn.execute(
+                f"""SELECT event_id, config_id, version, action, actor, reason,
+                    previous_etag, new_etag, changed_fields, changed_at
+                    FROM {self._schema}.model_audit_events
+                    WHERE config_id=%s ORDER BY changed_at""",
+                (config_id,),
+            )
+            rows = await cursor.fetchall()
+        return [
+            ModelAuditEvent(
+                event_id=str(r[0]), config_id=str(r[1]), version=int(r[2]),
+                action=str(r[3]), actor=str(r[4]), reason=str(r[5]),
+                previous_etag=r[6], new_etag=int(r[7]),
+                changed_fields=list(_json_field(r[8], [])), changed_at=r[9],
+            )
+            for r in rows
+        ]
 
 
 # ---- Row mapping helpers ----
@@ -1150,10 +1402,17 @@ def _model_config_from_row(row: tuple[object, ...] | list[object]) -> ModelConfi
         max_output_tokens=int(r[6]),  # type: ignore[arg-type]
         max_retries=int(r[7]),  # type: ignore[arg-type]
         reasoning_capability=_json_field(r[8], {}),  # type: ignore[arg-type]
-        is_enabled=bool(r[9]),
-        notes=_str_field(r[10]),
-        created_at=r[11],  # type: ignore[arg-type]
-        updated_at=r[12],  # type: ignore[arg-type]
-        created_by=_str_field(r[13]),
-        version=int(r[14]),  # type: ignore[arg-type]
+        provider_type=_str_field(r[9], "openai_compatible"),
+        capabilities=_json_field(r[10], {}),  # type: ignore[arg-type]
+        parameter_profiles=_json_field(r[11], {}),  # type: ignore[arg-type]
+        lifecycle=_str_field(r[12], "draft"),
+        is_enabled=bool(r[13]),
+        legacy_default=bool(r[14]),
+        notes=_str_field(r[15]),
+        created_at=r[16],  # type: ignore[arg-type]
+        updated_at=r[17],  # type: ignore[arg-type]
+        created_by=_str_field(r[18]),
+        updated_by=_str_field(r[19], "system"),
+        version=int(r[20]),  # type: ignore[arg-type]
+        etag=int(r[21]),  # type: ignore[arg-type]
     )

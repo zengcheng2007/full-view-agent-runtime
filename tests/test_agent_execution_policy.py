@@ -29,7 +29,6 @@ from full_view_agent.domain.agent_definition import (
     AgentVersion,
 )
 from full_view_agent.domain.application import AgentApplicationDefinition
-from full_view_agent.domain.capability import ModelConfig
 from full_view_agent.domain.models import AuthContext, ToolResult
 from full_view_agent.infrastructure.agent_repository import InMemoryAgentRepository
 from full_view_agent.infrastructure.application_registry import (
@@ -39,6 +38,7 @@ from full_view_agent.infrastructure.capability_repository import (
     InMemoryCapabilityRepository,
     InMemoryModelConfigRepository,
 )
+from tests.model_resource_helpers import publish_tested_model
 
 
 def test_agent_execution_policy_is_typed_and_bounded() -> None:
@@ -125,13 +125,14 @@ async def test_agent_release_pins_execution_policy_from_exact_version() -> None:
     )
     agents = InMemoryAgentRepository()
     model_repository = InMemoryModelConfigRepository()
+    model_service = ModelConfigService(
+        repository=model_repository,
+        key_store=InMemoryModelConfigKeyStore(),
+    )
     service = AgentManagementService(
         repository=agents,
         application_registry=applications,
-        model_config_service=ModelConfigService(
-            repository=model_repository,
-            key_store=InMemoryModelConfigKeyStore(),
-        ),
+        model_config_service=model_service,
         capability_repository=InMemoryCapabilityRepository(),
     )
     await service.create_agent(
@@ -141,14 +142,10 @@ async def test_agent_release_pins_execution_policy_from_exact_version() -> None:
             name="治理智能体",
         )
     )
-    await model_repository.save(
-        ModelConfig(
-            config_id="primary-model",
-            name="Primary model",
-            api_base_url="https://models.example/v1",
-            model_name="primary-model",
-            is_enabled=True,
-        )
+    primary_model = await publish_tested_model(
+        model_service,
+        name="Primary model",
+        model_name="primary-model",
     )
     policy = AgentExecutionPolicy(
         max_model_turns=5,
@@ -167,7 +164,7 @@ async def test_agent_release_pins_execution_policy_from_exact_version() -> None:
         app_id="full_information_view",
         agent_id="governance_general_agent",
         version="1.0.0",
-        policy=AgentModelPolicy(primary_model_config_id="primary-model"),
+        policy=AgentModelPolicy(primary_model_config_id=primary_model.config_id),
     )
 
     release = await service.publish_version(

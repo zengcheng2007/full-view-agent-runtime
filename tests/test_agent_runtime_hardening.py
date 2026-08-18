@@ -6,7 +6,6 @@ from unittest.mock import AsyncMock
 
 import httpx
 import pytest
-from pydantic import SecretStr
 
 from full_view_agent.api.app import RuntimeContainer, create_app
 from full_view_agent.application.agent_management_service import AgentManagementService
@@ -27,7 +26,6 @@ from full_view_agent.domain.application import (
     ApplicationCapabilityBinding,
 )
 from full_view_agent.domain.capability import (
-    ModelConfig,
     SkillCapability,
     ToolCapability,
     WorkflowCapability,
@@ -43,6 +41,7 @@ from full_view_agent.infrastructure.capability_repository import (
 from full_view_agent.infrastructure.credential_broker import InMemoryCredentialBroker
 from full_view_agent.infrastructure.legacy_identity import HashedLegacyIdentityAdapter
 from full_view_agent.infrastructure.memory_store import InMemoryAgentStore
+from tests.model_resource_helpers import publish_tested_model
 
 APP_ID = "full_information_view"
 
@@ -99,14 +98,11 @@ async def _create_ready_agent(
     agent_id: str = "analysis_agent",
     version: AgentVersion | None = None,
 ) -> AgentVersion:
-    await models.save(
-        ModelConfig(
-            config_id="model_primary",
-            name="主模型",
-            api_base_url="https://models.example/v1",
-            model_name="model-primary",
-            is_enabled=True,
-        )
+    del models
+    model = await publish_tested_model(
+        service._models,  # type: ignore[attr-defined]
+        name=f"主模型-{agent_id}",
+        model_name="model-primary",
     )
     await service.create_agent(
         AgentDefinition(app_id=APP_ID, agent_id=agent_id, name="研判智能体")
@@ -121,7 +117,7 @@ async def _create_ready_agent(
         app_id=APP_ID,
         agent_id=agent_id,
         version=item.version,
-        policy=AgentModelPolicy(primary_model_config_id="model_primary"),
+        policy=AgentModelPolicy(primary_model_config_id=model.config_id),
     )
     return item
 
@@ -132,20 +128,19 @@ async def test_release_keeps_model_version_available_before_first_run() -> None:
     models = InMemoryModelConfigRepository()
     keys = EncryptedModelConfigKeyStore(encryption_key=b"1" * 32)
     model_service = ModelConfigService(repository=models, key_store=keys)
-    created = await model_service.create_config(
+    created = await publish_tested_model(
+        model_service,
         name="主模型",
-        api_base_url="https://models.example/v1",
-        api_key="key-v1",
         model_name="model-v1",
     )
-    await model_service.enable_config(config_id=created.config_id)
     released_version = created.version
 
-    await model_service.update_config(
+    await model_service.create_version(
         config_id=created.config_id,
-        api_key="key-v2",
-        model_name="model-v2",
-        updated_by="admin",
+        expected_etag=created.etag,
+        actor="admin",
+        reason="prepare v2 without mutating the published v1",
+        changes={"model_name": "model-v2"},
     )
 
     frozen = await model_service.capture_snapshot_by_id(
@@ -154,7 +149,7 @@ async def test_release_keeps_model_version_available_before_first_run() -> None:
     assert frozen is not None
     assert frozen.config_version == released_version
     assert frozen.model_name == "model-v1"
-    assert model_service.materialise_snapshot(frozen).api_key_secret == "key-v1"
+    assert model_service.materialise_snapshot(frozen).api_key_secret == "key-主模型"
 
 
 @pytest.mark.asyncio
@@ -292,24 +287,16 @@ async def test_legacy_model_resolution_rejects_ambiguous_active_models() -> None
         key_store=keys,
     )
     for suffix in ("a", "b"):
-        await repository.save(
-            ModelConfig(
-                config_id=f"model_{suffix}",
-                name=f"模型 {suffix}",
-                api_base_url="https://models.example/v1",
-                model_name=f"model-{suffix}",
-                is_enabled=True,
-                created_at=datetime.now(UTC),
-            )
-        )
-        await keys.store_key(
-            config_id=f"model_{suffix}", api_key=SecretStr(f"key-{suffix}")
+        await publish_tested_model(
+            service,
+            name=f"模型 {suffix}",
+            model_name=f"model-{suffix}",
         )
 
-    with pytest.raises(RunStateConflict, match="default model"):
+    with pytest.raises(RunStateConflict, match="explicit .*default"):
         await service.resolve_for_runtime()
 
-    with pytest.raises(RunStateConflict, match="default model"):
+    with pytest.raises(RunStateConflict, match="explicit .*default"):
         await service.capture_snapshot_for_runtime()
 
 
@@ -318,15 +305,18 @@ async def test_disabled_model_is_not_available_to_a_new_run_snapshot() -> None:
     repository = InMemoryModelConfigRepository()
     keys = EncryptedModelConfigKeyStore(encryption_key=b"2" * 32)
     service = ModelConfigService(repository=repository, key_store=keys)
-    created = await service.create_config(
+    created = await publish_tested_model(
+        service,
         name="将停用模型",
-        api_base_url="https://models.example/v1",
-        api_key="secret",
         model_name="disabled-model",
     )
-    await service.enable_config(config_id=created.config_id)
     version = created.version
-    await service.disable_config(config_id=created.config_id)
+    await service.disable_config(
+        config_id=created.config_id,
+        expected_etag=created.etag,
+        actor="admin",
+        reason="verify new Runs cannot select disabled resources",
+    )
 
     assert await service.capture_snapshot_by_id(created.config_id, version) is None
 

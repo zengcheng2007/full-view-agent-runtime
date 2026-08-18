@@ -52,6 +52,8 @@ class TestModelConfigIntegration:
             max_output_tokens=32000,
             max_retries=2,
             is_enabled=True,
+            lifecycle="published",
+            legacy_default=True,
         )
         await repo.save(config)
         await key_store.store_key(config_id="test.config", api_key=SecretStr("test-api-key-12345"))
@@ -131,7 +133,7 @@ class TestModelConfigIntegration:
         await key_store.store_key(config_id="config.2", api_key=SecretStr("key-2"))
         await key_store.store_key(config_id="config.3", api_key=SecretStr("key-3"))
 
-        with pytest.raises(RunStateConflict, match="default model"):
+        with pytest.raises(RunStateConflict, match="explicit legacy default"):
             await service.resolve_for_runtime()
 
     @pytest.mark.asyncio
@@ -178,7 +180,14 @@ class TestModelConfigIntegration:
         resolved = await service.resolve_for_runtime()
         assert resolved is None
 
-        # Enable it (keyword-only args, no changed_by parameter)
+        # The deprecated enable path must still pass the persisted publish gate.
+        for kind in ("connection", "chat"):
+            await service.record_test_result(
+                config_id="test.config",
+                kind=kind,
+                success=True,
+                tested_by="test-admin",
+            )
         await service.enable_config(config_id="test.config")
 
         # Now should be resolved

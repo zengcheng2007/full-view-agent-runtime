@@ -62,6 +62,19 @@ async def _create_config(
     return result.config_id
 
 
+async def _pass_required_tests(
+    svc: ModelConfigService, config_id: str
+) -> None:
+    """Persist the real minimum verification suite for a test fixture."""
+    for kind in ("connection", "chat"):
+        await svc.record_test_result(
+            config_id=config_id,
+            kind=kind,
+            success=True,
+            tested_by="test-admin",
+        )
+
+
 # ===================================================================
 # 1. Config CRUD
 # ===================================================================
@@ -179,6 +192,34 @@ class TestConfigCRUD:
 class TestEnableDisable:
     """Test enable/disable config behavior."""
 
+    async def test_legacy_enable_rejects_model_without_required_tests(self) -> None:
+        """Direct compatibility calls must not bypass the publish gate."""
+        svc, repo, _ = _build_service()
+        config_id = await _create_config(svc)
+
+        with pytest.raises(RunStateConflict, match="required model tests"):
+            await svc.enable_config(config_id=config_id)
+
+        config = await repo.get(config_id)
+        assert config is not None
+        assert config.lifecycle == "draft"
+        assert config.is_enabled is False
+
+    async def test_legacy_enable_revalidates_preexisting_enabled_row(self) -> None:
+        """Legacy imported rows cannot evade checks via the idempotent path."""
+        svc, repo, _ = _build_service()
+        config_id = await _create_config(svc)
+        config = await repo.get(config_id)
+        assert config is not None
+        await repo.save(
+            config.model_copy(
+                update={"lifecycle": "published", "is_enabled": True}
+            )
+        )
+
+        with pytest.raises(RunStateConflict, match="required model tests"):
+            await svc.enable_config(config_id=config_id)
+
     async def test_enable_config(self) -> None:
         """Test enabling a config."""
         svc, repo, _ = _build_service()
@@ -191,6 +232,7 @@ class TestEnableDisable:
         assert not config.is_enabled
 
         # Enable
+        await _pass_required_tests(svc, config_id)
         await svc.enable_config(config_id=config_id)
 
         config = await repo.get(config_id)
@@ -206,11 +248,13 @@ class TestEnableDisable:
         id3 = await _create_config(svc, name="Config 3")
 
         # Enable config 1
+        await _pass_required_tests(svc, id1)
         await svc.enable_config(config_id=id1)
         c1 = await repo.get(id1)
         assert c1 is not None and c1.is_enabled
 
         # Enable config 2 - config 1 remains selectable in the public pool.
+        await _pass_required_tests(svc, id2)
         await svc.enable_config(config_id=id2)
         c1 = await repo.get(id1)
         c2 = await repo.get(id2)
@@ -218,6 +262,7 @@ class TestEnableDisable:
         assert c2 is not None and c2.is_enabled
 
         # Enable config 3 - all three remain selectable.
+        await _pass_required_tests(svc, id3)
         await svc.enable_config(config_id=id3)
         c1 = await repo.get(id1)
         c2 = await repo.get(id2)
@@ -233,6 +278,7 @@ class TestEnableDisable:
         config_id = await _create_config(svc)
 
         # Enable first
+        await _pass_required_tests(svc, config_id)
         await svc.enable_config(config_id=config_id)
         config = await repo.get(config_id)
         assert config is not None and config.is_enabled
@@ -260,6 +306,7 @@ class TestEnableDisable:
         config_id = await _create_config(svc)
 
         # Enable
+        await _pass_required_tests(svc, config_id)
         await svc.enable_config(config_id=config_id)
         config = await repo.get(config_id)
         assert config is not None and config.is_enabled
@@ -274,6 +321,7 @@ class TestEnableDisable:
         svc, _, _ = _build_service()
 
         config_id = await _create_config(svc)
+        await _pass_required_tests(svc, config_id)
         await svc.enable_config(config_id=config_id)
 
         with pytest.raises(RunStateConflict, match="cannot delete an enabled"):
@@ -448,6 +496,7 @@ class TestRuntimeResolution:
         )
 
         # Enable the config
+        await _pass_required_tests(svc, config_id)
         await svc.enable_config(config_id=config_id)
 
         # Resolve for runtime
@@ -491,6 +540,7 @@ class TestRuntimeResolution:
         )
 
         # Enable only config 2
+        await _pass_required_tests(svc, id2)
         await svc.enable_config(config_id=id2)
 
         result = await svc.resolve_for_runtime()
@@ -513,18 +563,12 @@ class TestConnectionTest:
         """Test that connection test returns failure for an invalid URL."""
         svc, _, _ = _build_service()
 
-        config_id = await _create_config(
-            svc,
-            api_base_url="http://invalid-host-that-does-not-exist.local:9999",
-            api_key="sk-test",
-        )
-
-        result = await svc.test_connection(config_id=config_id)
-        # The test may fail with a connection error or HTTP error (e.g., 502
-        # from a proxy), both indicate failure
-        assert not result.success
-        assert result.error_code is not None
-        assert result.error_message is not None
+        with pytest.raises(RunStateConflict, match="SSRF"):
+            await _create_config(
+                svc,
+                api_base_url="http://invalid-host-that-does-not-exist.local:9999",
+                api_key="sk-test",
+            )
 
     async def test_connection_test_nonexistent_config_raises(
         self,
@@ -565,6 +609,7 @@ class TestEndToEnd:
         assert not config.is_enabled
 
         # Enable
+        await _pass_required_tests(svc, config_id)
         await svc.enable_config(config_id=config_id)
 
         # Resolve for runtime

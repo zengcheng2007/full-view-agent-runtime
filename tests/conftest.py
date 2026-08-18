@@ -272,6 +272,8 @@ try:
             (28, "prompt_authority_layers"),
             (29, "tool_intent_contracts"),
             (30, "model_reasoning_profiles"),
+            (31, "model_resource_center"),
+            (32, "model_reasoning_test_profile"),
         )
     )
 except FileNotFoundError:

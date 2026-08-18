@@ -1,8 +1,38 @@
 from __future__ import annotations
 
+from unittest.mock import AsyncMock
+
 import pytest
 
 from full_view_agent.api.app import RuntimeContainer
+from tests.model_resource_helpers import publish_tested_model
+
+
+@pytest.mark.asyncio
+async def test_runtime_startup_allows_model_control_plane_without_legacy_default(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An unconfigured model centre must not deadlock its own configuration UI."""
+
+    monkeypatch.delenv("FULL_VIEW_DATABASE_URL", raising=False)
+    runtime = RuntimeContainer()
+    runtime.model_provider = None
+    runtime.persistence = None
+    runtime.agent_management_service = None
+    runtime.prompt_template_service = None
+    runtime.knowledge_service = None
+
+    resolve = AsyncMock(return_value=None)
+    assert runtime.model_config_service is not None
+    runtime.model_config_service.resolve_for_runtime = resolve  # type: ignore[method-assign]
+
+    monkeypatch.setenv("FULL_VIEW_DATABASE_URL", "postgresql://configured-later")
+    monkeypatch.setenv("FULL_VIEW_MODEL_PROVIDER", "openai_compatible")
+
+    await runtime.initialize()
+
+    resolve.assert_awaited_once_with(required=False)
+    assert runtime.model_provider is None
 
 
 @pytest.mark.asyncio
@@ -44,13 +74,14 @@ async def test_runtime_backfills_legacy_default_release_idempotently_in_postgres
     assert first.persistence is not None
     assert first.model_config_service is not None
     await first.persistence.initialize()
-    model = await first.model_config_service.create_config(
+    model = await publish_tested_model(
+        first.model_config_service,
         name="Legacy baseline model",
         api_base_url="https://models.example/v1",
         api_key="test-only-secret",
         model_name="baseline-model",
+        legacy_default=True,
     )
-    await first.model_config_service.enable_config(config_id=model.config_id)
 
     await first.initialize()
     assert first.agent_management_service is not None

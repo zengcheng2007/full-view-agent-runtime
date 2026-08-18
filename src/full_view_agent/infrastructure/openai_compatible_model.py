@@ -16,6 +16,14 @@ from full_view_agent.application.model_provider import (
     ModelToolCall,
     ModelUsage,
 )
+from full_view_agent.domain.capability import (
+    ModelParameterProfile,
+    ModelParameterProfiles,
+    ModelProviderType,
+)
+from full_view_agent.infrastructure.secure_model_transport import (
+    SecureModelHttpTransport,
+)
 
 logger = logging.getLogger(__name__)
 _MAX_CONTRACT_ATTEMPTS = 2
@@ -32,12 +40,18 @@ class OpenAICompatibleModelProvider:
         api_key: SecretStr | None = None,
         timeout_seconds: float = 60.0,
         client: httpx.AsyncClient | None = None,
+        provider_type: ModelProviderType = "openai_compatible",
+        parameter_profiles: ModelParameterProfiles | None = None,
+        secure_transport: SecureModelHttpTransport | None = None,
     ) -> None:
         self._base_url = base_url.rstrip("/")
         self._model = model
         self._api_key = api_key
         self._timeout_seconds = timeout_seconds
         self._client = client
+        self._provider_type: ModelProviderType = provider_type
+        self._parameter_profiles = parameter_profiles or ModelParameterProfiles()
+        self._secure_transport = secure_transport or SecureModelHttpTransport()
 
     async def complete(self, request: ModelRequest) -> ModelResponse:
         tool_names = {
@@ -49,8 +63,19 @@ class OpenAICompatibleModelProvider:
                 _serialize_message(message) for message in request.messages
             ],
         }
-        if request.max_output_tokens is not None:
-            payload["max_tokens"] = request.max_output_tokens
+        profile = self._profile_for(request)
+        output_limits = [
+            value
+            for value in (request.max_output_tokens, profile.max_output_tokens)
+            if value is not None
+        ]
+        if output_limits:
+            payload["max_tokens"] = min(output_limits)
+        if profile.temperature is not None:
+            payload["temperature"] = profile.temperature
+        if profile.top_p is not None:
+            payload["top_p"] = profile.top_p
+        payload.update(_provider_options(self._provider_type, profile))
         if request.inference is not None:
             if request.inference.enable_thinking is not None:
                 payload["enable_thinking"] = request.inference.enable_thinking
@@ -71,9 +96,9 @@ class OpenAICompatibleModelProvider:
                         for tool in request.tools
                     ],
                     "tool_choice": "auto",
-                    "parallel_tool_calls": False,
                 }
             )
+            payload.setdefault("parallel_tool_calls", False)
         headers = (
             {"Authorization": f"Bearer {self._api_key.get_secret_value()}"}
             if self._api_key is not None
@@ -82,13 +107,12 @@ class OpenAICompatibleModelProvider:
         for attempt in range(_MAX_CONTRACT_ATTEMPTS):
             try:
                 if self._client is None:
-                    async with httpx.AsyncClient() as client:
-                        response = await client.post(
-                            f"{self._base_url}/chat/completions",
-                            json=payload,
-                            headers=headers,
-                            timeout=self._timeout_seconds,
-                        )
+                    response = await self._secure_transport.post(
+                        f"{self._base_url}/chat/completions",
+                        json=payload,
+                        headers=headers,
+                        timeout=self._timeout_seconds,
+                    )
                 else:
                     response = await self._client.post(
                         f"{self._base_url}/chat/completions",
@@ -140,6 +164,40 @@ class OpenAICompatibleModelProvider:
                     continue
                 raise
         raise RuntimeError("unreachable model contract retry state")
+
+    def _profile_for(self, request: ModelRequest) -> ModelParameterProfile:
+        if request.inference is None:
+            return self._parameter_profiles.standard
+        if request.inference.effective_mode == "deep":
+            return self._parameter_profiles.deep
+        return self._parameter_profiles.fast
+
+
+_PROVIDER_OPTION_KEYS: dict[ModelProviderType, frozenset[str]] = {
+    "aliyun_bailian": frozenset(
+        {"enable_thinking", "thinking_budget", "reasoning_effort"}
+    ),
+    "openai": frozenset(
+        {"reasoning_effort", "verbosity", "parallel_tool_calls"}
+    ),
+    "openai_compatible": frozenset(
+        {"enable_thinking", "reasoning_effort", "parallel_tool_calls"}
+    ),
+    "anthropic": frozenset(),
+}
+
+
+def _provider_options(
+    provider_type: ModelProviderType,
+    profile: ModelParameterProfile,
+) -> dict[str, object]:
+    allowed = _PROVIDER_OPTION_KEYS[provider_type]
+    unknown = set(profile.provider_options) - allowed
+    if unknown:
+        raise ModelContractError(
+            f"unsupported {provider_type} provider parameters: {sorted(unknown)}"
+        )
+    return {key: value for key, value in profile.provider_options.items()}
 
 
 def _parse_response(

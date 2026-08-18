@@ -26,7 +26,12 @@ from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from typing import Protocol
 
-from full_view_agent.domain.capability import ModelConfigWithKey, ModelReasoningCapability
+from full_view_agent.domain.capability import (
+    ModelConfigWithKey,
+    ModelParameterProfiles,
+    ModelProviderType,
+    ModelReasoningCapability,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -52,6 +57,10 @@ class ModelConfigSnapshot:
     max_retries: int
     api_key_ciphertext: bytes
     api_key_nonce: bytes
+    provider_type: ModelProviderType = "openai_compatible"
+    parameter_profiles: ModelParameterProfiles = field(
+        default_factory=ModelParameterProfiles
+    )
     reasoning_capability: ModelReasoningCapability = field(
         default_factory=ModelReasoningCapability
     )
@@ -69,6 +78,8 @@ class ModelConfigSnapshot:
             api_key_secret=plaintext_key,
             model_name=self.model_name,
             protocol=self.protocol,
+            provider_type=self.provider_type,
+            parameter_profiles=self.parameter_profiles,
             timeout_seconds=self.timeout_seconds,
             max_output_tokens=self.max_output_tokens,
             max_retries=self.max_retries,
@@ -229,13 +240,14 @@ class PostgresRunModelBindingRepository:
                     config_id, config_version,
                     name, api_base_url, model_name, protocol,
                     timeout_seconds, max_output_tokens, max_retries,
-                    reasoning_capability,
+                    reasoning_capability, provider_type, parameter_profiles,
                     api_key_ciphertext, api_key_nonce
                 ) VALUES (
                     %(config_id)s, %(config_version)s,
                     %(name)s, %(api_base_url)s, %(model_name)s, %(protocol)s,
                     %(timeout_seconds)s, %(max_output_tokens)s, %(max_retries)s,
                     %(reasoning_capability)s::jsonb,
+                    %(provider_type)s, %(parameter_profiles)s::jsonb,
                     %(api_key_ciphertext)s, %(api_key_nonce)s
                 )
                 ON CONFLICT (config_id, config_version) DO NOTHING
@@ -251,6 +263,8 @@ class PostgresRunModelBindingRepository:
                     "max_output_tokens": snapshot.max_output_tokens,
                     "max_retries": snapshot.max_retries,
                     "reasoning_capability": snapshot.reasoning_capability.model_dump_json(),
+                    "provider_type": snapshot.provider_type,
+                    "parameter_profiles": snapshot.parameter_profiles.model_dump_json(),
                     "api_key_ciphertext": snapshot.api_key_ciphertext,
                     "api_key_nonce": snapshot.api_key_nonce,
                 },
@@ -303,13 +317,14 @@ class PostgresRunModelBindingRepository:
                     config_id, config_version,
                     name, api_base_url, model_name, protocol,
                     timeout_seconds, max_output_tokens, max_retries,
-                    reasoning_capability,
+                    reasoning_capability, provider_type, parameter_profiles,
                     api_key_ciphertext, api_key_nonce
                 ) VALUES (
                     %(config_id)s, %(config_version)s,
                     %(name)s, %(api_base_url)s, %(model_name)s, %(protocol)s,
                     %(timeout_seconds)s, %(max_output_tokens)s, %(max_retries)s,
                     %(reasoning_capability)s::jsonb,
+                    %(provider_type)s, %(parameter_profiles)s::jsonb,
                     %(api_key_ciphertext)s, %(api_key_nonce)s
                 )
                 ON CONFLICT (config_id, config_version) DO NOTHING
@@ -317,6 +332,7 @@ class PostgresRunModelBindingRepository:
                 {
                     **snapshot.__dict__,
                     "reasoning_capability": snapshot.reasoning_capability.model_dump_json(),
+                    "parameter_profiles": snapshot.parameter_profiles.model_dump_json(),
                 },
             )
 
@@ -387,7 +403,7 @@ class PostgresRunModelBindingRepository:
                 SELECT config_id, config_version,
                        name, api_base_url, model_name, protocol,
                        timeout_seconds, max_output_tokens, max_retries,
-                       reasoning_capability,
+                       reasoning_capability, provider_type, parameter_profiles,
                        api_key_ciphertext, api_key_nonce
                   FROM {self._schema}.run_model_config_snapshots
                  WHERE config_id = %s AND config_version = %s
@@ -408,6 +424,8 @@ class PostgresRunModelBindingRepository:
             max_output_tokens=row[7],
             max_retries=row[8],
             reasoning_capability=ModelReasoningCapability.model_validate(row[9] or {}),
-            api_key_ciphertext=bytes(row[10]) if row[10] is not None else b"",
-            api_key_nonce=bytes(row[11]) if row[11] is not None else b"",
+            provider_type=row[10] or "openai_compatible",
+            parameter_profiles=ModelParameterProfiles.model_validate(row[11] or {}),
+            api_key_ciphertext=bytes(row[12]) if row[12] is not None else b"",
+            api_key_nonce=bytes(row[13]) if row[13] is not None else b"",
         )

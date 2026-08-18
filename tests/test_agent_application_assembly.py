@@ -26,7 +26,6 @@ from full_view_agent.domain.application import (
     ApplicationCapabilityBinding,
 )
 from full_view_agent.domain.capability import (
-    ModelConfig,
     SkillCapability,
     ToolCapability,
     WorkflowCapability,
@@ -40,6 +39,7 @@ from full_view_agent.infrastructure.capability_repository import (
     InMemoryCapabilityRepository,
     InMemoryModelConfigRepository,
 )
+from tests.model_resource_helpers import publish_tested_model
 
 
 async def _service() -> tuple[
@@ -92,14 +92,10 @@ async def test_one_application_can_own_multiple_agents_and_change_default() -> N
             name="区域研判智能体",
         )
     )
-    await models.save(
-        ModelConfig(
-            config_id="regional-model",
-            name="Regional model",
-            api_base_url="https://models.example/v1",
-            model_name="regional-model",
-            is_enabled=True,
-        )
+    regional_model = await publish_tested_model(
+        service._models,  # type: ignore[attr-defined]
+        name="Regional model",
+        model_name="regional-model",
     )
     await service.create_version(
         AgentVersion(
@@ -112,7 +108,7 @@ async def test_one_application_can_own_multiple_agents_and_change_default() -> N
         app_id="full_information_view",
         agent_id="regional_analysis_agent",
         version="1.0.0",
-        policy=AgentModelPolicy(primary_model_config_id="regional-model"),
+        policy=AgentModelPolicy(primary_model_config_id=regional_model.config_id),
     )
     await service.publish_version(
         app_id="full_information_view",
@@ -145,14 +141,11 @@ async def test_legacy_default_agent_gets_idempotent_trusted_baseline_release() -
     await service.create_agent(
         AgentDefinition(app_id=app_id, agent_id=agent_id, name="Legacy governance")
     )
-    await models.save(
-        ModelConfig(
-            config_id="trusted-model",
-            name="Trusted model",
-            api_base_url="https://models.example/v1",
-            model_name="trusted-model",
-            is_enabled=True,
-        )
+    trusted_model = await publish_tested_model(
+        service._models,  # type: ignore[attr-defined]
+        name="Trusted model",
+        model_name="trusted-model",
+        legacy_default=True,
     )
     tool = ToolCapability(
         capability_id="governance.resolve_area",
@@ -184,7 +177,7 @@ async def test_legacy_default_agent_gets_idempotent_trusted_baseline_release() -
     assert first is not None
     assert second == first
     assert first.capability_refs == ("governance.resolve_area@1.0.0",)
-    assert first.model_refs[0].model_config_id == "trusted-model"
+    assert first.model_refs[0].model_config_id == trusted_model.config_id
     application = await applications.get_application(app_id)
     assert application is not None
     restored = await service.set_default_agent(
@@ -205,14 +198,11 @@ async def test_managed_legacy_baseline_rolls_forward_new_application_grants() ->
     await service.create_agent(
         AgentDefinition(app_id=app_id, agent_id=agent_id, name="Legacy governance")
     )
-    await models.save(
-        ModelConfig(
-            config_id="trusted-model",
-            name="Trusted model",
-            api_base_url="https://models.example/v1",
-            model_name="trusted-model",
-            is_enabled=True,
-        )
+    await publish_tested_model(
+        service._models,  # type: ignore[attr-defined]
+        name="Trusted model",
+        model_name="trusted-model",
+        legacy_default=True,
     )
     resolve = ToolCapability(
         capability_id="governance.resolve_area",
@@ -350,14 +340,10 @@ async def test_non_system_agent_release_is_not_expanded_from_application_grants(
     await service.create_agent(
         AgentDefinition(app_id=app_id, agent_id=agent_id, name="Operator managed")
     )
-    await models.save(
-        ModelConfig(
-            config_id="trusted-model",
-            name="Trusted model",
-            api_base_url="https://models.example/v1",
-            model_name="trusted-model",
-            is_enabled=True,
-        )
+    trusted_model = await publish_tested_model(
+        service._models,  # type: ignore[attr-defined]
+        name="Trusted model",
+        model_name="trusted-model",
     )
     resolve = ToolCapability(
         capability_id="governance.resolve_area",
@@ -398,7 +384,7 @@ async def test_non_system_agent_release_is_not_expanded_from_application_grants(
         app_id=app_id,
         agent_id=agent_id,
         version="1.0.0",
-        policy=AgentModelPolicy(primary_model_config_id="trusted-model"),
+        policy=AgentModelPolicy(primary_model_config_id=trusted_model.config_id),
     )
     operator_release = await service.publish_version(
         app_id=app_id,
@@ -456,16 +442,15 @@ async def test_agent_release_requires_real_model_and_published_capabilities() ->
         "CAPABILITY_NOT_PUBLISHED",
     }
 
-    for config_id in ("primary-model", "fallback-model"):
-        await models.save(
-            ModelConfig(
-                config_id=config_id,
-                name=config_id,
-                api_base_url="https://models.example/v1",
-                model_name=config_id,
-                is_enabled=True,
-            )
+    published_models = [
+        await publish_tested_model(
+            service._models,  # type: ignore[attr-defined]
+            name=name,
+            model_name=name,
         )
+        for name in ("primary-model", "fallback-model")
+    ]
+    primary_model, fallback_model = published_models
     await capabilities.save_tool(
         ToolCapability(
             capability_id="governance.resolve_area",
@@ -482,8 +467,8 @@ async def test_agent_release_requires_real_model_and_published_capabilities() ->
         agent_id="governance_general_agent",
         version="1.0.0",
         policy=AgentModelPolicy(
-            primary_model_config_id="primary-model",
-            fallback_model_config_ids=("fallback-model",),
+            primary_model_config_id=primary_model.config_id,
+            fallback_model_config_ids=(fallback_model.config_id,),
         ),
     )
     unauthorized = await service.validate_version(
@@ -508,39 +493,32 @@ async def test_agent_release_requires_real_model_and_published_capabilities() ->
     )
     assert valid.is_valid is True
 
-    fallback = await models.get("fallback-model")
-    assert fallback is not None
-    await models.save(fallback.model_copy(update={"is_enabled": False}))
+    await service._models.disable_config(  # type: ignore[attr-defined]
+        config_id=fallback_model.config_id,
+        expected_etag=fallback_model.etag,
+        actor="admin",
+        reason="verify Agent rejects a disabled model resource",
+    )
     disabled = await service.validate_version(
         app_id="full_information_view",
         agent_id="governance_general_agent",
         version="1.0.0",
     )
-    assert {issue.code for issue in disabled.issues} == {"MODEL_CONFIG_DISABLED"}
+    assert {issue.code for issue in disabled.issues} == {"MODEL_VERSION_NOT_ELIGIBLE"}
 
 
 @pytest.mark.asyncio
 async def test_publish_freezes_release_and_new_runs_do_not_change_old_runs() -> None:
     service, repository, _, models, _ = await _service()
-    await models.save(
-        ModelConfig(
-            config_id="model-a",
-            name="模型 A",
-            api_base_url="https://models.example/v1",
-            model_name="model-a",
-            version=3,
-            is_enabled=True,
-        )
+    model_a = await publish_tested_model(
+        service._models,  # type: ignore[attr-defined]
+        name="模型 A",
+        model_name="model-a",
     )
-    await models.save(
-        ModelConfig(
-            config_id="model-b",
-            name="模型 B",
-            api_base_url="https://models.example/v1",
-            model_name="model-b",
-            version=7,
-            is_enabled=True,
-        )
+    model_b = await publish_tested_model(
+        service._models,  # type: ignore[attr-defined]
+        name="模型 B",
+        model_name="model-b",
     )
     await service.create_agent(
         AgentDefinition(
@@ -561,8 +539,8 @@ async def test_publish_freezes_release_and_new_runs_do_not_change_old_runs() -> 
         agent_id="governance_general_agent",
         version="1.0.0",
         policy=AgentModelPolicy(
-            primary_model_config_id="model-a",
-            fallback_model_config_ids=("model-b",),
+            primary_model_config_id=model_a.config_id,
+            fallback_model_config_ids=(model_b.config_id,),
         ),
     )
 
@@ -579,8 +557,12 @@ async def test_publish_freezes_release_and_new_runs_do_not_change_old_runs() -> 
         agent_id="governance_general_agent",
     )
 
-    await models.save(
-        (await models.get("model-a")).model_copy(update={"version": 4})  # type: ignore[union-attr]
+    await service._models.create_version(  # type: ignore[attr-defined]
+        config_id=model_a.config_id,
+        expected_etag=model_a.etag,
+        actor="admin",
+        reason="prepare a later model version without changing the old release",
+        changes={"model_name": "model-a-v2"},
     )
     await service.create_version(
         AgentVersion(
@@ -593,7 +575,7 @@ async def test_publish_freezes_release_and_new_runs_do_not_change_old_runs() -> 
         app_id="full_information_view",
         agent_id="governance_general_agent",
         version="2.0.0",
-        policy=AgentModelPolicy(primary_model_config_id="model-b"),
+        policy=AgentModelPolicy(primary_model_config_id=model_b.config_id),
     )
     release_v2 = await service.publish_version(
         app_id="full_information_view",
@@ -609,11 +591,11 @@ async def test_publish_freezes_release_and_new_runs_do_not_change_old_runs() -> 
     )
     old_run_reloaded = await repository.get_run_snapshot("run-old")
 
-    assert release_v1.model_refs[0].model_config_id == "model-a"
-    assert release_v1.model_refs[0].config_version == 3
+    assert release_v1.model_refs[0].model_config_id == model_a.config_id
+    assert release_v1.model_refs[0].config_version == model_a.version
     assert release_v2.release_id != release_v1.release_id
     assert new_run.agent_version == "2.0.0"
-    assert new_run.model_refs[0].model_config_id == "model-b"
+    assert new_run.model_refs[0].model_config_id == model_b.config_id
     assert old_run_reloaded == old_run
     assert old_run_reloaded.agent_version == "1.0.0"  # type: ignore[union-attr]
 
@@ -660,14 +642,10 @@ async def test_run_binding_fails_closed_when_application_default_agent_is_missin
 @pytest.mark.asyncio
 async def test_release_validates_every_nonempty_versioned_resource_reference() -> None:
     service, agents, applications, models, capabilities = await _service()
-    await models.save(
-        ModelConfig(
-            config_id="model-ready",
-            name="可用模型",
-            api_base_url="https://models.example/v1",
-            model_name="model-ready",
-            is_enabled=True,
-        )
+    ready_model = await publish_tested_model(
+        service._models,  # type: ignore[attr-defined]
+        name="可用模型",
+        model_name="model-ready",
     )
     await service.create_agent(
         AgentDefinition(
@@ -691,7 +669,7 @@ async def test_release_validates_every_nonempty_versioned_resource_reference() -
         app_id=version.app_id,
         agent_id=version.agent_id,
         version=version.version,
-        policy=AgentModelPolicy(primary_model_config_id="model-ready"),
+        policy=AgentModelPolicy(primary_model_config_id=ready_model.config_id),
     )
 
     unavailable = await service.validate_version(
@@ -806,14 +784,10 @@ async def test_release_validates_every_nonempty_versioned_resource_reference() -
 @pytest.mark.asyncio
 async def test_agent_validation_requires_workflow_skill_dependency_closure() -> None:
     service, _, applications, models, capabilities = await _service()
-    await models.save(
-        ModelConfig(
-            config_id="model-ready",
-            name="Ready model",
-            api_base_url="https://models.example/v1",
-            model_name="ready",
-            is_enabled=True,
-        )
+    ready_model = await publish_tested_model(
+        service._models,  # type: ignore[attr-defined]
+        name="Ready model",
+        model_name="ready",
     )
     await service.create_agent(
         AgentDefinition(
@@ -833,7 +807,7 @@ async def test_agent_validation_requires_workflow_skill_dependency_closure() -> 
         app_id=version.app_id,
         agent_id=version.agent_id,
         version=version.version,
-        policy=AgentModelPolicy(primary_model_config_id="model-ready"),
+        policy=AgentModelPolicy(primary_model_config_id=ready_model.config_id),
     )
     await capabilities.save_skill(
         SkillCapability(

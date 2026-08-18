@@ -341,31 +341,28 @@ class TestCapabilityCenterPermissions:
         assert response.status_code in (200, 201)
 
     @pytest.mark.asyncio
-    async def test_admin_can_see_effective_environment_model(
+    async def test_admin_can_see_environment_model_as_pending_import_candidate(
         self, admin_client, monkeypatch
     ):
         monkeypatch.setenv("FULL_VIEW_MODEL_PROVIDER", "openai_compatible")
         monkeypatch.setenv("FULL_VIEW_MODEL_BASE_URL", "https://model.example/v1")
         monkeypatch.setenv("FULL_VIEW_MODEL_NAME", "deepseek-v4-flash-0731")
+        monkeypatch.setenv("FULL_VIEW_MODEL_API_KEY", "server-only-secret")
         monkeypatch.setenv("FULL_VIEW_MODEL_TIMEOUT_SECONDS", "60")
         monkeypatch.setenv("FULL_VIEW_MODEL_MAX_OUTPUT_TOKENS", "131072")
         monkeypatch.setenv("FULL_VIEW_MODEL_MAX_RETRIES", "1")
 
         response = await admin_client.get(
-            "/capability-api/v1/model-configs/effective"
+            "/capability-api/v1/model-configs/environment-candidate"
         )
 
         assert response.status_code == 200
         assert response.json()["data"] == {
-            "source": "environment",
-            "config_id": None,
-            "name": "环境变量配置",
+            "status": "pending_import",
+            "provider_type": "openai_compatible",
             "api_base_url": "https://model.example/v1",
             "model_name": "deepseek-v4-flash-0731",
-            "protocol": "openai_compatible",
-            "timeout_seconds": 60,
-            "max_output_tokens": 128000,
-            "max_retries": 1,
+            "credential_configured": True,
             "reasoning_capability": {
                 "mode": "unsupported",
                 "fast_profile": None,
@@ -390,14 +387,15 @@ class TestCapabilityCenterPermissions:
 
         assert response.status_code == 201
         data = response.json()["data"]
-        assert data["is_enabled"] is True
+        assert data["is_enabled"] is False
+        assert data["lifecycle"] == "draft"
         assert data["model_name"] == "deepseek-v4-flash-0731"
         assert data["max_output_tokens"] == 128000
         assert "server-only-secret" not in response.text
         effective = await admin_client.get(
             "/capability-api/v1/model-configs/effective"
         )
-        assert effective.json()["data"]["source"] == "database"
+        assert effective.json()["data"]["source"] == "none"
 
     @pytest.mark.asyncio
     @pytest.mark.parametrize("invalid_value", ["not-an-integer", "0", "-1"])
@@ -434,8 +432,10 @@ class TestCapabilityCenterPermissions:
         assert response.status_code in (401, 403)
 
     @pytest.mark.asyncio
-    async def test_admin_can_enable_model_config(self, admin_client):
-        """Admin can enable a model config."""
+    async def test_admin_cannot_publish_untested_model_via_legacy_enable(
+        self, admin_client
+    ):
+        """Deprecated enable must enforce the same persisted test gate."""
         # Create a config first
         create_resp = await admin_client.post(
             "/capability-api/v1/model-configs",
@@ -453,5 +453,5 @@ class TestCapabilityCenterPermissions:
         response = await admin_client.post(
             f"/capability-api/v1/model-configs/{config_id}/enable"
         )
-        assert response.status_code == 200
-        assert response.json()["data"] == {"status": "ok"}
+        assert response.status_code == 409
+        assert "required model tests" in response.text
