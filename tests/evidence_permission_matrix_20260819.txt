@@ -1,0 +1,11 @@
+============================= test session starts =============================
+platform win32 -- Python 3.14.5, pytest-9.1.1, pluggy-1.6.0
+rootdir: D:\01code\000qlxxst\全量信息视图智能体\agent-runtime
+configfile: pyproject.toml
+plugins: anyio-4.14.2, langsmith-0.10.10, asyncio-1.4.0
+asyncio: mode=Mode.AUTO, debug=False, asyncio_default_fixture_loop_scope=None, asyncio_default_test_loop_scope=function
+collected 4 items
+
+tests\test_permission_escalation_matrix.py ....                          [100%]
+
+============================== 4 passed in 0.25s ==============================
