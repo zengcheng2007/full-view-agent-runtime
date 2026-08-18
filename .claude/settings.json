@@ -6,11 +6,6 @@
       "Bash(git status *)",
       "Bash(git log *)",
       "Bash(git diff *)",
-      "Bash(git add *)",
-      "Bash(git commit *)",
-      "Bash(git merge *)",
-      "Bash(git worktree *)",
-      "Bash(git branch *)",
       "Bash(git -C *)",
       "Bash(claude --version)",
       "Bash(claude plugins *)",
@@ -40,6 +35,23 @@
       "Bash(du *)",
       "Bash(printf *)",
       "Bash(mkdir *)"
+    ],
+    "deny": [
+      "Bash(git add *)",
+      "Bash(git commit *)",
+      "Bash(git push *)",
+      "Bash(git merge *)",
+      "Bash(git rebase *)",
+      "Bash(git reset *)",
+      "Bash(git checkout *)",
+      "Bash(git clean *)",
+      "Bash(git worktree *)",
+      "Bash(git branch *)",
+      "Bash(rm *)",
+      "Bash(rmdir *)",
+      "Bash(del *)",
+      "Bash(dropdb *)",
+      "Bash(psql * full_view_agent *)"
     ]
   },
   "hooks": {
