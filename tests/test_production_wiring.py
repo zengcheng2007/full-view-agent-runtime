@@ -369,6 +369,22 @@ def test_runtime_container_default_langgraph_wires_semantic_stack(
     _assert_semantic_stack_wired(container)
 
 
+def test_runtime_container_keeps_agent_model_planning_available_without_legacy_default(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Agent releases bind their own model; no global default must not remove planning."""
+
+    monkeypatch.setenv("FULL_VIEW_MODEL_PROVIDER", "deterministic")
+    monkeypatch.delenv("FULL_VIEW_DATABASE_URL", raising=False)
+    monkeypatch.delenv("FULL_VIEW_ORCHESTRATOR", raising=False)
+
+    container = RuntimeContainer()
+
+    # The base provider may be unavailable, but the Run-bound factory must
+    # remain present so an Agent release can materialise its exact model.
+    assert container.executor._planner_factory is not None  # noqa: SLF001
+
+
 def test_runtime_container_does_not_wire_analysis_intent_presenter(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

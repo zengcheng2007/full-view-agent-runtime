@@ -619,7 +619,7 @@ async def test_no_database_runtime_loads_published_population_contract_from_cont
     manifest = runtime.tool_registry.get_manifest(
         "governance.query_population_metrics"
     )
-    assert manifest.tool_version == "1.2.0"
+    assert manifest.tool_version == "1.3.0"
     assert manifest.semantic_contract == _population_contract_from_runtime_seed()
     assert runtime.application_registry is not None
     bindings = await runtime.application_registry.list_capability_bindings(
@@ -630,15 +630,15 @@ async def test_no_database_runtime_loads_published_population_contract_from_cont
         for item in bindings
         if item.capability_id == "governance.query_population_metrics"
     ]
-    assert [item.capability_version for item in population_bindings] == ["1.2.0"]
+    assert [item.capability_version for item in population_bindings] == ["1.3.0"]
 
 
 def _population_contract_from_runtime_seed() -> ToolSemanticContract:
     from full_view_agent.application.builtin_capability_seeds import (
-        population_semantic_contract_v1_2,
+        population_semantic_contract_v1_3,
     )
 
-    return population_semantic_contract_v1_2()
+    return population_semantic_contract_v1_3()
 
 
 def test_every_in_memory_published_population_shape_compiles_and_matches_result() -> None:

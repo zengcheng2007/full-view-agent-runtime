@@ -29,8 +29,6 @@ from full_view_agent.application.errors import (
 from full_view_agent.application.harness import (
     AgentHarness,
     DeterministicCompletionValidator,
-    FinishAction,
-    HarnessState,
     Planner,
     ToolAction,
 )
@@ -83,24 +81,6 @@ class AuthContextProvider(Protocol):
 
 class RunPlannerFactory(Protocol):
     def create(self, *, user_id: str, auth_context: AuthContext) -> Planner: ...
-
-
-class PopulationQueryPlanner:
-    async def decide(self, state: HarnessState) -> ToolAction | FinishAction:
-        if state.tool_results:
-            # Compatibility planner emits a fixed server-owned summary.
-            return FinishAction(summary="人口指标查询已完成", legacy=True)
-        return ToolAction(
-            tool_id="governance.query_population_metrics",
-            arguments={
-                "query": {
-                    "metrics": ["person_count"],
-                    "scope": {"area_code": "330106"},
-                    "filters": [],
-                    "group_by": ["street"],
-                }
-            },
-        )
 
 
 class NativeOrchestrator(OrchestrationPort):
@@ -451,13 +431,13 @@ class NativeOrchestrator(OrchestrationPort):
                     skill_registry=run_skill_registry,
                 )
             else:
-                planner = (
-                    run_planner_factory.create(
-                        user_id=user_id,
-                        auth_context=auth_context,
+                if run_planner_factory is None:
+                    raise ModelProviderUnavailable(
+                        "no runtime planner is configured for this run"
                     )
-                    if run_planner_factory is not None
-                    else PopulationQueryPlanner()
+                planner = run_planner_factory.create(
+                    user_id=user_id,
+                    auth_context=auth_context,
                 )
             harness_result = await self._run_harness(
                 user_id=user_id,

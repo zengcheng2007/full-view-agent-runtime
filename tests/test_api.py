@@ -21,6 +21,7 @@ from full_view_agent.application.model_provider import (
     ModelResponse,
     ModelToolCall,
 )
+from full_view_agent.application.model_planner import FinishAction, ToolAction
 from full_view_agent.domain.models import ObjectProfileResult, RunCreateRequest
 from full_view_agent.infrastructure.credential_broker import (
     InMemoryCredentialBroker,
@@ -533,7 +534,13 @@ async def test_failed_run_admission_releases_session_and_terminalizes_created_ru
 
 @pytest.mark.asyncio
 async def test_create_run_executes_mock_tool_and_reaches_success() -> None:
-    app = create_app(runtime_fixture())
+    app = create_app(
+        RuntimeContainer(
+            identity_port=HashedLegacyIdentityAdapter(),
+            credentials=InMemoryCredentialBroker(),
+            model_provider=QueueModelProvider(),
+        )
+    )
     headers = {"geoToken": "test-token-user-01", "Idempotency-Key": "idem-run-01"}
     async with httpx.AsyncClient(
         transport=httpx.ASGITransport(app=app), base_url="http://test"
@@ -581,7 +588,11 @@ async def test_create_run_executes_mock_tool_and_reaches_success() -> None:
 
 @pytest.mark.asyncio
 async def test_frontend_command_receipt_is_idempotent_and_bound_to_target_client() -> None:
-    runtime = runtime_fixture()
+    runtime = RuntimeContainer(
+        identity_port=HashedLegacyIdentityAdapter(),
+        credentials=InMemoryCredentialBroker(),
+        model_provider=QueueModelProvider(),
+    )
     app = create_app(runtime)
     auth = {"geoToken": "test-token-command-receipt"}
     async with httpx.AsyncClient(
@@ -757,7 +768,13 @@ async def test_session_messages_api_returns_the_persisted_user_message() -> None
 
 @pytest.mark.asyncio
 async def test_session_messages_api_uses_a_signed_cursor() -> None:
-    app = create_app(runtime_fixture())
+    app = create_app(
+        RuntimeContainer(
+            identity_port=HashedLegacyIdentityAdapter(),
+            credentials=InMemoryCredentialBroker(),
+            model_provider=QueueModelProvider(),
+        )
+    )
     auth = {"geoToken": "test-token-message-pagination"}
     async with httpx.AsyncClient(
         transport=httpx.ASGITransport(app=app), base_url="http://test"
@@ -826,7 +843,11 @@ async def test_session_messages_api_uses_a_signed_cursor() -> None:
 
 @pytest.mark.asyncio
 async def test_completed_run_persists_an_assistant_message_with_result_evidence() -> None:
-    runtime = runtime_fixture()
+    runtime = RuntimeContainer(
+        identity_port=HashedLegacyIdentityAdapter(),
+        credentials=InMemoryCredentialBroker(),
+        model_provider=QueueModelProvider(),
+    )
     app = create_app(runtime)
     auth = {"geoToken": "test-token-assistant-message"}
     async with httpx.AsyncClient(
@@ -875,7 +896,13 @@ async def test_completed_run_persists_an_assistant_message_with_result_evidence(
 
 @pytest.mark.asyncio
 async def test_create_run_admits_auth_context_used_by_executor() -> None:
-    runtime = runtime_fixture()
+    # 该用例要验证一次真实的工具执行及准入上下文；模型行为必须显式
+    # 注入，不能再依赖生产代码里的隐式人口查询兜底。
+    runtime = RuntimeContainer(
+        identity_port=HashedLegacyIdentityAdapter(),
+        credentials=InMemoryCredentialBroker(),
+        model_provider=QueueModelProvider(),
+    )
     app = create_app(runtime)
     token = "test-token-admission-user"
     auth = {"geoToken": token}
@@ -909,8 +936,19 @@ async def test_create_run_admits_auth_context_used_by_executor() -> None:
         run_id=run_id,
     )
     events = await runtime.events.list_events(run_id=run_id)
-    tool_started = next(event for event in events if event.type == "tool.started")
-    tool_completed = next(event for event in events if event.type == "tool.completed")
+    # 模型只能请求语义入口；该入口负责校验并把准入上下文传递给受控
+    # 的业务能力，因此这里验证语义入口这一次执行事件。
+    tool_started = next(
+        event
+        for event in events
+        if event.type == "tool.started"
+        and event.data.get("tool_id") == "governance.semantic_query"
+    )
+    tool_completed = next(
+        event
+        for event in events
+        if event.type == "tool.completed"
+    )
     assert auth_context.run_id == run_id
     assert auth_context.session_id == session_id
     assert auth_context.credential_ref.startswith("cred_")
@@ -918,11 +956,8 @@ async def test_create_run_admits_auth_context_used_by_executor() -> None:
         tool_completed.data["tool_result"]["policy"]["auth_context_fingerprint"]
         == auth_context.auth_context_fingerprint
     )
-    assert tool_started.data["tool_id"] == "governance.query_population_metrics"
-    assert tool_started.data["display"] == {
-        "label": "查询人口聚合指标",
-        "status_label": "执行中",
-    }
+    assert tool_started.data["tool_id"] == "governance.semantic_query"
+    assert tool_started.data["display"]["status_label"] == "执行中"
     assert tool_completed.data["display"] == {
         "label": "查询人口聚合指标",
         "status_label": "执行成功",
@@ -1042,7 +1077,13 @@ async def test_create_run_prevalidation_uses_pinned_skill_registry() -> None:
 
 @pytest.mark.asyncio
 async def test_sse_endpoint_returns_run_events_without_token_in_payload() -> None:
-    app = create_app(runtime_fixture())
+    app = create_app(
+        RuntimeContainer(
+            identity_port=HashedLegacyIdentityAdapter(),
+            credentials=InMemoryCredentialBroker(),
+            model_provider=QueueModelProvider(),
+        )
+    )
     auth = {"geoToken": "test-token-sse-user"}
     async with httpx.AsyncClient(
         transport=httpx.ASGITransport(app=app), base_url="http://test"
@@ -1172,6 +1213,17 @@ async def test_cancel_endpoint_cancels_an_active_run_and_emits_event() -> None:
 async def test_cancel_endpoint_best_effort_cancels_active_tool_task() -> None:
     from full_view_agent.application.mock_executor import MockRunExecutor
 
+    class CancellablePlanner:
+        async def decide(self, _state):
+            return ToolAction(
+                tool_id="governance.query_population_metrics",
+                arguments={"query": {"scope": {"area_code": "330106"}}},
+            )
+
+    class CancellablePlannerFactory:
+        def create(self, **_kwargs):
+            return CancellablePlanner()
+
     class CancellableCapability:
         def __init__(self) -> None:
             self.started = asyncio.Event()
@@ -1193,6 +1245,7 @@ async def test_cancel_endpoint_best_effort_cancels_active_tool_task() -> None:
         events=runtime.events,
         capability=capability,
         auth_context_provider=runtime.auth_contexts,
+        planner_factory=CancellablePlannerFactory(),
     )
     app = create_app(runtime)
     auth = {"geoToken": "test-token-cancel-active-tool"}
@@ -1440,7 +1493,11 @@ async def test_client_message_id_rejects_changed_run_body() -> None:
 
 @pytest.mark.asyncio
 async def test_get_result_returns_typed_payload_only_to_its_owner() -> None:
-    runtime = runtime_fixture()
+    runtime = RuntimeContainer(
+        identity_port=HashedLegacyIdentityAdapter(),
+        credentials=InMemoryCredentialBroker(),
+        model_provider=QueueModelProvider(),
+    )
     app = create_app(runtime)
     auth = {"geoToken": "test-token-result-owner"}
     async with httpx.AsyncClient(
@@ -1863,7 +1920,11 @@ async def test_expired_analysis_report_metadata_is_explicit_not_object_profile()
 
 @pytest.mark.asyncio
 async def test_result_exposes_owner_scoped_evidence_without_internal_query_details() -> None:
-    runtime = runtime_fixture()
+    runtime = RuntimeContainer(
+        identity_port=HashedLegacyIdentityAdapter(),
+        credentials=InMemoryCredentialBroker(),
+        model_provider=QueueModelProvider(),
+    )
     app = create_app(runtime)
     auth = {"geoToken": "test-token-evidence-owner"}
     async with httpx.AsyncClient(
@@ -1920,8 +1981,12 @@ async def test_result_exposes_owner_scoped_evidence_without_internal_query_detai
     assert evidence["source_system"] == "in_memory_fixture"
     assert evidence["effective_area_codes"] == ["330106"]
     assert evidence["dataset_snapshot_version"] is None
-    assert evidence["semantic_registry_version"] is None
-    assert evidence["metric_definitions"] == []
+    # 人口查询通过受控语义入口后，证据必须记录服务器选择的语义目录版本，
+    # 不能再把它伪装成无语义来源的旧直连查询。
+    assert evidence["semantic_registry_version"] == "0.1.0-s0-candidate"
+    assert evidence["metric_definitions"] == [
+        {"metric_id": "person_count", "definition_version": "1.0"}
+    ]
     assert evidence["as_of"] is None
     assert evidence["freshness"] == {
         "status": "unknown",
@@ -1951,6 +2016,19 @@ async def test_reauthentication_input_refreshes_credential_and_resumes_run() -> 
 
             return await RecordingCapability().execute(**kwargs)
 
+    class ReauthPlanner:
+        async def decide(self, state):
+            if state.tool_results:
+                return FinishAction(summary="查询完成", legacy=True)
+            return ToolAction(
+                tool_id="governance.query_population_metrics",
+                arguments={"query": {"scope": {"area_code": "330106"}}},
+            )
+
+    class ReauthPlannerFactory:
+        def create(self, **_kwargs):
+            return ReauthPlanner()
+
     runtime = runtime_fixture()
     capability = ReauthOnceCapability()
     runtime.executor = MockRunExecutor(
@@ -1959,6 +2037,7 @@ async def test_reauthentication_input_refreshes_credential_and_resumes_run() -> 
         events=runtime.events,
         capability=capability,
         auth_context_provider=runtime.auth_contexts,
+        planner_factory=ReauthPlannerFactory(),
     )
     app = create_app(runtime)
     auth = {"geoToken": "test-token-reauth-user"}

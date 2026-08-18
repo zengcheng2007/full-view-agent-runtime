@@ -53,7 +53,7 @@ async def test_four_seed_capabilities_are_published(pg_schema) -> None:
         for tool_id in expected
     }
     assert versions_by_id["governance.query_population_metrics"].issuperset(
-        {"1.0.0", "1.1.0", "1.2.0"}
+        {"1.0.0", "1.1.0", "1.2.0", "1.3.0"}
     )
     for tool_id in expected - {"governance.query_population_metrics"}:
         assert "1.0.0" in versions_by_id[tool_id]
@@ -157,7 +157,7 @@ async def test_capability_snapshot_includes_seed_tools(pg_schema) -> None:
     expected_versions = {
         "governance.query_event_metrics": "1.0.0",
         "governance.query_housing_metrics": "1.0.0",
-        "governance.query_population_metrics": "1.2.0",
+        "governance.query_population_metrics": "1.3.0",
         "governance.resolve_area": "1.0.0",
     }
     assert {

@@ -173,6 +173,29 @@ class TwoToolPlanner:
         return FinishAction(summary="区划与人口查询均已完成", legacy=True)
 
 
+class PopulationListPlanner:
+    """Explicit test planner for tests that exercise executor mechanics.
+
+    Production no longer has a hidden population-query fallback.  These tests
+    therefore provide the planned action they need instead of relying on a
+    business-specific default in the executor.
+    """
+
+    async def decide(self, state):
+        if state.tool_results:
+            return FinishAction(summary="人口指标查询已完成", legacy=True)
+        return ToolAction(
+            tool_id="governance.query_population_metrics",
+            arguments={
+                "query": {
+                    "metrics": ["person_count"],
+                    "scope": {"area_code": "330106"},
+                    "group_by": ["street"],
+                }
+            },
+        )
+
+
 class RetryFailedToolPlanner:
     async def decide(self, state):
         return ToolAction(
@@ -235,6 +258,7 @@ async def test_mock_executor_completes_run_and_emits_ordered_events() -> None:
         store=store,
         events=events,
         auth_context_provider=StaticAuthContextProvider(),
+        planner_factory=RecordingPlannerFactory(PopulationListPlanner()),
     )
     session = await service.create_session(user_id="user-01", title="独居老人分析")
     run = await service.create_run(
@@ -284,6 +308,7 @@ async def test_mock_executor_requests_a_choropleth_for_supported_population_resu
         store=store,
         events=events,
         auth_context_provider=StaticAuthContextProvider(),
+        planner_factory=RecordingPlannerFactory(PopulationListPlanner()),
     )
     session = await service.create_session(user_id="user-map", title="人口地图")
     request = run_request("web-msg-map")
@@ -330,6 +355,7 @@ async def test_mock_executor_applies_accepted_steer_at_safe_checkpoint() -> None
         store=store,
         events=events,
         auth_context_provider=StaticAuthContextProvider(),
+        planner_factory=RecordingPlannerFactory(PopulationListPlanner()),
     )
     session = await service.create_session(user_id="user-01", title="独居老人分析")
     run = await service.create_run(
@@ -350,7 +376,8 @@ async def test_mock_executor_applies_accepted_steer_at_safe_checkpoint() -> None
 
 
 @pytest.mark.asyncio
-async def test_mock_executor_delegates_tool_execution_to_capability_service() -> None:
+async def test_executor_without_planner_fails_closed(
+) -> None:
     store = InMemoryAgentStore()
     events = InMemoryEventBroker()
     service = SessionRunService(store)
@@ -372,10 +399,13 @@ async def test_mock_executor_delegates_tool_execution_to_capability_service() ->
     await executor.execute(user_id="user-01", run_id=run.run_id)
 
     published = await events.list_events(run_id=run.run_id)
-    tool_result = published[2].data["tool_result"]
-    assert capability.tool_ids == ["governance.query_population_metrics"]
-    assert capability.auth_contexts == [population_auth_context()]
-    assert tool_result["data_result"]["data"]["rows"][0]["person_count"] == 321
+    terminal = await store.get_run(user_id="user-01", run_id=run.run_id)
+    assert capability.tool_ids == []
+    assert capability.auth_contexts == []
+    assert terminal.status == "failed"
+    assert terminal.completion_reason_code == "model_provider_unavailable"
+    assert [event.type for event in published] == ["run.started", "run.failed"]
+    assert published[-1].data["error_code"] == "model_provider_unavailable"
 
 
 @pytest.mark.asyncio
@@ -516,6 +546,7 @@ async def test_executor_drops_tool_result_when_run_is_cancelled_during_call() ->
         events=events,
         capability=capability,
         auth_context_provider=StaticAuthContextProvider(),
+        planner_factory=RecordingPlannerFactory(PopulationListPlanner()),
     )
     session = await service.create_session(user_id="user-01", title="取消竞态")
     run = await service.create_run(
@@ -548,6 +579,7 @@ async def test_executor_waits_for_reauthentication_instead_of_failing_run() -> N
         events=events,
         capability=ReauthenticationCapability(),
         auth_context_provider=StaticAuthContextProvider(),
+        planner_factory=RecordingPlannerFactory(PopulationListPlanner()),
     )
     session = await service.create_session(user_id="user-01", title="重新认证")
     run = await service.create_run(
@@ -590,6 +622,7 @@ async def test_executor_turns_harness_budget_exhaustion_into_failed_terminal_run
         capability=capability,
         auth_context_provider=StaticAuthContextProvider(),
         harness=harness,
+        planner_factory=RecordingPlannerFactory(PopulationListPlanner()),
     )
     session = await service.create_session(user_id="user-01", title="预算耗尽")
     run = await service.create_run(
@@ -620,6 +653,7 @@ async def test_executor_preserves_failed_tool_reason_in_terminal_run_and_events(
         events=events,
         capability=FailedCapability(),
         auth_context_provider=StaticAuthContextProvider(),
+        planner_factory=RecordingPlannerFactory(PopulationListPlanner()),
     )
     session = await service.create_session(user_id="user-01", title="Tool 失败")
     run = await service.create_run(
@@ -681,6 +715,7 @@ async def test_executor_terminalizes_run_after_unexpected_background_failure() -
         events=events,
         capability=UnexpectedFailureCapability(),
         auth_context_provider=StaticAuthContextProvider(),
+        planner_factory=RecordingPlannerFactory(PopulationListPlanner()),
     )
     session = await service.create_session(user_id="user-01", title="意外异常")
     run = await service.create_run(
@@ -709,6 +744,7 @@ async def test_executor_completes_policy_denial_without_requiring_data_result() 
         events=events,
         capability=DeniedCapability(),
         auth_context_provider=StaticAuthContextProvider(),
+        planner_factory=RecordingPlannerFactory(PopulationListPlanner()),
     )
     session = await service.create_session(user_id="user-01", title="权限拒绝")
     run = await service.create_run(

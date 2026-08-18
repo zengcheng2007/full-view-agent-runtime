@@ -210,3 +210,33 @@ def population_tool_v1_2() -> ToolCapability:
             "semantic_contract": population_semantic_contract_v1_2(),
         }
     )
+
+
+def population_semantic_contract_v1_3() -> ToolSemanticContract:
+    """Population contract with unsupported median requests made explicit.
+
+    A request for a *median-ranked* area is not equivalent to a conventional
+    rank/list query: the controller must first define the even-count and tie
+    policy in a dedicated shape.  Keep that boundary in the published contract
+    instead of letting a Runtime fallback reinterpret the question.
+    """
+    payload = population_semantic_contract_v1_2().model_dump(mode="python")
+    payload["excluded_intent_terms"] = [
+        *payload["excluded_intent_terms"],
+        "中位数",
+        "中位",
+    ]
+    payload["limitations"] = [
+        *payload["limitations"],
+        "未发布中位数排名能力形态，不将其降级为普通排名或列表",
+    ]
+    return ToolSemanticContract.model_validate(payload)
+
+
+def population_tool_v1_3() -> ToolCapability:
+    return population_tool_v1_2().model_copy(
+        update={
+            "version": "1.3.0",
+            "semantic_contract": population_semantic_contract_v1_3(),
+        }
+    )

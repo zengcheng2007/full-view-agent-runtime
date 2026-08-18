@@ -55,7 +55,7 @@ from full_view_agent.application.application_management_service import (
     ApplicationRegistry,
 )
 from full_view_agent.application.auth_context_refresh import RunAuthContextRefresher
-from full_view_agent.application.builtin_capability_seeds import population_tool_v1_2
+from full_view_agent.application.builtin_capability_seeds import population_tool_v1_3
 from full_view_agent.application.capability_consistency import (
     validate_production_http_capabilities,
 )
@@ -93,6 +93,7 @@ from full_view_agent.application.errors import (
     InputRequestClosed,
     InvalidAuthenticationTransport,
     InvalidCursor,
+    ModelProviderUnavailable,
     PolicyBindingMismatch,
     ReauthenticationRequired,
     ResourceNotFound,
@@ -118,7 +119,11 @@ from full_view_agent.application.model_planner import (
     ModelPlannerFactory,
     RunBoundModelPlannerFactory,
 )
-from full_view_agent.application.model_provider import ModelProvider
+from full_view_agent.application.model_provider import (
+    ModelProvider,
+    ModelRequest,
+    ModelResponse,
+)
 from full_view_agent.application.native_orchestrator import RunPlannerFactory
 from full_view_agent.application.orchestrator_factory import (
     create_analysis_orchestrator,
@@ -260,6 +265,22 @@ from full_view_agent.infrastructure.prompt_template_repository import (
 from full_view_agent.infrastructure.redis_event_notifier import RedisEventNotifier
 
 logger = logging.getLogger(__name__)
+
+
+class _UnconfiguredModelProvider:
+    """Base provider used only until a Run binds an Agent-release model.
+
+    A missing legacy default must never remove the Run-bound planner factory:
+    Agent releases select immutable model versions independently.  If a
+    legacy Run reaches this base provider, fail closed rather than inventing a
+    deterministic business answer.
+    """
+
+    async def complete(self, request: ModelRequest) -> ModelResponse:
+        del request
+        raise ModelProviderUnavailable(
+            "no model is configured for this legacy run"
+        )
 
 
 class SessionCreateBody(ContractModel):
@@ -998,26 +1019,25 @@ class RuntimeContainer:
             if database_url
             else InMemoryAnalysisRunBindingStore()
         )
-        planner_factory: RunPlannerFactory | None = (
-            ModelPlannerFactory(
-                provider=self.model_provider,
-                event_publisher=self.events,
-                context_builder=AgentContextBuilder(
-                    store=self.store,
-                    registry=self.tool_registry,
-                    semantic_presenter=self.semantic_stack.presenter,
-                    skill_registry=self.runtime_skill_registry,
-                    prompt_registry=self.runtime_prompt_registry,
-                ),
-                max_total_tokens=int(
-                    os.getenv("FULL_VIEW_MODEL_TOKEN_BUDGET", "32000")
-                ),
-                max_output_tokens=int(
-                    os.getenv("FULL_VIEW_MODEL_MAX_OUTPUT_TOKENS", "32000")
-                ),
-            )
-            if self.model_provider is not None
-            else None
+        base_model_provider: ModelProvider = (
+            self.model_provider or _UnconfiguredModelProvider()
+        )
+        planner_factory: RunPlannerFactory | None = ModelPlannerFactory(
+            provider=base_model_provider,
+            event_publisher=self.events,
+            context_builder=AgentContextBuilder(
+                store=self.store,
+                registry=self.tool_registry,
+                semantic_presenter=self.semantic_stack.presenter,
+                skill_registry=self.runtime_skill_registry,
+                prompt_registry=self.runtime_prompt_registry,
+            ),
+            max_total_tokens=int(
+                os.getenv("FULL_VIEW_MODEL_TOKEN_BUDGET", "32000")
+            ),
+            max_output_tokens=int(
+                os.getenv("FULL_VIEW_MODEL_MAX_OUTPUT_TOKENS", "32000")
+            ),
         )
         if planner_factory is not None and self.model_config_service is not None:
             assert self.run_model_binding_repository is not None
@@ -1139,7 +1159,7 @@ class RuntimeContainer:
         # The no-DB composition consumes a published control-plane Tool too;
         # the physical built-in Registry deliberately remains contract-free.
         if isinstance(self.capability_repository, InMemoryCapabilityRepository):
-            population_seed = population_tool_v1_2()
+            population_seed = population_tool_v1_3()
             existing_population = await self.capability_repository.get(
                 population_seed.capability_id, population_seed.version
             )

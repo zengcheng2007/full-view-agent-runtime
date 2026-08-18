@@ -645,7 +645,7 @@ def _supported_housing_city_street_followup(
 
 def _contract_semantic_followup(
     *, request: ModelRequest, state: HarnessState
-) -> ToolAction | None:
+) -> ToolAction | FinishAction | None:
     """Resolve one exact semantic query from published contract metadata."""
 
     if len(state.tool_results) != 1:
@@ -665,18 +665,33 @@ def _contract_semantic_followup(
     semantic_tool = _find_advertised_tool(request, SEMANTIC_QUERY_TOOL_ID)
     if semantic_tool is None or not semantic_tool.semantic_contracts:
         return None
-    resolved = ContractSemanticIntentResolver().resolve(
+    preview = ContractSemanticIntentResolver().preview(
         message=_latest_user_message(request),
         scope_area_code=area_code,
         contracts=semantic_tool.semantic_contracts,
     )
-    if resolved is None:
+    if preview.status == "unsupported" and preview.reason_code == "EXCLUDED_INTENT":
+        structured = StructuredFinish(
+            kind="capability",
+            summary=(
+                "当前已发布的能力不支持该查询条件，系统未将其替换为其他统计方式。"
+                "请在智能体控制台发布对应的能力形态后重试。"
+            ),
+            limitations=["unsupported_requested_constraint"],
+        )
+        return FinishAction(
+            summary=structured.summary,
+            structured_finish=structured,
+            legacy=False,
+            server_authored=True,
+        )
+    if preview.status != "matched" or preview.shape_id is None or preview.spec is None:
         return None
     return ToolAction(
         tool_id=SEMANTIC_QUERY_TOOL_ID,
         arguments={
             **semantic_tool.server_arguments,
-            "spec": resolved.spec.model_dump(mode="json"),
+            "spec": preview.spec.model_dump(mode="json"),
         },
     )
 

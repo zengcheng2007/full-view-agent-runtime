@@ -6,6 +6,7 @@ from full_view_agent.application.answer_claims import (
 )
 from full_view_agent.application.builtin_capability_seeds import (
     population_semantic_contract_v1_2,
+    population_semantic_contract_v1_3,
 )
 from full_view_agent.application.errors import BudgetExceeded, ModelContractError
 from full_view_agent.application.harness import (
@@ -214,6 +215,58 @@ async def test_model_planner_routes_average_from_published_contract_without_mode
             },
         },
     )
+    assert provider.requests == []
+
+
+@pytest.mark.asyncio
+async def test_model_planner_stops_an_excluded_contract_request(
+) -> None:
+    semantic_tool = ModelToolDefinition(
+        tool_id="governance.semantic_query",
+        description="语义查询",
+        input_schema={"type": "object"},
+        server_arguments={"catalog_version": "catalog-v1"},
+        semantic_contracts=(population_semantic_contract_v1_3(),),
+    )
+
+    class ContractContextBuilder:
+        async def build(self, **_kwargs) -> ModelRequest:
+            return ModelRequest(
+                messages=(
+                    ModelMessage(
+                        role="user",
+                        content="杭州市人口排名中位数的是哪个街道，人口是多少",
+                    ),
+                ),
+                tools=(semantic_tool,),
+            )
+
+    area = successful_area_result().model_copy(deep=True)
+    assert area.data_result is not None
+    area.data_result = area.data_result.model_copy(
+        update={
+            "data": AreaCandidatesData(
+                candidates=[
+                    AreaCandidate(area_code="3301", area_name="杭州市", level="city")
+                ],
+                ambiguous=False,
+                resolved_area_code="3301",
+            )
+        }
+    )
+    provider = QueueModelProvider()
+
+    action = await ModelPlanner(
+        provider=provider,
+        context_builder=ContractContextBuilder(),
+        user_id="user-01",
+        auth_context=population_auth_context(),
+    ).decide(HarnessState(tool_results=(area,)))
+
+    assert isinstance(action, FinishAction)
+    assert action.server_authored is True
+    assert "不支持" in action.summary
+    assert "替换为其他统计方式" in action.summary
     assert provider.requests == []
 
 

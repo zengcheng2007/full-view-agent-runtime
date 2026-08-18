@@ -2,6 +2,9 @@ from __future__ import annotations
 
 import pytest
 
+from full_view_agent.application.builtin_capability_seeds import (
+    population_semantic_contract_v1_3,
+)
 from full_view_agent.application.capability_management_service import (
     CapabilityManagementService,
 )
@@ -176,6 +179,23 @@ def test_resolver_fails_closed_for_excluded_or_ambiguous_intent() -> None:
         )
         is None
     )
+
+
+def test_published_population_contract_rejects_median_ranking_until_a_shape_exists() -> None:
+    """Never reinterpret a median-ranking request as an ordinary rank/list.
+
+    Median semantics need an explicit, published rule for odd/even row counts
+    and ties.  Until an administrator publishes that query shape, the contract
+    must return an explainable unsupported outcome.
+    """
+    preview = ContractSemanticIntentResolver().preview(
+        message="杭州市人口排名中位数的是哪个街道，人口是多少",
+        scope_area_code="3301",
+        contracts=(population_semantic_contract_v1_3(),),
+    )
+
+    assert preview.status == "unsupported"
+    assert preview.reason_code == "EXCLUDED_INTENT"
 
 
 def test_contract_intent_preview_explains_match_and_rejection() -> None:
