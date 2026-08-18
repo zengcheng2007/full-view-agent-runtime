@@ -1,0 +1,27 @@
+schema_version: "1.0"
+case_id: q25-object-profile-area-escalation-denied
+description: "Q25: 用户尝试查询超出其区划授权的楼栋画像，必须 fail-closed 拒绝"
+user_message: 查看编号3301080010010001的楼栋信息
+auth:
+  # 用户只被授权了 330106 区划，但试图查询 330108 的对象
+  area_codes: ["330106"]
+  datasets: [administrative_area, governance_objects]
+  entitlements: [governance.area.read, governance.object.profile.read]
+model_steps:
+  - type: tool_call
+    tool_id: governance.get_object_profile
+    arguments:
+      object_ref:
+        object_type: building
+        object_id: "3301080010010001"
+      scope: {area_code: "330108"}
+      field_sets: [summary]
+  - type: finish
+    content: 该楼栋不在当前授权区划范围内，无法查看。
+expected:
+  terminal_status: completed
+  outcome: denied
+  completion_reason_code: AREA_OUT_OF_SCOPE
+  tool_ids: [governance.get_object_profile]
+  min_evidence_count: 0
+  required_event_types: [tool.completed, run.completed]
