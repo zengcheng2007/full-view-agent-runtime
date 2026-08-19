@@ -83,6 +83,14 @@ _CAPABILITY_LINES: dict[str, tuple[str, ...]] = {
         "group_by=['descendant_street']，全市社区传 "
         "group_by=['descendant_community']；必须按 person_count 排序并设置 TopN limit。",
     ),
+    "governance.query_enterprise_metrics": (
+        "query_enterprise_metrics：查询授权区域内企业聚合数量，不返回企业明细。"
+        "group_by=[district] 按区县汇总，group_by=[street] 按街道汇总，"
+        "group_by=[enterprise_type] 按企业类型汇总（最多 8 类，需字典映射为中文），"
+        "group_by=[enterprise_scale] 按从业人数分五档（1-10、11-50、51-100、101-300、300+，"
+        "从业人数为空的不计入），"
+        "group_by=[industry_name] 按行业名称汇总（最多 8 类，名称直接来自上游）。",
+    ),
     "governance.query_event_metrics": (
         "query_event_metrics：metrics=['finish_rate'] 且不分组时，查询"
         "指定区域自身的网格、社区、街道三个层级办结率快照；"
@@ -101,6 +109,7 @@ _CANONICAL_TOOL_ORDER: tuple[str, ...] = (
     "knowledge.search",
     "governance.resolve_area",
     "governance.query_population_metrics",
+    "governance.query_enterprise_metrics",
     "governance.query_housing_metrics",
     "governance.query_event_metrics",
     "governance.get_object_profile",
