@@ -11,7 +11,11 @@ from dataclasses import dataclass
 from pydantic import BaseModel
 
 from full_view_agent.application.capability_service import TOOL_INPUT_MODELS
-from full_view_agent.application.prompt_catalog import build_full_view_system_prompt
+from full_view_agent.application.prompt_catalog import (
+    _CANONICAL_TOOL_ORDER,
+    _CAPABILITY_LINES,
+    build_full_view_system_prompt,
+)
 from full_view_agent.application.tool_registry import (
     PRODUCTION_HTTP_TOOL_IDS,
     ToolRegistry,
@@ -144,6 +148,7 @@ def validate_production_http_capabilities(
     _validate_population_surface(errors, registry=registry, catalog=catalog)
     _validate_housing_switch(errors, registry=registry, catalog=catalog)
     _validate_event_category_switch(errors, registry=registry, catalog=catalog)
+    _validate_prompt_catalog_coverage(errors)
     if errors:
         details = "; ".join(sorted(set(errors)))
         raise CapabilityConsistencyError(f"production capability drift: {details}")
@@ -280,6 +285,38 @@ def _validate_event_category_switch(
         or "event-category" in result_schema_text
     ):
         errors.append("event category is disabled but remains reachable")
+
+
+def _validate_prompt_catalog_coverage(errors: list[str]) -> None:
+    """Fail closed: every model-callable production tool must have capability guidance.
+
+    A registered tool without guidance leaves the model to guess which tool
+    to call, which can silently route queries to the wrong domain (e.g. an
+    enterprise query answered with population data).  See WSZC-10 root cause.
+
+    Only tools in _CANONICAL_TOOL_ORDER are model-callable; other production
+    HTTP tools may be internal APIs not exposed to the model.
+    """
+    # Tools whose guidance is generated dynamically in build_full_view_system_prompt.
+    dynamic_guidance_tools = {
+        "governance.query_housing_metrics",
+        "governance.query_event_metrics",
+    }
+    for tool_id in _CANONICAL_TOOL_ORDER:
+        # Skip knowledge.search — it's model-callable but has its own guidance path
+        if tool_id == "knowledge.search":
+            continue
+        # Only check tools that are in the production set
+        if tool_id not in PRODUCTION_HTTP_TOOL_IDS and tool_id != "governance.get_object_profile":
+            continue
+        has_static = tool_id in _CAPABILITY_LINES
+        has_dynamic = tool_id in dynamic_guidance_tools
+        if not (has_static or has_dynamic):
+            errors.append(
+                f"{tool_id}: in _CANONICAL_TOOL_ORDER (model-callable) but has no "
+                "capability guidance in prompt_catalog._CAPABILITY_LINES — "
+                "the model cannot know when or how to call it"
+            )
 
 
 def _expect_equal(errors: list[str], label: str, actual: object, expected: object) -> None:
