@@ -1,0 +1,103 @@
+{
+  "$defs": {
+    "FrontendCommandReceiptError": {
+      "additionalProperties": false,
+      "properties": {
+        "code": {
+          "maxLength": 128,
+          "minLength": 1,
+          "title": "Code",
+          "type": "string"
+        },
+        "message": {
+          "maxLength": 1000,
+          "minLength": 1,
+          "title": "Message",
+          "type": "string"
+        }
+      },
+      "required": [
+        "code",
+        "message"
+      ],
+      "title": "FrontendCommandReceiptError",
+      "type": "object"
+    }
+  },
+  "additionalProperties": false,
+  "properties": {
+    "schema_version": {
+      "const": "1.1",
+      "default": "1.1",
+      "title": "Schema Version",
+      "type": "string"
+    },
+    "command_id": {
+      "maxLength": 128,
+      "minLength": 1,
+      "title": "Command Id",
+      "type": "string"
+    },
+    "client_instance_id": {
+      "maxLength": 128,
+      "minLength": 1,
+      "title": "Client Instance Id",
+      "type": "string"
+    },
+    "status": {
+      "enum": [
+        "accepted",
+        "completed",
+        "failed",
+        "unsupported",
+        "rejected_precondition",
+        "rejected_protocol",
+        "expired"
+      ],
+      "title": "Status",
+      "type": "string"
+    },
+    "received_at": {
+      "format": "date-time",
+      "title": "Received At",
+      "type": "string"
+    },
+    "completed_at": {
+      "anyOf": [
+        {
+          "format": "date-time",
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Completed At"
+    },
+    "client_state": {
+      "additionalProperties": true,
+      "title": "Client State",
+      "type": "object"
+    },
+    "error": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/FrontendCommandReceiptError"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null
+    }
+  },
+  "required": [
+    "command_id",
+    "client_instance_id",
+    "status",
+    "received_at"
+  ],
+  "title": "FrontendCommandReceipt",
+  "type": "object"
+}

@@ -1,0 +1,47 @@
+{
+  "schema_version": "1.1",
+  "tool_id": "governance.query_event_metrics",
+  "tool_version": "1.0.0",
+  "status": "active",
+  "domain": "governance",
+  "owner": "full-information-domain-team",
+  "effect": "read",
+  "risk_level": "low",
+  "dataset_id": "event",
+  "data_classifications": [
+    "internal",
+    "aggregated"
+  ],
+  "required_permissions": [
+    "governance.event.aggregate.read"
+  ],
+  "input_schema_ref": "schema://tools/query-event-metrics-input/1.0.0",
+  "result_schemas": [
+    {
+      "kind": "table",
+      "data_schema_ref": "schema://data/event-finish-rate-table/1.0.0"
+    },
+    {
+      "kind": "table",
+      "data_schema_ref": "schema://data/event-trend-table/1.0.0"
+    }
+  ],
+  "limits": {
+    "timeout_ms": 8000,
+    "max_attempts": 2,
+    "max_result_rows": 1000,
+    "max_group_buckets": 200
+  },
+  "cache_policy": {
+    "enabled": true,
+    "ttl_seconds": 60
+  },
+  "policy": {
+    "action": "governance.event.aggregate.read",
+    "pre_check": true,
+    "post_filter": true,
+    "denial_scope": "dataset_area_fields"
+  },
+  "adapter_ref": "adapter://geo-qxst/event-metrics/1.0",
+  "semantic_contract": null
+}

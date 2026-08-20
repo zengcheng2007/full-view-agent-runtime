@@ -1,0 +1,159 @@
+{
+  "$defs": {
+    "EffectivePolicyScope": {
+      "additionalProperties": false,
+      "properties": {
+        "area_codes": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Area Codes",
+          "type": "array"
+        },
+        "datasets": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Datasets",
+          "type": "array"
+        },
+        "allowed_field_sets": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Allowed Field Sets",
+          "type": "array"
+        },
+        "denied_field_sets": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Denied Field Sets",
+          "type": "array"
+        },
+        "result_limit": {
+          "default": 1,
+          "maximum": 10000,
+          "minimum": 0,
+          "title": "Result Limit",
+          "type": "integer"
+        }
+      },
+      "title": "EffectivePolicyScope",
+      "type": "object"
+    }
+  },
+  "additionalProperties": false,
+  "properties": {
+    "schema_version": {
+      "const": "1.1",
+      "default": "1.1",
+      "title": "Schema Version",
+      "type": "string"
+    },
+    "policy_decision_id": {
+      "title": "Policy Decision Id",
+      "type": "string"
+    },
+    "decision": {
+      "enum": [
+        "allow",
+        "mask",
+        "deny",
+        "need_approval"
+      ],
+      "title": "Decision",
+      "type": "string"
+    },
+    "phase": {
+      "default": "pre_execution",
+      "enum": [
+        "pre_execution",
+        "post_result"
+      ],
+      "title": "Phase",
+      "type": "string"
+    },
+    "auth_context_fingerprint": {
+      "title": "Auth Context Fingerprint",
+      "type": "string"
+    },
+    "tool_id": {
+      "title": "Tool Id",
+      "type": "string"
+    },
+    "tool_version": {
+      "title": "Tool Version",
+      "type": "string"
+    },
+    "arguments_fingerprint": {
+      "title": "Arguments Fingerprint",
+      "type": "string"
+    },
+    "request_fingerprint": {
+      "title": "Request Fingerprint",
+      "type": "string"
+    },
+    "result_fingerprint": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Result Fingerprint"
+    },
+    "reason_codes": {
+      "items": {
+        "type": "string"
+      },
+      "title": "Reason Codes",
+      "type": "array"
+    },
+    "user_message": {
+      "title": "User Message",
+      "type": "string"
+    },
+    "effective_scope": {
+      "$ref": "#/$defs/EffectivePolicyScope"
+    },
+    "policy_fingerprint": {
+      "title": "Policy Fingerprint",
+      "type": "string"
+    },
+    "policy_version": {
+      "title": "Policy Version",
+      "type": "string"
+    },
+    "issued_at": {
+      "format": "date-time",
+      "title": "Issued At",
+      "type": "string"
+    },
+    "expires_at": {
+      "format": "date-time",
+      "title": "Expires At",
+      "type": "string"
+    }
+  },
+  "required": [
+    "policy_decision_id",
+    "decision",
+    "auth_context_fingerprint",
+    "tool_id",
+    "tool_version",
+    "arguments_fingerprint",
+    "request_fingerprint",
+    "user_message",
+    "effective_scope",
+    "policy_fingerprint",
+    "policy_version",
+    "issued_at",
+    "expires_at"
+  ],
+  "title": "PolicyDecision",
+  "type": "object"
+}

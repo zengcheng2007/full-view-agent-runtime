@@ -1,0 +1,128 @@
+{
+  "$defs": {
+    "InputOption": {
+      "additionalProperties": false,
+      "properties": {
+        "option_id": {
+          "maxLength": 128,
+          "minLength": 1,
+          "title": "Option Id",
+          "type": "string"
+        },
+        "label": {
+          "maxLength": 200,
+          "minLength": 1,
+          "title": "Label",
+          "type": "string"
+        }
+      },
+      "required": [
+        "option_id",
+        "label"
+      ],
+      "title": "InputOption",
+      "type": "object"
+    }
+  },
+  "additionalProperties": false,
+  "properties": {
+    "input_request_id": {
+      "title": "Input Request Id",
+      "type": "string"
+    },
+    "run_id": {
+      "title": "Run Id",
+      "type": "string"
+    },
+    "kind": {
+      "enum": [
+        "clarification",
+        "selection",
+        "approval",
+        "reauth"
+      ],
+      "title": "Kind",
+      "type": "string"
+    },
+    "prompt": {
+      "maxLength": 1000,
+      "minLength": 1,
+      "title": "Prompt",
+      "type": "string"
+    },
+    "options": {
+      "items": {
+        "$ref": "#/$defs/InputOption"
+      },
+      "maxItems": 100,
+      "title": "Options",
+      "type": "array"
+    },
+    "allow_free_text": {
+      "default": false,
+      "title": "Allow Free Text",
+      "type": "boolean"
+    },
+    "run_state_version": {
+      "minimum": 1,
+      "title": "Run State Version",
+      "type": "integer"
+    },
+    "expires_at": {
+      "format": "date-time",
+      "title": "Expires At",
+      "type": "string"
+    },
+    "closed_at": {
+      "anyOf": [
+        {
+          "format": "date-time",
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Closed At"
+    },
+    "analysis_plan_id": {
+      "anyOf": [
+        {
+          "maxLength": 128,
+          "minLength": 1,
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Analysis Plan Id"
+    },
+    "analysis_request_id": {
+      "anyOf": [
+        {
+          "maxLength": 128,
+          "minLength": 1,
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Analysis Request Id"
+    }
+  },
+  "required": [
+    "input_request_id",
+    "run_id",
+    "kind",
+    "prompt",
+    "run_state_version",
+    "expires_at"
+  ],
+  "title": "PendingInputRequest",
+  "type": "object"
+}

@@ -1,0 +1,228 @@
+{
+  "$defs": {
+    "MetricQueryScope": {
+      "additionalProperties": false,
+      "properties": {
+        "area_code": {
+          "maxLength": 32,
+          "minLength": 1,
+          "title": "Area Code",
+          "type": "string"
+        },
+        "include_descendants": {
+          "default": true,
+          "title": "Include Descendants",
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "area_code"
+      ],
+      "title": "MetricQueryScope",
+      "type": "object"
+    },
+    "PopulationMetricFilter": {
+      "additionalProperties": false,
+      "properties": {
+        "field": {
+          "enum": [
+            "person_category",
+            "age",
+            "gender"
+          ],
+          "title": "Field",
+          "type": "string"
+        },
+        "operator": {
+          "enum": [
+            "eq",
+            "neq",
+            "in",
+            "gte",
+            "gt",
+            "lte",
+            "lt",
+            "between",
+            "exists"
+          ],
+          "title": "Operator",
+          "type": "string"
+        },
+        "value": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "integer"
+            },
+            {
+              "type": "number"
+            },
+            {
+              "type": "boolean"
+            },
+            {
+              "items": {
+                "anyOf": [
+                  {
+                    "type": "string"
+                  },
+                  {
+                    "type": "integer"
+                  },
+                  {
+                    "type": "number"
+                  }
+                ]
+              },
+              "type": "array"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Value"
+        }
+      },
+      "required": [
+        "field",
+        "operator"
+      ],
+      "title": "PopulationMetricFilter",
+      "type": "object"
+    },
+    "PopulationMetricOrder": {
+      "additionalProperties": false,
+      "properties": {
+        "field": {
+          "const": "person_count",
+          "title": "Field",
+          "type": "string"
+        },
+        "direction": {
+          "default": "asc",
+          "enum": [
+            "asc",
+            "desc"
+          ],
+          "title": "Direction",
+          "type": "string"
+        }
+      },
+      "required": [
+        "field"
+      ],
+      "title": "PopulationMetricOrder",
+      "type": "object"
+    },
+    "PopulationMetricQuerySpec": {
+      "additionalProperties": false,
+      "properties": {
+        "schema_version": {
+          "const": "1.1",
+          "default": "1.1",
+          "title": "Schema Version",
+          "type": "string"
+        },
+        "metrics": {
+          "items": {
+            "const": "person_count",
+            "type": "string"
+          },
+          "maxItems": 1,
+          "minItems": 1,
+          "title": "Metrics",
+          "type": "array"
+        },
+        "operator": {
+          "default": "list",
+          "enum": [
+            "list",
+            "sum",
+            "avg",
+            "min",
+            "max",
+            "top",
+            "bottom",
+            "rank"
+          ],
+          "title": "Operator",
+          "type": "string"
+        },
+        "scope": {
+          "$ref": "#/$defs/MetricQueryScope"
+        },
+        "filters": {
+          "items": {
+            "$ref": "#/$defs/PopulationMetricFilter"
+          },
+          "maxItems": 10,
+          "title": "Filters",
+          "type": "array"
+        },
+        "group_by": {
+          "items": {
+            "enum": [
+              "district",
+              "street",
+              "community",
+              "grid",
+              "descendant_street",
+              "descendant_community",
+              "gender",
+              "age_band"
+            ],
+            "type": "string"
+          },
+          "maxItems": 2,
+          "title": "Group By",
+          "type": "array"
+        },
+        "order_by": {
+          "items": {
+            "$ref": "#/$defs/PopulationMetricOrder"
+          },
+          "maxItems": 1,
+          "title": "Order By",
+          "type": "array"
+        },
+        "limit": {
+          "default": 200,
+          "maximum": 1000,
+          "minimum": 1,
+          "title": "Limit",
+          "type": "integer"
+        },
+        "presentation_hint": {
+          "default": "table",
+          "enum": [
+            "table",
+            "metric",
+            "choropleth"
+          ],
+          "title": "Presentation Hint",
+          "type": "string"
+        }
+      },
+      "required": [
+        "metrics",
+        "scope"
+      ],
+      "title": "PopulationMetricQuerySpec",
+      "type": "object"
+    }
+  },
+  "additionalProperties": false,
+  "properties": {
+    "query": {
+      "$ref": "#/$defs/PopulationMetricQuerySpec"
+    }
+  },
+  "required": [
+    "query"
+  ],
+  "title": "QueryPopulationMetricsInput",
+  "type": "object"
+}

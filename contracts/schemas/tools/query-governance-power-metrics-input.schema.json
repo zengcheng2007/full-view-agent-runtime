@@ -1,0 +1,55 @@
+{
+  "$defs": {
+    "GovernancePowerMetricQuerySpec": {
+      "additionalProperties": false,
+      "properties": {
+        "schema_version": {
+          "const": "1.0",
+          "default": "1.0",
+          "title": "Schema Version",
+          "type": "string"
+        },
+        "scope": {
+          "$ref": "#/$defs/MetricQueryScope"
+        }
+      },
+      "required": [
+        "scope"
+      ],
+      "title": "GovernancePowerMetricQuerySpec",
+      "type": "object"
+    },
+    "MetricQueryScope": {
+      "additionalProperties": false,
+      "properties": {
+        "area_code": {
+          "maxLength": 32,
+          "minLength": 1,
+          "title": "Area Code",
+          "type": "string"
+        },
+        "include_descendants": {
+          "default": true,
+          "title": "Include Descendants",
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "area_code"
+      ],
+      "title": "MetricQueryScope",
+      "type": "object"
+    }
+  },
+  "additionalProperties": false,
+  "properties": {
+    "query": {
+      "$ref": "#/$defs/GovernancePowerMetricQuerySpec"
+    }
+  },
+  "required": [
+    "query"
+  ],
+  "title": "QueryGovernancePowerMetricsInput",
+  "type": "object"
+}

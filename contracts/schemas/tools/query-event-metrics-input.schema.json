@@ -1,0 +1,119 @@
+{
+  "$defs": {
+    "EventMetricQuerySpec": {
+      "additionalProperties": false,
+      "properties": {
+        "schema_version": {
+          "const": "1.1",
+          "default": "1.1",
+          "title": "Schema Version",
+          "type": "string"
+        },
+        "metrics": {
+          "items": {
+            "enum": [
+              "finish_rate",
+              "event_count"
+            ],
+            "type": "string"
+          },
+          "maxItems": 1,
+          "minItems": 1,
+          "title": "Metrics",
+          "type": "array"
+        },
+        "scope": {
+          "$ref": "#/$defs/MetricQueryScope"
+        },
+        "group_by": {
+          "items": {
+            "enum": [
+              "month",
+              "event_category"
+            ],
+            "type": "string"
+          },
+          "maxItems": 1,
+          "title": "Group By",
+          "type": "array"
+        },
+        "time_range": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/EventMetricTimeRange"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "limit": {
+          "default": 200,
+          "maximum": 1000,
+          "minimum": 1,
+          "title": "Limit",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "scope"
+      ],
+      "title": "EventMetricQuerySpec",
+      "type": "object"
+    },
+    "EventMetricTimeRange": {
+      "additionalProperties": false,
+      "properties": {
+        "start": {
+          "format": "date",
+          "title": "Start",
+          "type": "string"
+        },
+        "end": {
+          "format": "date",
+          "title": "End",
+          "type": "string"
+        }
+      },
+      "required": [
+        "start",
+        "end"
+      ],
+      "title": "EventMetricTimeRange",
+      "type": "object"
+    },
+    "MetricQueryScope": {
+      "additionalProperties": false,
+      "properties": {
+        "area_code": {
+          "maxLength": 32,
+          "minLength": 1,
+          "title": "Area Code",
+          "type": "string"
+        },
+        "include_descendants": {
+          "default": true,
+          "title": "Include Descendants",
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "area_code"
+      ],
+      "title": "MetricQueryScope",
+      "type": "object"
+    }
+  },
+  "additionalProperties": false,
+  "properties": {
+    "query": {
+      "$ref": "#/$defs/EventMetricQuerySpec"
+    }
+  },
+  "required": [
+    "query"
+  ],
+  "title": "QueryEventMetricsInput",
+  "type": "object"
+}

@@ -1,0 +1,2387 @@
+{
+  "$defs": {
+    "AnalysisChildResultRef": {
+      "additionalProperties": false,
+      "description": "已校验子 DataResult 的最小引用，不复制 payload。",
+      "properties": {
+        "result_id": {
+          "maxLength": 128,
+          "minLength": 1,
+          "title": "Result Id",
+          "type": "string"
+        },
+        "result_fingerprint": {
+          "pattern": "^sha256:[0-9a-f]{64}$",
+          "title": "Result Fingerprint",
+          "type": "string"
+        },
+        "kind": {
+          "const": "table",
+          "title": "Kind",
+          "type": "string"
+        },
+        "data_schema_ref": {
+          "maxLength": 200,
+          "minLength": 1,
+          "title": "Data Schema Ref",
+          "type": "string"
+        }
+      },
+      "required": [
+        "result_id",
+        "result_fingerprint",
+        "kind",
+        "data_schema_ref"
+      ],
+      "title": "AnalysisChildResultRef",
+      "type": "object"
+    },
+    "AnalysisOmission": {
+      "additionalProperties": false,
+      "description": "计划 omission：不可执行主题的受控说明。",
+      "properties": {
+        "goals": {
+          "items": {
+            "enum": [
+              "overview",
+              "population",
+              "housing",
+              "event"
+            ],
+            "type": "string"
+          },
+          "maxItems": 4,
+          "minItems": 1,
+          "title": "Goals",
+          "type": "array"
+        },
+        "subject": {
+          "maxLength": 64,
+          "minLength": 1,
+          "title": "Subject",
+          "type": "string"
+        },
+        "reason_code": {
+          "enum": [
+            "SUBJECT_NOT_BINDABLE",
+            "SCOPE_KIND_UNSUPPORTED",
+            "NOT_ENTITLED",
+            "DATASET_NOT_AUTHORIZED",
+            "FIELD_POLICY_MISMATCH",
+            "AREA_NOT_AUTHORIZED",
+            "SCOPE_LEVEL_UNSUPPORTED",
+            "BUDGET_TOOL_CALLS_EXCEEDED"
+          ],
+          "title": "Reason Code",
+          "type": "string"
+        },
+        "detail": {
+          "maxLength": 500,
+          "minLength": 1,
+          "title": "Detail",
+          "type": "string"
+        }
+      },
+      "required": [
+        "goals",
+        "subject",
+        "reason_code",
+        "detail"
+      ],
+      "title": "AnalysisOmission",
+      "type": "object"
+    },
+    "AnalysisReportDataResult": {
+      "additionalProperties": false,
+      "description": "框架无关的区域研判结构化结果（DataResult union 成员）。\n\nenvelope 字段与既有 DataResult 同形：``result_id`` 与\n``result_fingerprint`` 由组装器按报告确定性内容计算，创建/过期时间\n不参与身份计算。",
+      "properties": {
+        "result_id": {
+          "maxLength": 128,
+          "minLength": 1,
+          "title": "Result Id",
+          "type": "string"
+        },
+        "kind": {
+          "const": "analysis_report",
+          "default": "analysis_report",
+          "title": "Kind",
+          "type": "string"
+        },
+        "data_schema_ref": {
+          "maxLength": 200,
+          "minLength": 1,
+          "title": "Data Schema Ref",
+          "type": "string"
+        },
+        "result_fingerprint": {
+          "pattern": "^sha256:[0-9a-f]{64}$",
+          "title": "Result Fingerprint",
+          "type": "string"
+        },
+        "payload_status": {
+          "default": "available",
+          "enum": [
+            "available",
+            "expired"
+          ],
+          "title": "Payload Status",
+          "type": "string"
+        },
+        "created_at": {
+          "format": "date-time",
+          "title": "Created At",
+          "type": "string"
+        },
+        "payload_expires_at": {
+          "format": "date-time",
+          "title": "Payload Expires At",
+          "type": "string"
+        },
+        "evidence_ids": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Evidence Ids",
+          "type": "array"
+        },
+        "inline": {
+          "default": true,
+          "title": "Inline",
+          "type": "boolean"
+        },
+        "schema_version": {
+          "const": "1.0",
+          "default": "1.0",
+          "title": "Schema Version",
+          "type": "string"
+        },
+        "plan_id": {
+          "maxLength": 128,
+          "minLength": 1,
+          "title": "Plan Id",
+          "type": "string"
+        },
+        "request_id": {
+          "maxLength": 128,
+          "minLength": 1,
+          "title": "Request Id",
+          "type": "string"
+        },
+        "status": {
+          "enum": [
+            "completed",
+            "partial",
+            "failed"
+          ],
+          "title": "Status",
+          "type": "string"
+        },
+        "reason_code": {
+          "maxLength": 128,
+          "minLength": 1,
+          "title": "Reason Code",
+          "type": "string"
+        },
+        "sections": {
+          "items": {
+            "$ref": "#/$defs/AnalysisReportSection"
+          },
+          "title": "Sections",
+          "type": "array"
+        },
+        "omissions": {
+          "default": [],
+          "items": {
+            "$ref": "#/$defs/AnalysisOmission"
+          },
+          "title": "Omissions",
+          "type": "array"
+        },
+        "limitations": {
+          "default": [],
+          "items": {
+            "$ref": "#/$defs/AnalysisReportLimitation"
+          },
+          "title": "Limitations",
+          "type": "array"
+        },
+        "extensions": {
+          "$ref": "#/$defs/AnalysisReportExtensions"
+        }
+      },
+      "required": [
+        "result_id",
+        "data_schema_ref",
+        "result_fingerprint",
+        "plan_id",
+        "request_id",
+        "status",
+        "reason_code",
+        "sections"
+      ],
+      "title": "AnalysisReportDataResult",
+      "type": "object"
+    },
+    "AnalysisReportExtensions": {
+      "additionalProperties": false,
+      "description": "未来确定性派生指标/证据图的版本化扩展位；1.0 必须为空。",
+      "properties": {
+        "derived_metric_refs": {
+          "default": [],
+          "items": {
+            "type": "string"
+          },
+          "maxItems": 0,
+          "title": "Derived Metric Refs",
+          "type": "array"
+        },
+        "evidence_graph_refs": {
+          "default": [],
+          "items": {
+            "type": "string"
+          },
+          "maxItems": 0,
+          "title": "Evidence Graph Refs",
+          "type": "array"
+        }
+      },
+      "title": "AnalysisReportExtensions",
+      "type": "object"
+    },
+    "AnalysisReportLimitation": {
+      "additionalProperties": false,
+      "description": "非 success 步骤的结构化限制，不把失败解释成零值。",
+      "properties": {
+        "step_id": {
+          "maxLength": 128,
+          "minLength": 1,
+          "title": "Step Id",
+          "type": "string"
+        },
+        "subject": {
+          "maxLength": 64,
+          "minLength": 1,
+          "title": "Subject",
+          "type": "string"
+        },
+        "status": {
+          "enum": [
+            "partial",
+            "denied",
+            "failed",
+            "timeout",
+            "skipped"
+          ],
+          "title": "Status",
+          "type": "string"
+        },
+        "reason_code": {
+          "maxLength": 128,
+          "minLength": 1,
+          "title": "Reason Code",
+          "type": "string"
+        }
+      },
+      "required": [
+        "step_id",
+        "subject",
+        "status",
+        "reason_code"
+      ],
+      "title": "AnalysisReportLimitation",
+      "type": "object"
+    },
+    "AnalysisReportSection": {
+      "additionalProperties": false,
+      "description": "与计划步骤一一对应的主题节。",
+      "properties": {
+        "step_id": {
+          "maxLength": 128,
+          "minLength": 1,
+          "title": "Step Id",
+          "type": "string"
+        },
+        "subject": {
+          "maxLength": 64,
+          "minLength": 1,
+          "title": "Subject",
+          "type": "string"
+        },
+        "status": {
+          "enum": [
+            "success",
+            "partial",
+            "denied",
+            "failed",
+            "timeout",
+            "skipped"
+          ],
+          "title": "Status",
+          "type": "string"
+        },
+        "reason_code": {
+          "maxLength": 128,
+          "minLength": 1,
+          "title": "Reason Code",
+          "type": "string"
+        },
+        "result_ref": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/AnalysisChildResultRef"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        }
+      },
+      "required": [
+        "step_id",
+        "subject",
+        "status",
+        "reason_code"
+      ],
+      "title": "AnalysisReportSection",
+      "type": "object"
+    },
+    "AreaCandidate": {
+      "additionalProperties": false,
+      "properties": {
+        "area_code": {
+          "maxLength": 32,
+          "minLength": 1,
+          "title": "Area Code",
+          "type": "string"
+        },
+        "area_name": {
+          "maxLength": 200,
+          "minLength": 1,
+          "title": "Area Name",
+          "type": "string"
+        },
+        "level": {
+          "enum": [
+            "province",
+            "city",
+            "district",
+            "street",
+            "community",
+            "grid"
+          ],
+          "title": "Level",
+          "type": "string"
+        },
+        "parent_area_code": {
+          "anyOf": [
+            {
+              "maxLength": 32,
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Parent Area Code"
+        },
+        "bounds": {
+          "anyOf": [
+            {
+              "maxItems": 4,
+              "minItems": 4,
+              "prefixItems": [
+                {
+                  "type": "number"
+                },
+                {
+                  "type": "number"
+                },
+                {
+                  "type": "number"
+                },
+                {
+                  "type": "number"
+                }
+              ],
+              "type": "array"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Bounds"
+        }
+      },
+      "required": [
+        "area_code",
+        "area_name",
+        "level"
+      ],
+      "title": "AreaCandidate",
+      "type": "object"
+    },
+    "AreaCandidatesData": {
+      "additionalProperties": false,
+      "properties": {
+        "resolved_area_code": {
+          "anyOf": [
+            {
+              "maxLength": 32,
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Resolved Area Code"
+        },
+        "ambiguous": {
+          "title": "Ambiguous",
+          "type": "boolean"
+        },
+        "candidates": {
+          "items": {
+            "$ref": "#/$defs/AreaCandidate"
+          },
+          "maxItems": 20,
+          "title": "Candidates",
+          "type": "array"
+        }
+      },
+      "required": [
+        "ambiguous",
+        "candidates"
+      ],
+      "title": "AreaCandidatesData",
+      "type": "object"
+    },
+    "AreaCandidatesResult": {
+      "additionalProperties": false,
+      "properties": {
+        "result_id": {
+          "title": "Result Id",
+          "type": "string"
+        },
+        "kind": {
+          "const": "area_candidates",
+          "default": "area_candidates",
+          "title": "Kind",
+          "type": "string"
+        },
+        "data_schema_ref": {
+          "title": "Data Schema Ref",
+          "type": "string"
+        },
+        "result_fingerprint": {
+          "title": "Result Fingerprint",
+          "type": "string"
+        },
+        "payload_status": {
+          "default": "available",
+          "enum": [
+            "available",
+            "expired"
+          ],
+          "title": "Payload Status",
+          "type": "string"
+        },
+        "created_at": {
+          "format": "date-time",
+          "title": "Created At",
+          "type": "string"
+        },
+        "payload_expires_at": {
+          "format": "date-time",
+          "title": "Payload Expires At",
+          "type": "string"
+        },
+        "evidence_ids": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Evidence Ids",
+          "type": "array"
+        },
+        "inline": {
+          "default": true,
+          "title": "Inline",
+          "type": "boolean"
+        },
+        "data": {
+          "$ref": "#/$defs/AreaCandidatesData"
+        },
+        "candidate_count": {
+          "maximum": 20,
+          "minimum": 0,
+          "title": "Candidate Count",
+          "type": "integer"
+        },
+        "presentation": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ResultPresentation"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        }
+      },
+      "required": [
+        "result_id",
+        "data_schema_ref",
+        "result_fingerprint",
+        "data",
+        "candidate_count"
+      ],
+      "title": "AreaCandidatesResult",
+      "type": "object"
+    },
+    "DynamicTableData": {
+      "additionalProperties": false,
+      "description": "JSON-safe rows returned by a configured read-only Tool.",
+      "properties": {
+        "rows": {
+          "items": {
+            "additionalProperties": {
+              "$ref": "#/$defs/JsonValue"
+            },
+            "type": "object"
+          },
+          "title": "Rows",
+          "type": "array"
+        }
+      },
+      "required": [
+        "rows"
+      ],
+      "title": "DynamicTableData",
+      "type": "object"
+    },
+    "EnterpriseIndustryDistributionRow": {
+      "additionalProperties": false,
+      "properties": {
+        "industry_name": {
+          "maxLength": 100,
+          "minLength": 1,
+          "title": "行业名称",
+          "type": "string"
+        },
+        "enterprise_count": {
+          "minimum": 0,
+          "title": "企业数量",
+          "type": "integer",
+          "unit": "家"
+        }
+      },
+      "required": [
+        "industry_name",
+        "enterprise_count"
+      ],
+      "title": "EnterpriseIndustryDistributionRow",
+      "type": "object"
+    },
+    "EnterpriseIndustryDistributionTable": {
+      "additionalProperties": false,
+      "properties": {
+        "rows": {
+          "items": {
+            "$ref": "#/$defs/EnterpriseIndustryDistributionRow"
+          },
+          "title": "Rows",
+          "type": "array"
+        }
+      },
+      "required": [
+        "rows"
+      ],
+      "title": "EnterpriseIndustryDistributionTable",
+      "type": "object"
+    },
+    "EnterpriseMetricRow": {
+      "additionalProperties": false,
+      "properties": {
+        "area_code": {
+          "maxLength": 32,
+          "minLength": 1,
+          "title": "区域编码",
+          "type": "string"
+        },
+        "area_name": {
+          "maxLength": 200,
+          "minLength": 1,
+          "title": "区域",
+          "type": "string"
+        },
+        "enterprise_count": {
+          "minimum": 0,
+          "title": "企业数量",
+          "type": "integer",
+          "unit": "家"
+        }
+      },
+      "required": [
+        "area_code",
+        "area_name",
+        "enterprise_count"
+      ],
+      "title": "EnterpriseMetricRow",
+      "type": "object"
+    },
+    "EnterpriseMetricTable": {
+      "additionalProperties": false,
+      "properties": {
+        "rows": {
+          "items": {
+            "$ref": "#/$defs/EnterpriseMetricRow"
+          },
+          "title": "Rows",
+          "type": "array"
+        }
+      },
+      "required": [
+        "rows"
+      ],
+      "title": "EnterpriseMetricTable",
+      "type": "object"
+    },
+    "EnterpriseScaleDistributionRow": {
+      "additionalProperties": false,
+      "properties": {
+        "enterprise_scale": {
+          "maxLength": 100,
+          "minLength": 1,
+          "title": "企业规模",
+          "type": "string"
+        },
+        "enterprise_count": {
+          "minimum": 0,
+          "title": "企业数量",
+          "type": "integer",
+          "unit": "家"
+        }
+      },
+      "required": [
+        "enterprise_scale",
+        "enterprise_count"
+      ],
+      "title": "EnterpriseScaleDistributionRow",
+      "type": "object"
+    },
+    "EnterpriseScaleDistributionTable": {
+      "additionalProperties": false,
+      "properties": {
+        "rows": {
+          "items": {
+            "$ref": "#/$defs/EnterpriseScaleDistributionRow"
+          },
+          "title": "Rows",
+          "type": "array"
+        }
+      },
+      "required": [
+        "rows"
+      ],
+      "title": "EnterpriseScaleDistributionTable",
+      "type": "object"
+    },
+    "EnterpriseTypeDistributionRow": {
+      "additionalProperties": false,
+      "properties": {
+        "enterprise_type": {
+          "maxLength": 100,
+          "minLength": 1,
+          "title": "企业类型",
+          "type": "string"
+        },
+        "enterprise_count": {
+          "minimum": 0,
+          "title": "企业数量",
+          "type": "integer",
+          "unit": "家"
+        }
+      },
+      "required": [
+        "enterprise_type",
+        "enterprise_count"
+      ],
+      "title": "EnterpriseTypeDistributionRow",
+      "type": "object"
+    },
+    "EnterpriseTypeDistributionTable": {
+      "additionalProperties": false,
+      "properties": {
+        "rows": {
+          "items": {
+            "$ref": "#/$defs/EnterpriseTypeDistributionRow"
+          },
+          "title": "Rows",
+          "type": "array"
+        }
+      },
+      "required": [
+        "rows"
+      ],
+      "title": "EnterpriseTypeDistributionTable",
+      "type": "object"
+    },
+    "EventCategoryRow": {
+      "additionalProperties": false,
+      "properties": {
+        "category_code": {
+          "maxLength": 64,
+          "minLength": 1,
+          "title": "分类编码",
+          "type": "string"
+        },
+        "category_name": {
+          "maxLength": 200,
+          "minLength": 1,
+          "title": "一级分类",
+          "type": "string"
+        },
+        "event_count": {
+          "minimum": 0,
+          "title": "事件数量",
+          "type": "integer",
+          "unit": "件"
+        }
+      },
+      "required": [
+        "category_code",
+        "category_name",
+        "event_count"
+      ],
+      "title": "EventCategoryRow",
+      "type": "object"
+    },
+    "EventCategoryTable": {
+      "additionalProperties": false,
+      "properties": {
+        "rows": {
+          "items": {
+            "$ref": "#/$defs/EventCategoryRow"
+          },
+          "title": "Rows",
+          "type": "array"
+        }
+      },
+      "required": [
+        "rows"
+      ],
+      "title": "EventCategoryTable",
+      "type": "object"
+    },
+    "EventFinishRateRow": {
+      "additionalProperties": false,
+      "properties": {
+        "level": {
+          "enum": [
+            "grid",
+            "community",
+            "street"
+          ],
+          "title": "层级",
+          "type": "string",
+          "value_labels": {
+            "community": "社区",
+            "grid": "网格",
+            "street": "街道"
+          }
+        },
+        "finish_rate": {
+          "maximum": 100,
+          "minimum": 0,
+          "title": "事件办结率",
+          "type": "number",
+          "unit": "%"
+        }
+      },
+      "required": [
+        "level",
+        "finish_rate"
+      ],
+      "title": "EventFinishRateRow",
+      "type": "object"
+    },
+    "EventFinishRateTable": {
+      "additionalProperties": false,
+      "properties": {
+        "rows": {
+          "items": {
+            "$ref": "#/$defs/EventFinishRateRow"
+          },
+          "title": "Rows",
+          "type": "array"
+        }
+      },
+      "required": [
+        "rows"
+      ],
+      "title": "EventFinishRateTable",
+      "type": "object"
+    },
+    "EventTrendRow": {
+      "additionalProperties": false,
+      "properties": {
+        "month": {
+          "maxLength": 7,
+          "minLength": 7,
+          "pattern": "^[0-9]{4}-(0[1-9]|1[0-2])$",
+          "title": "月份",
+          "type": "string"
+        },
+        "event_count": {
+          "minimum": 0,
+          "title": "事件总数",
+          "type": "integer",
+          "unit": "件"
+        }
+      },
+      "required": [
+        "month",
+        "event_count"
+      ],
+      "title": "EventTrendRow",
+      "type": "object"
+    },
+    "EventTrendTable": {
+      "additionalProperties": false,
+      "properties": {
+        "rows": {
+          "items": {
+            "$ref": "#/$defs/EventTrendRow"
+          },
+          "title": "Rows",
+          "type": "array"
+        }
+      },
+      "required": [
+        "rows"
+      ],
+      "title": "EventTrendTable",
+      "type": "object"
+    },
+    "EvidenceMetricDefinition": {
+      "additionalProperties": false,
+      "properties": {
+        "metric_id": {
+          "title": "Metric Id",
+          "type": "string"
+        },
+        "definition_version": {
+          "title": "Definition Version",
+          "type": "string"
+        }
+      },
+      "required": [
+        "metric_id",
+        "definition_version"
+      ],
+      "title": "EvidenceMetricDefinition",
+      "type": "object"
+    },
+    "GovernanceObjectRef": {
+      "additionalProperties": false,
+      "properties": {
+        "object_type": {
+          "enum": [
+            "person",
+            "building",
+            "room",
+            "enterprise",
+            "event"
+          ],
+          "title": "Object Type",
+          "type": "string"
+        },
+        "object_id": {
+          "maxLength": 128,
+          "minLength": 1,
+          "title": "Object Id",
+          "type": "string"
+        }
+      },
+      "required": [
+        "object_type",
+        "object_id"
+      ],
+      "title": "GovernanceObjectRef",
+      "type": "object"
+    },
+    "GovernanceOverviewRow": {
+      "additionalProperties": false,
+      "properties": {
+        "subject": {
+          "enum": [
+            "person",
+            "house",
+            "enterprise",
+            "event",
+            "matter"
+          ],
+          "title": "治理要素",
+          "type": "string",
+          "value_labels": {
+            "enterprise": "企",
+            "event": "事",
+            "house": "房",
+            "matter": "物",
+            "person": "人"
+          }
+        },
+        "subject_label": {
+          "maxLength": 20,
+          "minLength": 1,
+          "title": "治理要素名称",
+          "type": "string"
+        },
+        "related_count": {
+          "minimum": 0,
+          "title": "治理关联数",
+          "type": "integer",
+          "unit": "个"
+        },
+        "total_count": {
+          "minimum": 0,
+          "title": "要素总数",
+          "type": "integer",
+          "unit": "个"
+        },
+        "coverage_rate": {
+          "minimum": 0,
+          "title": "治理覆盖率",
+          "type": "number",
+          "unit": "%"
+        }
+      },
+      "required": [
+        "subject",
+        "subject_label",
+        "related_count",
+        "total_count",
+        "coverage_rate"
+      ],
+      "title": "GovernanceOverviewRow",
+      "type": "object"
+    },
+    "GovernanceOverviewTable": {
+      "additionalProperties": false,
+      "properties": {
+        "rows": {
+          "items": {
+            "$ref": "#/$defs/GovernanceOverviewRow"
+          },
+          "title": "Rows",
+          "type": "array"
+        }
+      },
+      "required": [
+        "rows"
+      ],
+      "title": "GovernanceOverviewTable",
+      "type": "object"
+    },
+    "GovernancePowerMetricRow": {
+      "additionalProperties": false,
+      "properties": {
+        "type_code": {
+          "enum": [
+            "roomNum",
+            "10",
+            "11",
+            "12",
+            "13",
+            "nGridSum",
+            "gridUnitSum"
+          ],
+          "title": "Type Code",
+          "type": "string"
+        },
+        "type_name": {
+          "maxLength": 20,
+          "minLength": 1,
+          "title": "Type Name",
+          "type": "string"
+        },
+        "count": {
+          "minimum": 0,
+          "title": "Count",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "type_code",
+        "type_name",
+        "count"
+      ],
+      "title": "GovernancePowerMetricRow",
+      "type": "object"
+    },
+    "GovernancePowerMetricTable": {
+      "additionalProperties": false,
+      "properties": {
+        "rows": {
+          "items": {
+            "$ref": "#/$defs/GovernancePowerMetricRow"
+          },
+          "title": "Rows",
+          "type": "array"
+        }
+      },
+      "required": [
+        "rows"
+      ],
+      "title": "GovernancePowerMetricTable",
+      "type": "object"
+    },
+    "HousingAreaGroupRow": {
+      "additionalProperties": false,
+      "properties": {
+        "area_code": {
+          "maxLength": 32,
+          "minLength": 1,
+          "title": "区域编码",
+          "type": "string"
+        },
+        "area_name": {
+          "maxLength": 200,
+          "minLength": 1,
+          "title": "区域",
+          "type": "string"
+        },
+        "dwelling_count": {
+          "minimum": 0,
+          "title": "出租房数量",
+          "type": "integer",
+          "unit": "套"
+        }
+      },
+      "required": [
+        "area_code",
+        "area_name",
+        "dwelling_count"
+      ],
+      "title": "HousingAreaGroupRow",
+      "type": "object"
+    },
+    "HousingAreaGroupTable": {
+      "additionalProperties": false,
+      "properties": {
+        "rows": {
+          "items": {
+            "$ref": "#/$defs/HousingAreaGroupRow"
+          },
+          "title": "Rows",
+          "type": "array"
+        }
+      },
+      "required": [
+        "rows"
+      ],
+      "title": "HousingAreaGroupTable",
+      "type": "object"
+    },
+    "HousingLeaseTypeRow": {
+      "additionalProperties": false,
+      "properties": {
+        "lease_type": {
+          "maxLength": 100,
+          "minLength": 1,
+          "title": "出租类型",
+          "type": "string"
+        },
+        "dwelling_count": {
+          "minimum": 0,
+          "title": "出租房数量",
+          "type": "integer",
+          "unit": "套"
+        }
+      },
+      "required": [
+        "lease_type",
+        "dwelling_count"
+      ],
+      "title": "HousingLeaseTypeRow",
+      "type": "object"
+    },
+    "HousingLeaseTypeTable": {
+      "additionalProperties": false,
+      "properties": {
+        "rows": {
+          "items": {
+            "$ref": "#/$defs/HousingLeaseTypeRow"
+          },
+          "title": "Rows",
+          "type": "array"
+        }
+      },
+      "required": [
+        "rows"
+      ],
+      "title": "HousingLeaseTypeTable",
+      "type": "object"
+    },
+    "HousingRoomUseRow": {
+      "additionalProperties": false,
+      "properties": {
+        "room_use": {
+          "maxLength": 100,
+          "minLength": 1,
+          "title": "户室用途",
+          "type": "string"
+        },
+        "dwelling_count": {
+          "minimum": 0,
+          "title": "户室数量",
+          "type": "integer",
+          "unit": "套"
+        }
+      },
+      "required": [
+        "room_use",
+        "dwelling_count"
+      ],
+      "title": "HousingRoomUseRow",
+      "type": "object"
+    },
+    "HousingRoomUseTable": {
+      "additionalProperties": false,
+      "properties": {
+        "rows": {
+          "items": {
+            "$ref": "#/$defs/HousingRoomUseRow"
+          },
+          "title": "Rows",
+          "type": "array"
+        }
+      },
+      "required": [
+        "rows"
+      ],
+      "title": "HousingRoomUseTable",
+      "type": "object"
+    },
+    "HousingStockOverviewRow": {
+      "additionalProperties": false,
+      "properties": {
+        "building_count": {
+          "minimum": 0,
+          "title": "楼幢总数",
+          "type": "integer",
+          "unit": "栋"
+        },
+        "room_count": {
+          "minimum": 0,
+          "title": "户室总数",
+          "type": "integer",
+          "unit": "间"
+        }
+      },
+      "required": [
+        "building_count",
+        "room_count"
+      ],
+      "title": "HousingStockOverviewRow",
+      "type": "object"
+    },
+    "HousingStockOverviewTable": {
+      "additionalProperties": false,
+      "properties": {
+        "rows": {
+          "items": {
+            "$ref": "#/$defs/HousingStockOverviewRow"
+          },
+          "title": "Rows",
+          "type": "array"
+        }
+      },
+      "required": [
+        "rows"
+      ],
+      "title": "HousingStockOverviewTable",
+      "type": "object"
+    },
+    "JsonValue": {},
+    "ObjectProfileData": {
+      "additionalProperties": false,
+      "properties": {
+        "object_ref": {
+          "$ref": "#/$defs/GovernanceObjectRef"
+        },
+        "area_code": {
+          "maxLength": 32,
+          "minLength": 1,
+          "title": "Area Code",
+          "type": "string"
+        },
+        "title": {
+          "maxLength": 200,
+          "minLength": 1,
+          "title": "Title",
+          "type": "string"
+        },
+        "fields": {
+          "items": {
+            "$ref": "#/$defs/ObjectProfileField"
+          },
+          "maxItems": 100,
+          "title": "Fields",
+          "type": "array"
+        }
+      },
+      "required": [
+        "object_ref",
+        "area_code",
+        "title",
+        "fields"
+      ],
+      "title": "ObjectProfileData",
+      "type": "object"
+    },
+    "ObjectProfileField": {
+      "additionalProperties": false,
+      "properties": {
+        "field_id": {
+          "maxLength": 100,
+          "minLength": 1,
+          "title": "Field Id",
+          "type": "string"
+        },
+        "label": {
+          "maxLength": 100,
+          "minLength": 1,
+          "title": "Label",
+          "type": "string"
+        },
+        "value": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "integer"
+            },
+            {
+              "type": "number"
+            },
+            {
+              "type": "boolean"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Value"
+        },
+        "classification": {
+          "enum": [
+            "public",
+            "internal",
+            "sensitive"
+          ],
+          "title": "Classification",
+          "type": "string"
+        },
+        "masked": {
+          "default": false,
+          "title": "Masked",
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "field_id",
+        "label",
+        "value",
+        "classification"
+      ],
+      "title": "ObjectProfileField",
+      "type": "object"
+    },
+    "ObjectProfileResult": {
+      "additionalProperties": false,
+      "properties": {
+        "result_id": {
+          "title": "Result Id",
+          "type": "string"
+        },
+        "kind": {
+          "const": "object_profile",
+          "default": "object_profile",
+          "title": "Kind",
+          "type": "string"
+        },
+        "data_schema_ref": {
+          "title": "Data Schema Ref",
+          "type": "string"
+        },
+        "result_fingerprint": {
+          "title": "Result Fingerprint",
+          "type": "string"
+        },
+        "payload_status": {
+          "default": "available",
+          "enum": [
+            "available",
+            "expired"
+          ],
+          "title": "Payload Status",
+          "type": "string"
+        },
+        "created_at": {
+          "format": "date-time",
+          "title": "Created At",
+          "type": "string"
+        },
+        "payload_expires_at": {
+          "format": "date-time",
+          "title": "Payload Expires At",
+          "type": "string"
+        },
+        "evidence_ids": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Evidence Ids",
+          "type": "array"
+        },
+        "inline": {
+          "default": true,
+          "title": "Inline",
+          "type": "boolean"
+        },
+        "data": {
+          "$ref": "#/$defs/ObjectProfileData"
+        }
+      },
+      "required": [
+        "result_id",
+        "data_schema_ref",
+        "result_fingerprint",
+        "data"
+      ],
+      "title": "ObjectProfileResult",
+      "type": "object"
+    },
+    "PopulationAggregateRow": {
+      "additionalProperties": false,
+      "properties": {
+        "operator": {
+          "enum": [
+            "sum",
+            "avg",
+            "min",
+            "max"
+          ],
+          "title": "聚合运算",
+          "type": "string"
+        },
+        "metric": {
+          "const": "person_count",
+          "title": "指标",
+          "type": "string"
+        },
+        "value": {
+          "minimum": 0,
+          "title": "聚合值",
+          "type": "number"
+        },
+        "area_count": {
+          "minimum": 0,
+          "title": "参与聚合区划数",
+          "type": "integer"
+        },
+        "completeness": {
+          "enum": [
+            "complete",
+            "partial",
+            "unknown"
+          ],
+          "title": "完整性",
+          "type": "string"
+        }
+      },
+      "required": [
+        "operator",
+        "metric",
+        "value",
+        "area_count",
+        "completeness"
+      ],
+      "title": "PopulationAggregateRow",
+      "type": "object"
+    },
+    "PopulationAggregateTable": {
+      "additionalProperties": false,
+      "properties": {
+        "rows": {
+          "items": {
+            "$ref": "#/$defs/PopulationAggregateRow"
+          },
+          "title": "Rows",
+          "type": "array"
+        }
+      },
+      "required": [
+        "rows"
+      ],
+      "title": "PopulationAggregateTable",
+      "type": "object"
+    },
+    "PopulationMetricRow": {
+      "additionalProperties": false,
+      "properties": {
+        "area_code": {
+          "title": "区域编码",
+          "type": "string"
+        },
+        "area_name": {
+          "title": "区域",
+          "type": "string"
+        },
+        "person_count": {
+          "minimum": 0,
+          "title": "人口数",
+          "type": "integer",
+          "unit": "人"
+        }
+      },
+      "required": [
+        "area_code",
+        "area_name",
+        "person_count"
+      ],
+      "title": "PopulationMetricRow",
+      "type": "object"
+    },
+    "PopulationMetricTable": {
+      "additionalProperties": false,
+      "properties": {
+        "rows": {
+          "items": {
+            "$ref": "#/$defs/PopulationMetricRow"
+          },
+          "title": "Rows",
+          "type": "array"
+        }
+      },
+      "required": [
+        "rows"
+      ],
+      "title": "PopulationMetricTable",
+      "type": "object"
+    },
+    "PopulationRankingRow": {
+      "additionalProperties": false,
+      "properties": {
+        "rank": {
+          "minimum": 1,
+          "title": "排名",
+          "type": "integer"
+        },
+        "area_code": {
+          "title": "区域编码",
+          "type": "string"
+        },
+        "area_name": {
+          "title": "区域",
+          "type": "string"
+        },
+        "person_count": {
+          "minimum": 0,
+          "title": "人口数",
+          "type": "integer",
+          "unit": "人"
+        }
+      },
+      "required": [
+        "rank",
+        "area_code",
+        "area_name",
+        "person_count"
+      ],
+      "title": "PopulationRankingRow",
+      "type": "object"
+    },
+    "PopulationRankingTable": {
+      "additionalProperties": false,
+      "properties": {
+        "rows": {
+          "items": {
+            "$ref": "#/$defs/PopulationRankingRow"
+          },
+          "title": "Rows",
+          "type": "array"
+        },
+        "candidate_count": {
+          "anyOf": [
+            {
+              "minimum": 0,
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "参与比较区划数"
+        },
+        "tie_policy": {
+          "const": "include_all",
+          "default": "include_all",
+          "title": "并列处理规则",
+          "type": "string"
+        }
+      },
+      "required": [
+        "rows"
+      ],
+      "title": "PopulationRankingTable",
+      "type": "object"
+    },
+    "ResultDisplayField": {
+      "additionalProperties": false,
+      "properties": {
+        "field": {
+          "maxLength": 100,
+          "minLength": 1,
+          "title": "Field",
+          "type": "string"
+        },
+        "label": {
+          "maxLength": 100,
+          "minLength": 1,
+          "title": "Label",
+          "type": "string"
+        },
+        "role": {
+          "enum": [
+            "dimension",
+            "metric",
+            "identifier"
+          ],
+          "title": "Role",
+          "type": "string"
+        },
+        "unit": {
+          "anyOf": [
+            {
+              "maxLength": 32,
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Unit"
+        },
+        "value_labels": {
+          "additionalProperties": {
+            "type": "string"
+          },
+          "title": "Value Labels",
+          "type": "object"
+        }
+      },
+      "required": [
+        "field",
+        "label",
+        "role"
+      ],
+      "title": "ResultDisplayField",
+      "type": "object"
+    },
+    "ResultDownload": {
+      "additionalProperties": false,
+      "properties": {
+        "formats": {
+          "items": {
+            "const": "csv",
+            "type": "string"
+          },
+          "maxItems": 1,
+          "minItems": 1,
+          "title": "Formats",
+          "type": "array"
+        },
+        "path": {
+          "maxLength": 512,
+          "minLength": 1,
+          "title": "Path",
+          "type": "string"
+        }
+      },
+      "required": [
+        "formats",
+        "path"
+      ],
+      "title": "ResultDownload",
+      "type": "object"
+    },
+    "ResultPresentation": {
+      "additionalProperties": false,
+      "description": "Optional business-facing metadata; stable machine fields remain authoritative.",
+      "properties": {
+        "locale": {
+          "const": "zh-CN",
+          "default": "zh-CN",
+          "title": "Locale",
+          "type": "string"
+        },
+        "title": {
+          "maxLength": 100,
+          "minLength": 1,
+          "title": "Title",
+          "type": "string"
+        },
+        "summary": {
+          "maxLength": 500,
+          "minLength": 1,
+          "title": "Summary",
+          "type": "string"
+        },
+        "status_label": {
+          "maxLength": 32,
+          "minLength": 1,
+          "title": "Status Label",
+          "type": "string"
+        },
+        "fields": {
+          "items": {
+            "$ref": "#/$defs/ResultDisplayField"
+          },
+          "maxItems": 100,
+          "title": "Fields",
+          "type": "array"
+        },
+        "visualizations": {
+          "items": {
+            "$ref": "#/$defs/ResultVisualization"
+          },
+          "maxItems": 10,
+          "title": "Visualizations",
+          "type": "array"
+        },
+        "download": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ResultDownload"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        }
+      },
+      "required": [
+        "title",
+        "summary",
+        "status_label"
+      ],
+      "title": "ResultPresentation",
+      "type": "object"
+    },
+    "ResultVisualization": {
+      "additionalProperties": false,
+      "properties": {
+        "kind": {
+          "enum": [
+            "table",
+            "metric",
+            "bar",
+            "line",
+            "choropleth"
+          ],
+          "title": "Kind",
+          "type": "string"
+        },
+        "title": {
+          "maxLength": 100,
+          "minLength": 1,
+          "title": "Title",
+          "type": "string"
+        },
+        "category_field": {
+          "anyOf": [
+            {
+              "maxLength": 100,
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Category Field"
+        },
+        "value_field": {
+          "anyOf": [
+            {
+              "maxLength": 100,
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Value Field"
+        },
+        "label_field": {
+          "anyOf": [
+            {
+              "maxLength": 100,
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Label Field"
+        },
+        "area_code_field": {
+          "anyOf": [
+            {
+              "maxLength": 100,
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Area Code Field"
+        },
+        "x_field": {
+          "anyOf": [
+            {
+              "maxLength": 100,
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "X Field"
+        },
+        "y_field": {
+          "anyOf": [
+            {
+              "maxLength": 100,
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Y Field"
+        }
+      },
+      "required": [
+        "kind",
+        "title"
+      ],
+      "title": "ResultVisualization",
+      "type": "object"
+    },
+    "SemanticFilterLineage": {
+      "additionalProperties": false,
+      "description": "Server-resolved semantic filter context safe for answer rendering.",
+      "properties": {
+        "field": {
+          "maxLength": 64,
+          "minLength": 1,
+          "title": "Field",
+          "type": "string"
+        },
+        "operator": {
+          "maxLength": 64,
+          "minLength": 1,
+          "title": "Operator",
+          "type": "string"
+        },
+        "value": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "integer"
+            },
+            {
+              "type": "number"
+            },
+            {
+              "type": "boolean"
+            },
+            {
+              "items": {
+                "anyOf": [
+                  {
+                    "type": "string"
+                  },
+                  {
+                    "type": "integer"
+                  },
+                  {
+                    "type": "number"
+                  }
+                ]
+              },
+              "type": "array"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Value"
+        },
+        "display_label": {
+          "anyOf": [
+            {
+              "maxLength": 100,
+              "minLength": 1,
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Display Label"
+        }
+      },
+      "required": [
+        "field",
+        "operator"
+      ],
+      "title": "SemanticFilterLineage",
+      "type": "object"
+    },
+    "SemanticResultLineage": {
+      "additionalProperties": false,
+      "description": "S1-A：``governance.semantic_query`` 解析执行的血缘。\n\n记录虚拟语义入口到真实能力 Tool 的可追溯链路：语义 spec 与计划\n的版本指纹、目录版本、主题/数据集、规范 Tool 标识与区域/输出形态。\n只由 SemanticToolExecutor 在成功执行后附加；Evidence 持久化与前端\n地图命令从该血缘读取规范 Tool 信息，而非解析原始模型参数。",
+      "properties": {
+        "schema_version": {
+          "const": "1.0",
+          "default": "1.0",
+          "title": "Schema Version",
+          "type": "string"
+        },
+        "virtual_tool_id": {
+          "maxLength": 128,
+          "minLength": 1,
+          "title": "Virtual Tool Id",
+          "type": "string"
+        },
+        "virtual_tool_version": {
+          "maxLength": 32,
+          "minLength": 1,
+          "title": "Virtual Tool Version",
+          "type": "string"
+        },
+        "spec_version": {
+          "maxLength": 32,
+          "minLength": 1,
+          "title": "Spec Version",
+          "type": "string"
+        },
+        "catalog_version": {
+          "maxLength": 64,
+          "minLength": 1,
+          "title": "Catalog Version",
+          "type": "string"
+        },
+        "subject": {
+          "maxLength": 64,
+          "minLength": 1,
+          "title": "Subject",
+          "type": "string"
+        },
+        "logical_dataset_id": {
+          "maxLength": 64,
+          "minLength": 1,
+          "title": "Logical Dataset Id",
+          "type": "string"
+        },
+        "canonical_tool_id": {
+          "maxLength": 128,
+          "minLength": 1,
+          "title": "Canonical Tool Id",
+          "type": "string"
+        },
+        "canonical_tool_version": {
+          "maxLength": 32,
+          "minLength": 1,
+          "title": "Canonical Tool Version",
+          "type": "string"
+        },
+        "spec_fingerprint": {
+          "maxLength": 200,
+          "minLength": 1,
+          "title": "Spec Fingerprint",
+          "type": "string"
+        },
+        "plan_fingerprint": {
+          "maxLength": 200,
+          "minLength": 1,
+          "title": "Plan Fingerprint",
+          "type": "string"
+        },
+        "semantic_contract_fingerprint": {
+          "anyOf": [
+            {
+              "maxLength": 200,
+              "minLength": 1,
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Semantic Contract Fingerprint"
+        },
+        "semantic_shape_id": {
+          "anyOf": [
+            {
+              "maxLength": 64,
+              "minLength": 1,
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Semantic Shape Id"
+        },
+        "semantic_operator": {
+          "anyOf": [
+            {
+              "maxLength": 32,
+              "minLength": 1,
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Semantic Operator"
+        },
+        "semantic_completeness": {
+          "anyOf": [
+            {
+              "maxLength": 32,
+              "minLength": 1,
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Semantic Completeness"
+        },
+        "semantic_tie_policy": {
+          "anyOf": [
+            {
+              "maxLength": 32,
+              "minLength": 1,
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Semantic Tie Policy"
+        },
+        "area_code": {
+          "maxLength": 32,
+          "minLength": 1,
+          "title": "Area Code",
+          "type": "string"
+        },
+        "output": {
+          "maxLength": 32,
+          "minLength": 1,
+          "title": "Output",
+          "type": "string"
+        },
+        "metric_definitions": {
+          "items": {
+            "$ref": "#/$defs/EvidenceMetricDefinition"
+          },
+          "title": "Metric Definitions",
+          "type": "array"
+        },
+        "filter_contexts": {
+          "items": {
+            "$ref": "#/$defs/SemanticFilterLineage"
+          },
+          "title": "Filter Contexts",
+          "type": "array"
+        }
+      },
+      "required": [
+        "virtual_tool_id",
+        "virtual_tool_version",
+        "spec_version",
+        "catalog_version",
+        "subject",
+        "logical_dataset_id",
+        "canonical_tool_id",
+        "canonical_tool_version",
+        "spec_fingerprint",
+        "plan_fingerprint",
+        "area_code",
+        "output"
+      ],
+      "title": "SemanticResultLineage",
+      "type": "object"
+    },
+    "TableDataResult": {
+      "additionalProperties": false,
+      "properties": {
+        "result_id": {
+          "title": "Result Id",
+          "type": "string"
+        },
+        "kind": {
+          "const": "table",
+          "default": "table",
+          "title": "Kind",
+          "type": "string"
+        },
+        "data_schema_ref": {
+          "title": "Data Schema Ref",
+          "type": "string"
+        },
+        "result_fingerprint": {
+          "title": "Result Fingerprint",
+          "type": "string"
+        },
+        "payload_status": {
+          "default": "available",
+          "enum": [
+            "available",
+            "expired"
+          ],
+          "title": "Payload Status",
+          "type": "string"
+        },
+        "created_at": {
+          "format": "date-time",
+          "title": "Created At",
+          "type": "string"
+        },
+        "payload_expires_at": {
+          "format": "date-time",
+          "title": "Payload Expires At",
+          "type": "string"
+        },
+        "evidence_ids": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Evidence Ids",
+          "type": "array"
+        },
+        "inline": {
+          "default": true,
+          "title": "Inline",
+          "type": "boolean"
+        },
+        "data": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/PopulationMetricTable"
+            },
+            {
+              "$ref": "#/$defs/PopulationRankingTable"
+            },
+            {
+              "$ref": "#/$defs/PopulationAggregateTable"
+            },
+            {
+              "$ref": "#/$defs/HousingLeaseTypeTable"
+            },
+            {
+              "$ref": "#/$defs/HousingAreaGroupTable"
+            },
+            {
+              "$ref": "#/$defs/HousingRoomUseTable"
+            },
+            {
+              "$ref": "#/$defs/HousingStockOverviewTable"
+            },
+            {
+              "$ref": "#/$defs/EventFinishRateTable"
+            },
+            {
+              "$ref": "#/$defs/EventTrendTable"
+            },
+            {
+              "$ref": "#/$defs/EventCategoryTable"
+            },
+            {
+              "$ref": "#/$defs/GovernanceOverviewTable"
+            },
+            {
+              "$ref": "#/$defs/GovernancePowerMetricTable"
+            },
+            {
+              "$ref": "#/$defs/EnterpriseMetricTable"
+            },
+            {
+              "$ref": "#/$defs/EnterpriseTypeDistributionTable"
+            },
+            {
+              "$ref": "#/$defs/EnterpriseScaleDistributionTable"
+            },
+            {
+              "$ref": "#/$defs/EnterpriseIndustryDistributionTable"
+            },
+            {
+              "$ref": "#/$defs/DynamicTableData"
+            }
+          ],
+          "title": "Data"
+        },
+        "row_count": {
+          "minimum": 0,
+          "title": "Row Count",
+          "type": "integer"
+        },
+        "truncated": {
+          "default": false,
+          "title": "Truncated",
+          "type": "boolean"
+        },
+        "presentation": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ResultPresentation"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        }
+      },
+      "required": [
+        "result_id",
+        "data_schema_ref",
+        "result_fingerprint",
+        "data",
+        "row_count"
+      ],
+      "title": "TableDataResult",
+      "type": "object"
+    },
+    "ToolResultPolicy": {
+      "additionalProperties": false,
+      "properties": {
+        "decision": {
+          "enum": [
+            "allow",
+            "mask",
+            "deny",
+            "need_approval"
+          ],
+          "title": "Decision",
+          "type": "string"
+        },
+        "policy_decision_id": {
+          "title": "Policy Decision Id",
+          "type": "string"
+        },
+        "pre_policy_decision_id": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Pre Policy Decision Id"
+        },
+        "post_policy_decision_id": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Post Policy Decision Id"
+        },
+        "auth_context_fingerprint": {
+          "title": "Auth Context Fingerprint",
+          "type": "string"
+        },
+        "arguments_fingerprint": {
+          "title": "Arguments Fingerprint",
+          "type": "string"
+        },
+        "request_fingerprint": {
+          "title": "Request Fingerprint",
+          "type": "string"
+        },
+        "policy_fingerprint": {
+          "title": "Policy Fingerprint",
+          "type": "string"
+        },
+        "masked_fields": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Masked Fields",
+          "type": "array"
+        }
+      },
+      "required": [
+        "decision",
+        "policy_decision_id",
+        "auth_context_fingerprint",
+        "arguments_fingerprint",
+        "request_fingerprint",
+        "policy_fingerprint"
+      ],
+      "title": "ToolResultPolicy",
+      "type": "object"
+    }
+  },
+  "additionalProperties": false,
+  "properties": {
+    "schema_version": {
+      "const": "1.1",
+      "default": "1.1",
+      "title": "Schema Version",
+      "type": "string"
+    },
+    "tool_call_id": {
+      "title": "Tool Call Id",
+      "type": "string"
+    },
+    "tool_id": {
+      "title": "Tool Id",
+      "type": "string"
+    },
+    "tool_version": {
+      "title": "Tool Version",
+      "type": "string"
+    },
+    "status": {
+      "enum": [
+        "success",
+        "partial",
+        "denied",
+        "failed"
+      ],
+      "title": "Status",
+      "type": "string"
+    },
+    "summary": {
+      "title": "Summary",
+      "type": "string"
+    },
+    "data_result": {
+      "anyOf": [
+        {
+          "discriminator": {
+            "mapping": {
+              "analysis_report": "#/$defs/AnalysisReportDataResult",
+              "area_candidates": "#/$defs/AreaCandidatesResult",
+              "object_profile": "#/$defs/ObjectProfileResult",
+              "table": "#/$defs/TableDataResult"
+            },
+            "propertyName": "kind"
+          },
+          "oneOf": [
+            {
+              "$ref": "#/$defs/AreaCandidatesResult"
+            },
+            {
+              "$ref": "#/$defs/TableDataResult"
+            },
+            {
+              "$ref": "#/$defs/ObjectProfileResult"
+            },
+            {
+              "$ref": "#/$defs/AnalysisReportDataResult"
+            }
+          ]
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Data Result"
+    },
+    "evidence_ids": {
+      "items": {
+        "type": "string"
+      },
+      "title": "Evidence Ids",
+      "type": "array"
+    },
+    "policy": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/ToolResultPolicy"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null
+    },
+    "warnings": {
+      "items": {
+        "type": "string"
+      },
+      "title": "Warnings",
+      "type": "array"
+    },
+    "semantic_lineage": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/SemanticResultLineage"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null
+    }
+  },
+  "required": [
+    "tool_call_id",
+    "tool_id",
+    "tool_version",
+    "status",
+    "summary"
+  ],
+  "title": "ToolResult",
+  "type": "object"
+}

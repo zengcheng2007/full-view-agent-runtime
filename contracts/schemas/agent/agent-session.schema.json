@@ -1,0 +1,129 @@
+{
+  "$defs": {
+    "SessionContext": {
+      "additionalProperties": false,
+      "properties": {
+        "version": {
+          "default": 1,
+          "minimum": 1,
+          "title": "Version",
+          "type": "integer"
+        },
+        "area": {
+          "anyOf": [
+            {
+              "additionalProperties": {
+                "type": "string"
+              },
+              "type": "object"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Area"
+        },
+        "selected_object_refs": {
+          "items": {
+            "additionalProperties": {
+              "type": "string"
+            },
+            "type": "object"
+          },
+          "title": "Selected Object Refs",
+          "type": "array"
+        },
+        "recent_result_refs": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Recent Result Refs",
+          "type": "array"
+        }
+      },
+      "title": "SessionContext",
+      "type": "object"
+    }
+  },
+  "additionalProperties": false,
+  "properties": {
+    "schema_version": {
+      "const": "1.1",
+      "default": "1.1",
+      "title": "Schema Version",
+      "type": "string"
+    },
+    "session_id": {
+      "title": "Session Id",
+      "type": "string"
+    },
+    "owner_tenant_id": {
+      "default": "legacy",
+      "title": "Owner Tenant Id",
+      "type": "string"
+    },
+    "owner_user_id": {
+      "title": "Owner User Id",
+      "type": "string"
+    },
+    "app_id": {
+      "default": "full_information_view",
+      "title": "App Id",
+      "type": "string"
+    },
+    "title": {
+      "maxLength": 200,
+      "minLength": 1,
+      "title": "Title",
+      "type": "string"
+    },
+    "status": {
+      "default": "active",
+      "enum": [
+        "active",
+        "archived"
+      ],
+      "title": "Status",
+      "type": "string"
+    },
+    "active_run_id": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Active Run Id"
+    },
+    "context": {
+      "$ref": "#/$defs/SessionContext"
+    },
+    "created_at": {
+      "format": "date-time",
+      "title": "Created At",
+      "type": "string"
+    },
+    "updated_at": {
+      "format": "date-time",
+      "title": "Updated At",
+      "type": "string"
+    },
+    "version": {
+      "default": 1,
+      "minimum": 1,
+      "title": "Version",
+      "type": "integer"
+    }
+  },
+  "required": [
+    "session_id",
+    "owner_user_id",
+    "title"
+  ],
+  "title": "AgentSession",
+  "type": "object"
+}

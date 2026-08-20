@@ -1,0 +1,64 @@
+{
+  "additionalProperties": false,
+  "properties": {
+    "steer_id": {
+      "title": "Steer Id",
+      "type": "string"
+    },
+    "run_id": {
+      "title": "Run Id",
+      "type": "string"
+    },
+    "client_instance_id": {
+      "title": "Client Instance Id",
+      "type": "string"
+    },
+    "content": {
+      "maxLength": 10000,
+      "minLength": 1,
+      "title": "Content",
+      "type": "string"
+    },
+    "delivery": {
+      "const": "next_safe_checkpoint",
+      "default": "next_safe_checkpoint",
+      "title": "Delivery",
+      "type": "string"
+    },
+    "status": {
+      "default": "accepted",
+      "enum": [
+        "accepted",
+        "applied"
+      ],
+      "title": "Status",
+      "type": "string"
+    },
+    "created_at": {
+      "format": "date-time",
+      "title": "Created At",
+      "type": "string"
+    },
+    "applied_at": {
+      "anyOf": [
+        {
+          "format": "date-time",
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Applied At"
+    }
+  },
+  "required": [
+    "steer_id",
+    "run_id",
+    "client_instance_id",
+    "content"
+  ],
+  "title": "Steer",
+  "type": "object"
+}

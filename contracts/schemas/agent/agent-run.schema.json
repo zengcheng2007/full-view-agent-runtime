@@ -1,0 +1,247 @@
+{
+  "$defs": {
+    "ClientCapabilities": {
+      "additionalProperties": false,
+      "properties": {
+        "client_instance_id": {
+          "maxLength": 128,
+          "minLength": 1,
+          "title": "Client Instance Id",
+          "type": "string"
+        },
+        "frontend_command_schema_versions": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Frontend Command Schema Versions",
+          "type": "array"
+        },
+        "supported_commands": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Supported Commands",
+          "type": "array"
+        }
+      },
+      "required": [
+        "client_instance_id"
+      ],
+      "title": "ClientCapabilities",
+      "type": "object"
+    },
+    "WorkflowRef": {
+      "additionalProperties": false,
+      "properties": {
+        "workflow_id": {
+          "maxLength": 128,
+          "minLength": 1,
+          "title": "Workflow Id",
+          "type": "string"
+        },
+        "workflow_version": {
+          "maxLength": 32,
+          "minLength": 1,
+          "title": "Workflow Version",
+          "type": "string"
+        }
+      },
+      "required": [
+        "workflow_id",
+        "workflow_version"
+      ],
+      "title": "WorkflowRef",
+      "type": "object"
+    }
+  },
+  "additionalProperties": false,
+  "properties": {
+    "schema_version": {
+      "const": "1.1",
+      "default": "1.1",
+      "title": "Schema Version",
+      "type": "string"
+    },
+    "run_id": {
+      "title": "Run Id",
+      "type": "string"
+    },
+    "session_id": {
+      "title": "Session Id",
+      "type": "string"
+    },
+    "origin_client_instance_id": {
+      "title": "Origin Client Instance Id",
+      "type": "string"
+    },
+    "client_capabilities": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/ClientCapabilities"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null
+    },
+    "status": {
+      "enum": [
+        "queued",
+        "running",
+        "waiting_input",
+        "waiting_approval",
+        "cancelling",
+        "completed",
+        "failed",
+        "cancelled",
+        "expired"
+      ],
+      "title": "Status",
+      "type": "string"
+    },
+    "outcome": {
+      "anyOf": [
+        {
+          "enum": [
+            "success",
+            "partial",
+            "denied",
+            "failed",
+            "cancelled",
+            "expired"
+          ],
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Outcome"
+    },
+    "completion_reason_code": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Completion Reason Code"
+    },
+    "mode": {
+      "default": "agent",
+      "enum": [
+        "agent",
+        "workflow",
+        "analysis"
+      ],
+      "title": "Mode",
+      "type": "string"
+    },
+    "inference_mode": {
+      "anyOf": [
+        {
+          "enum": [
+            "fast",
+            "auto",
+            "deep"
+          ],
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Inference Mode"
+    },
+    "workflow_ref": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/WorkflowRef"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null
+    },
+    "input_message_id": {
+      "title": "Input Message Id",
+      "type": "string"
+    },
+    "base_context_version": {
+      "minimum": 1,
+      "title": "Base Context Version",
+      "type": "integer"
+    },
+    "current_phase": {
+      "default": "queued",
+      "title": "Current Phase",
+      "type": "string"
+    },
+    "waiting_for": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Waiting For"
+    },
+    "state_version": {
+      "default": 1,
+      "minimum": 1,
+      "title": "State Version",
+      "type": "integer"
+    },
+    "created_at": {
+      "format": "date-time",
+      "title": "Created At",
+      "type": "string"
+    },
+    "started_at": {
+      "anyOf": [
+        {
+          "format": "date-time",
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Started At"
+    },
+    "completed_at": {
+      "anyOf": [
+        {
+          "format": "date-time",
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Completed At"
+    }
+  },
+  "required": [
+    "run_id",
+    "session_id",
+    "origin_client_instance_id",
+    "status",
+    "input_message_id",
+    "base_context_version"
+  ],
+  "title": "AgentRun",
+  "type": "object"
+}

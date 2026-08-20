@@ -261,7 +261,11 @@ def test_committed_contracts_cover_the_analysis_report_union() -> None:
 
 def test_committed_contracts_match_fresh_export(tmp_path) -> None:
     export_contracts(tmp_path)
-    committed_root = Path(__file__).resolve().parents[2] / "contracts"
+    # Contracts are versioned inside the agent-runtime repo so they
+    # travel with the code that generates them (schemas, manifests and
+    # OpenAPI all derive from in-repo models). ``parents[1]`` is the
+    # repo root.
+    committed_root = Path(__file__).resolve().parents[1] / "contracts"
 
     generated = {
         path.relative_to(tmp_path): path.read_bytes()

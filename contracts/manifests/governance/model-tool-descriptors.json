@@ -1,0 +1,83 @@
+[
+  {
+    "tool_id": "governance.get_governance_overview",
+    "tool_version": "1.0.0",
+    "name": "查询区域治理总览",
+    "description": "查询授权区域的人、房、企、事、物治理关联数、要素总数和治理覆盖率。使用全量信息视图当前四平台治理口径，不返回对象明细。",
+    "input_schema": {
+      "$ref": "schema://tools/query-governance-overview-input/1.0.0"
+    }
+  },
+  {
+    "tool_id": "governance.get_object_profile",
+    "tool_version": "1.0.0",
+    "name": "查询治理对象画像",
+    "description": "查询授权区域内单个楼栋的基础画像和位置。调用时必须提供声明区域 scope；当前真实适配器仅支持 building。",
+    "input_schema": {
+      "$ref": "schema://tools/get-object-profile-input/1.0.0"
+    }
+  },
+  {
+    "tool_id": "governance.query_enterprise_metrics",
+    "tool_version": "1.0.0",
+    "name": "查询企业区划分布",
+    "description": "查询授权区域内企业聚合数量，不返回企业明细。group_by=[next_area] 时按直接下级区划返回，结果可用于表格、柱状图和区划分色图；group_by=[enterprise_type] 时按旧接口返回最多 8 类企业类型，企业类型须经 enterprise_type 字典映射为中文，结果仅用于表格和柱状图；group_by=[enterprise_scale] 时按从业人数返回五档企业规模，旧接口的 10-50人、50-100人实际边界分别为11-50人、51-100人，且从业人数为空的企业不计入；group_by=[industry_name] 时按旧接口返回最多 8 类行业名称，行业名称直接来自上游响应，无须字典映射，结果仅用于表格和柱状图。",
+    "input_schema": {
+      "$ref": "schema://tools/query-enterprise-metrics-input/1.0.0"
+    }
+  },
+  {
+    "tool_id": "governance.query_event_metrics",
+    "tool_version": "1.0.0",
+    "name": "查询治理事件指标",
+    "description": "查询授权区域的三层办结率快照，或在显式日期范围内查询按月汇总的事件总数趋势。趋势缺失月份按 0 补齐，不表示上报或处置趋势。",
+    "input_schema": {
+      "$ref": "schema://tools/query-event-metrics-input/1.0.0"
+    }
+  },
+  {
+    "tool_id": "governance.query_governance_power_metrics",
+    "tool_version": "1.0.0",
+    "name": "查询治理力量汇总",
+    "description": "查询授权区域的户数、网格长、网格指导员、专职和兼职网格员、其他网格力量及微网格汇总，不返回姓名、电话或个人明细。",
+    "input_schema": {
+      "$ref": "schema://tools/query-governance-power-metrics-input/1.0.0"
+    }
+  },
+  {
+    "tool_id": "governance.query_housing_metrics",
+    "tool_version": "1.0.0",
+    "name": "查询房屋聚合指标",
+    "description": "查询授权区域的房屋聚合统计，不返回房屋明细。metrics=['building_count','room_count'] 且不分组时，返回区域楼幢总数和户室总数；group_by=['room_use'] 时返回户室用途分类数量；不传 group_by 时返回区域自身按租赁类型的汇总；group_by=['next_area'] 时返回直接下级区划（全市按区县、区县按街道、街道按社区、社区按网格）的出租房数量分布。不支持其他分组、筛选、排序。",
+    "input_schema": {
+      "$ref": "schema://tools/query-housing-metrics-input/1.0.0"
+    }
+  },
+  {
+    "tool_id": "governance.query_population_metrics",
+    "tool_version": "1.0.0",
+    "name": "查询人口聚合指标",
+    "description": "查询当前授权区域的一般人口或独居老人聚合指标，不返回个人明细。一般人口不传 filters；独居老人传 [{field: person_category, operator: eq, value: solitary_elderly}]。不支持年龄或性别统计；group_by 必须是区域的直接下一级，区县传 [street]、街道传 [community]、社区传 [grid]。",
+    "input_schema": {
+      "$ref": "schema://tools/query-population-metrics-input/1.0.0"
+    }
+  },
+  {
+    "tool_id": "governance.resolve_area",
+    "tool_version": "1.0.0",
+    "name": "解析区划",
+    "description": "将区划名称或当前区域表达解析为授权范围内的标准区划候选。",
+    "input_schema": {
+      "$ref": "schema://tools/resolve-area-input/1.0.0"
+    }
+  },
+  {
+    "tool_id": "knowledge.search",
+    "tool_version": "1.0.0",
+    "name": "检索当前应用知识库",
+    "description": "检索当前租户、应用及用户权限内已发布且索引就绪的知识库。返回文档、知识库版本、片段、页码或段落定位，回答必须保留引用。",
+    "input_schema": {
+      "$ref": "schema://tools/knowledge-search-input/1.0.0"
+    }
+  }
+]

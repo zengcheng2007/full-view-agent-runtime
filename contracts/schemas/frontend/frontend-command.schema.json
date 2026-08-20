@@ -1,0 +1,571 @@
+{
+  "$defs": {
+    "FrontendCommandPreconditions": {
+      "additionalProperties": false,
+      "properties": {
+        "session_id": {
+          "maxLength": 128,
+          "minLength": 1,
+          "title": "Session Id",
+          "type": "string"
+        },
+        "area_code": {
+          "anyOf": [
+            {
+              "maxLength": 32,
+              "minLength": 1,
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Area Code"
+        },
+        "required_client_capability": {
+          "enum": [
+            "panel.show_table@1.0",
+            "map.render_choropleth@1.0",
+            "map.render_points@1.0",
+            "map.render_cluster@1.0",
+            "map.render_heatmap@1.0",
+            "map.zoom_to@1.0",
+            "map.highlight_area@1.0",
+            "layer.clear@1.0",
+            "panel.show_summary@1.0",
+            "route.navigate@1.0"
+          ],
+          "title": "Required Client Capability",
+          "type": "string"
+        }
+      },
+      "required": [
+        "session_id",
+        "required_client_capability"
+      ],
+      "title": "FrontendCommandPreconditions",
+      "type": "object"
+    },
+    "LayerClearPayload": {
+      "additionalProperties": false,
+      "properties": {
+        "clear_data_only": {
+          "default": false,
+          "title": "Clear Data Only",
+          "type": "boolean"
+        },
+        "layer_ids": {
+          "items": {
+            "type": "string"
+          },
+          "maxItems": 100,
+          "title": "Layer Ids",
+          "type": "array"
+        }
+      },
+      "title": "LayerClearPayload",
+      "type": "object"
+    },
+    "MapHighlightAreaPayload": {
+      "additionalProperties": false,
+      "properties": {
+        "area_code": {
+          "maxLength": 32,
+          "minLength": 1,
+          "title": "Area Code",
+          "type": "string"
+        },
+        "style": {
+          "$ref": "#/$defs/MapHighlightStyle"
+        }
+      },
+      "required": [
+        "area_code"
+      ],
+      "title": "MapHighlightAreaPayload",
+      "type": "object"
+    },
+    "MapHighlightStyle": {
+      "additionalProperties": false,
+      "properties": {
+        "color": {
+          "default": "#ff6b35",
+          "pattern": "^#[0-9a-fA-F]{6}$",
+          "title": "Color",
+          "type": "string"
+        },
+        "opacity": {
+          "default": 0.5,
+          "maximum": 1,
+          "minimum": 0,
+          "title": "Opacity",
+          "type": "number"
+        }
+      },
+      "title": "MapHighlightStyle",
+      "type": "object"
+    },
+    "MapRenderChoroplethPayload": {
+      "additionalProperties": false,
+      "properties": {
+        "result_id": {
+          "maxLength": 128,
+          "minLength": 1,
+          "title": "Result Id",
+          "type": "string"
+        },
+        "metric_field": {
+          "default": "person_count",
+          "enum": [
+            "person_count",
+            "dwelling_count",
+            "enterprise_count"
+          ],
+          "title": "Metric Field",
+          "type": "string"
+        },
+        "label_field": {
+          "const": "area_name",
+          "default": "area_name",
+          "title": "Label Field",
+          "type": "string"
+        },
+        "area_code_field": {
+          "const": "area_code",
+          "default": "area_code",
+          "title": "Area Code Field",
+          "type": "string"
+        },
+        "legend_title": {
+          "default": "人口数量",
+          "maxLength": 100,
+          "minLength": 1,
+          "title": "Legend Title",
+          "type": "string"
+        },
+        "palette": {
+          "const": "sequential_blue_5",
+          "default": "sequential_blue_5",
+          "title": "Palette",
+          "type": "string"
+        },
+        "fit_bounds": {
+          "default": true,
+          "title": "Fit Bounds",
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "result_id"
+      ],
+      "title": "MapRenderChoroplethPayload",
+      "type": "object"
+    },
+    "MapRenderHolographicPayload": {
+      "additionalProperties": false,
+      "properties": {
+        "result_id": {
+          "maxLength": 128,
+          "minLength": 1,
+          "title": "Result Id",
+          "type": "string"
+        },
+        "lng_field": {
+          "maxLength": 128,
+          "minLength": 1,
+          "title": "Lng Field",
+          "type": "string"
+        },
+        "lat_field": {
+          "maxLength": 128,
+          "minLength": 1,
+          "title": "Lat Field",
+          "type": "string"
+        },
+        "color_field": {
+          "anyOf": [
+            {
+              "maxLength": 128,
+              "minLength": 1,
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Color Field"
+        },
+        "radius_field": {
+          "anyOf": [
+            {
+              "maxLength": 128,
+              "minLength": 1,
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Radius Field"
+        },
+        "weight_field": {
+          "anyOf": [
+            {
+              "maxLength": 128,
+              "minLength": 1,
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Weight Field"
+        },
+        "label_field": {
+          "anyOf": [
+            {
+              "maxLength": 128,
+              "minLength": 1,
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Label Field"
+        },
+        "default_color": {
+          "default": "#0187e6",
+          "pattern": "^#[0-9a-fA-F]{6}$",
+          "title": "Default Color",
+          "type": "string"
+        },
+        "default_radius": {
+          "default": 6,
+          "maximum": 100,
+          "minimum": 1,
+          "title": "Default Radius",
+          "type": "number"
+        },
+        "fit_bounds": {
+          "default": true,
+          "title": "Fit Bounds",
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "result_id",
+        "lng_field",
+        "lat_field"
+      ],
+      "title": "MapRenderHolographicPayload",
+      "type": "object"
+    },
+    "MapZoomToPayload": {
+      "additionalProperties": false,
+      "properties": {
+        "center": {
+          "anyOf": [
+            {
+              "maxItems": 2,
+              "minItems": 2,
+              "prefixItems": [
+                {
+                  "type": "number"
+                },
+                {
+                  "type": "number"
+                }
+              ],
+              "type": "array"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Center"
+        },
+        "zoom": {
+          "anyOf": [
+            {
+              "maximum": 22,
+              "minimum": 0,
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Zoom"
+        },
+        "bounds": {
+          "anyOf": [
+            {
+              "maxItems": 2,
+              "minItems": 2,
+              "prefixItems": [
+                {
+                  "maxItems": 2,
+                  "minItems": 2,
+                  "prefixItems": [
+                    {
+                      "type": "number"
+                    },
+                    {
+                      "type": "number"
+                    }
+                  ],
+                  "type": "array"
+                },
+                {
+                  "maxItems": 2,
+                  "minItems": 2,
+                  "prefixItems": [
+                    {
+                      "type": "number"
+                    },
+                    {
+                      "type": "number"
+                    }
+                  ],
+                  "type": "array"
+                }
+              ],
+              "type": "array"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Bounds"
+        },
+        "fit_features": {
+          "default": false,
+          "title": "Fit Features",
+          "type": "boolean"
+        }
+      },
+      "title": "MapZoomToPayload",
+      "type": "object"
+    },
+    "PanelShowSummaryPayload": {
+      "additionalProperties": false,
+      "properties": {
+        "title": {
+          "maxLength": 100,
+          "minLength": 1,
+          "title": "Title",
+          "type": "string"
+        },
+        "items": {
+          "items": {
+            "$ref": "#/$defs/SummaryItem"
+          },
+          "maxItems": 100,
+          "minItems": 1,
+          "title": "Items",
+          "type": "array"
+        }
+      },
+      "required": [
+        "title",
+        "items"
+      ],
+      "title": "PanelShowSummaryPayload",
+      "type": "object"
+    },
+    "PanelShowTablePayload": {
+      "additionalProperties": false,
+      "properties": {
+        "result_id": {
+          "maxLength": 128,
+          "minLength": 1,
+          "title": "Result Id",
+          "type": "string"
+        }
+      },
+      "required": [
+        "result_id"
+      ],
+      "title": "PanelShowTablePayload",
+      "type": "object"
+    },
+    "RouteNavigatePayload": {
+      "additionalProperties": false,
+      "properties": {
+        "path": {
+          "maxLength": 2048,
+          "minLength": 1,
+          "title": "Path",
+          "type": "string"
+        }
+      },
+      "required": [
+        "path"
+      ],
+      "title": "RouteNavigatePayload",
+      "type": "object"
+    },
+    "SummaryItem": {
+      "additionalProperties": false,
+      "properties": {
+        "label": {
+          "maxLength": 100,
+          "minLength": 1,
+          "title": "Label",
+          "type": "string"
+        },
+        "value": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "integer"
+            },
+            {
+              "type": "number"
+            },
+            {
+              "type": "boolean"
+            }
+          ],
+          "title": "Value"
+        },
+        "unit": {
+          "anyOf": [
+            {
+              "maxLength": 32,
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Unit"
+        }
+      },
+      "required": [
+        "label",
+        "value"
+      ],
+      "title": "SummaryItem",
+      "type": "object"
+    }
+  },
+  "additionalProperties": false,
+  "properties": {
+    "schema_version": {
+      "const": "1.1",
+      "default": "1.1",
+      "title": "Schema Version",
+      "type": "string"
+    },
+    "command_id": {
+      "maxLength": 128,
+      "minLength": 1,
+      "title": "Command Id",
+      "type": "string"
+    },
+    "run_id": {
+      "maxLength": 128,
+      "minLength": 1,
+      "title": "Run Id",
+      "type": "string"
+    },
+    "target_client_instance_id": {
+      "maxLength": 128,
+      "minLength": 1,
+      "title": "Target Client Instance Id",
+      "type": "string"
+    },
+    "type": {
+      "enum": [
+        "panel.show_table",
+        "map.render_choropleth",
+        "map.render_points",
+        "map.render_cluster",
+        "map.render_heatmap",
+        "map.zoom_to",
+        "map.highlight_area",
+        "layer.clear",
+        "panel.show_summary",
+        "route.navigate"
+      ],
+      "title": "Type",
+      "type": "string"
+    },
+    "target": {
+      "default": "result_panel",
+      "enum": [
+        "result_panel",
+        "map_panel",
+        "summary_panel",
+        "app_router"
+      ],
+      "title": "Target",
+      "type": "string"
+    },
+    "issued_at": {
+      "format": "date-time",
+      "title": "Issued At",
+      "type": "string"
+    },
+    "expires_at": {
+      "format": "date-time",
+      "title": "Expires At",
+      "type": "string"
+    },
+    "preconditions": {
+      "$ref": "#/$defs/FrontendCommandPreconditions"
+    },
+    "payload": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/PanelShowTablePayload"
+        },
+        {
+          "$ref": "#/$defs/MapRenderChoroplethPayload"
+        },
+        {
+          "$ref": "#/$defs/MapRenderHolographicPayload"
+        },
+        {
+          "$ref": "#/$defs/MapZoomToPayload"
+        },
+        {
+          "$ref": "#/$defs/MapHighlightAreaPayload"
+        },
+        {
+          "$ref": "#/$defs/LayerClearPayload"
+        },
+        {
+          "$ref": "#/$defs/PanelShowSummaryPayload"
+        },
+        {
+          "$ref": "#/$defs/RouteNavigatePayload"
+        }
+      ],
+      "title": "Payload"
+    }
+  },
+  "required": [
+    "command_id",
+    "run_id",
+    "target_client_instance_id",
+    "type",
+    "preconditions",
+    "payload"
+  ],
+  "title": "FrontendCommand",
+  "type": "object"
+}

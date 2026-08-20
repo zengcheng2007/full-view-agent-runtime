@@ -1,0 +1,127 @@
+{
+  "$defs": {
+    "ResultReferenceContent": {
+      "additionalProperties": false,
+      "properties": {
+        "type": {
+          "const": "result_reference",
+          "title": "Type",
+          "type": "string"
+        },
+        "result_id": {
+          "maxLength": 128,
+          "minLength": 1,
+          "title": "Result Id",
+          "type": "string"
+        },
+        "label": {
+          "maxLength": 200,
+          "minLength": 1,
+          "title": "Label",
+          "type": "string"
+        }
+      },
+      "required": [
+        "type",
+        "result_id",
+        "label"
+      ],
+      "title": "ResultReferenceContent",
+      "type": "object"
+    },
+    "TextContent": {
+      "additionalProperties": false,
+      "properties": {
+        "type": {
+          "const": "text",
+          "title": "Type",
+          "type": "string"
+        },
+        "text": {
+          "maxLength": 10000,
+          "minLength": 1,
+          "title": "Text",
+          "type": "string"
+        }
+      },
+      "required": [
+        "type",
+        "text"
+      ],
+      "title": "TextContent",
+      "type": "object"
+    }
+  },
+  "additionalProperties": false,
+  "properties": {
+    "schema_version": {
+      "const": "1.1",
+      "default": "1.1",
+      "title": "Schema Version",
+      "type": "string"
+    },
+    "message_id": {
+      "title": "Message Id",
+      "type": "string"
+    },
+    "session_id": {
+      "title": "Session Id",
+      "type": "string"
+    },
+    "run_id": {
+      "title": "Run Id",
+      "type": "string"
+    },
+    "role": {
+      "enum": [
+        "user",
+        "assistant"
+      ],
+      "title": "Role",
+      "type": "string"
+    },
+    "content": {
+      "items": {
+        "discriminator": {
+          "mapping": {
+            "result_reference": "#/$defs/ResultReferenceContent",
+            "text": "#/$defs/TextContent"
+          },
+          "propertyName": "type"
+        },
+        "oneOf": [
+          {
+            "$ref": "#/$defs/TextContent"
+          },
+          {
+            "$ref": "#/$defs/ResultReferenceContent"
+          }
+        ]
+      },
+      "minItems": 1,
+      "title": "Content",
+      "type": "array"
+    },
+    "evidence_ids": {
+      "items": {
+        "type": "string"
+      },
+      "title": "Evidence Ids",
+      "type": "array"
+    },
+    "created_at": {
+      "format": "date-time",
+      "title": "Created At",
+      "type": "string"
+    }
+  },
+  "required": [
+    "message_id",
+    "session_id",
+    "run_id",
+    "role",
+    "content"
+  ],
+  "title": "AgentMessage",
+  "type": "object"
+}

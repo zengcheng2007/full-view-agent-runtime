@@ -1,0 +1,55 @@
+{
+  "schema_version": "1.1",
+  "tool_id": "governance.query_housing_metrics",
+  "tool_version": "1.0.0",
+  "status": "active",
+  "domain": "governance",
+  "owner": "full-information-domain-team",
+  "effect": "read",
+  "risk_level": "low",
+  "dataset_id": "housing",
+  "data_classifications": [
+    "internal",
+    "aggregated"
+  ],
+  "required_permissions": [
+    "governance.housing.aggregate.read"
+  ],
+  "input_schema_ref": "schema://tools/query-housing-metrics-input/1.0.0",
+  "result_schemas": [
+    {
+      "kind": "table",
+      "data_schema_ref": "schema://data/housing-lease-type-table/1.0.0"
+    },
+    {
+      "kind": "table",
+      "data_schema_ref": "schema://data/housing-room-use-table/1.0.0"
+    },
+    {
+      "kind": "table",
+      "data_schema_ref": "schema://data/housing-area-group-table/1.0.0"
+    },
+    {
+      "kind": "table",
+      "data_schema_ref": "schema://data/housing-stock-overview/1.0.0"
+    }
+  ],
+  "limits": {
+    "timeout_ms": 8000,
+    "max_attempts": 2,
+    "max_result_rows": 1000,
+    "max_group_buckets": 200
+  },
+  "cache_policy": {
+    "enabled": true,
+    "ttl_seconds": 60
+  },
+  "policy": {
+    "action": "governance.housing.aggregate.read",
+    "pre_check": true,
+    "post_filter": true,
+    "denial_scope": "dataset_area_fields"
+  },
+  "adapter_ref": "adapter://geo-qxst/housing-metrics/1.0",
+  "semantic_contract": null
+}

@@ -1,0 +1,842 @@
+{
+  "$defs": {
+    "JsonValue": {},
+    "ToolCachePolicy": {
+      "additionalProperties": false,
+      "properties": {
+        "enabled": {
+          "title": "Enabled",
+          "type": "boolean"
+        },
+        "ttl_seconds": {
+          "maximum": 86400,
+          "minimum": 0,
+          "title": "Ttl Seconds",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "enabled",
+        "ttl_seconds"
+      ],
+      "title": "ToolCachePolicy",
+      "type": "object"
+    },
+    "ToolLimits": {
+      "additionalProperties": false,
+      "properties": {
+        "timeout_ms": {
+          "maximum": 120000,
+          "minimum": 100,
+          "title": "Timeout Ms",
+          "type": "integer"
+        },
+        "max_attempts": {
+          "maximum": 5,
+          "minimum": 1,
+          "title": "Max Attempts",
+          "type": "integer"
+        },
+        "max_result_rows": {
+          "maximum": 10000,
+          "minimum": 1,
+          "title": "Max Result Rows",
+          "type": "integer"
+        },
+        "max_group_buckets": {
+          "maximum": 1000,
+          "minimum": 1,
+          "title": "Max Group Buckets",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "timeout_ms",
+        "max_attempts",
+        "max_result_rows",
+        "max_group_buckets"
+      ],
+      "title": "ToolLimits",
+      "type": "object"
+    },
+    "ToolPolicyBinding": {
+      "additionalProperties": false,
+      "properties": {
+        "action": {
+          "maxLength": 200,
+          "minLength": 1,
+          "title": "Action",
+          "type": "string"
+        },
+        "pre_check": {
+          "default": true,
+          "title": "Pre Check",
+          "type": "boolean"
+        },
+        "post_filter": {
+          "default": true,
+          "title": "Post Filter",
+          "type": "boolean"
+        },
+        "denial_scope": {
+          "enum": [
+            "dataset_area_fields",
+            "object_fields"
+          ],
+          "title": "Denial Scope",
+          "type": "string"
+        }
+      },
+      "required": [
+        "action",
+        "denial_scope"
+      ],
+      "title": "ToolPolicyBinding",
+      "type": "object"
+    },
+    "ToolResultSchemaBinding": {
+      "additionalProperties": false,
+      "properties": {
+        "kind": {
+          "enum": [
+            "area_candidates",
+            "table",
+            "metric",
+            "object_profile"
+          ],
+          "title": "Kind",
+          "type": "string"
+        },
+        "data_schema_ref": {
+          "title": "Data Schema Ref",
+          "type": "string"
+        }
+      },
+      "required": [
+        "kind",
+        "data_schema_ref"
+      ],
+      "title": "ToolResultSchemaBinding",
+      "type": "object"
+    },
+    "ToolSemanticCompleteness": {
+      "additionalProperties": false,
+      "properties": {
+        "mode": {
+          "enum": [
+            "complete",
+            "partial",
+            "unknown"
+          ],
+          "title": "Mode",
+          "type": "string"
+        },
+        "statement": {
+          "maxLength": 500,
+          "minLength": 1,
+          "title": "Statement",
+          "type": "string"
+        }
+      },
+      "required": [
+        "mode",
+        "statement"
+      ],
+      "title": "ToolSemanticCompleteness",
+      "type": "object"
+    },
+    "ToolSemanticContract": {
+      "additionalProperties": false,
+      "description": "Version-owned analytical meaning exposed by one exact Tool version.",
+      "properties": {
+        "schema_version": {
+          "const": "1.0",
+          "default": "1.0",
+          "title": "Schema Version",
+          "type": "string"
+        },
+        "subject": {
+          "maxLength": 64,
+          "minLength": 1,
+          "pattern": "^[a-z][a-z0-9_]*$",
+          "title": "Subject",
+          "type": "string"
+        },
+        "intent_terms": {
+          "default": [],
+          "items": {
+            "type": "string"
+          },
+          "title": "Intent Terms",
+          "type": "array"
+        },
+        "excluded_intent_terms": {
+          "default": [],
+          "items": {
+            "type": "string"
+          },
+          "title": "Excluded Intent Terms",
+          "type": "array"
+        },
+        "metrics": {
+          "items": {
+            "$ref": "#/$defs/ToolSemanticMetric"
+          },
+          "minItems": 1,
+          "title": "Metrics",
+          "type": "array"
+        },
+        "dimensions": {
+          "items": {
+            "$ref": "#/$defs/ToolSemanticDimension"
+          },
+          "title": "Dimensions",
+          "type": "array"
+        },
+        "filters": {
+          "items": {
+            "$ref": "#/$defs/ToolSemanticFilter"
+          },
+          "title": "Filters",
+          "type": "array"
+        },
+        "operators": {
+          "items": {
+            "enum": [
+              "list",
+              "sum",
+              "avg",
+              "min",
+              "max",
+              "top",
+              "bottom",
+              "rank"
+            ],
+            "type": "string"
+          },
+          "minItems": 1,
+          "title": "Operators",
+          "type": "array"
+        },
+        "operator_intents": {
+          "default": [],
+          "items": {
+            "$ref": "#/$defs/ToolSemanticOperatorIntent"
+          },
+          "title": "Operator Intents",
+          "type": "array"
+        },
+        "sort": {
+          "$ref": "#/$defs/ToolSemanticSort"
+        },
+        "completeness": {
+          "$ref": "#/$defs/ToolSemanticCompleteness"
+        },
+        "output_forms": {
+          "items": {
+            "enum": [
+              "table",
+              "metric_card",
+              "bar",
+              "line",
+              "choropleth",
+              "csv"
+            ],
+            "type": "string"
+          },
+          "minItems": 1,
+          "title": "Output Forms",
+          "type": "array"
+        },
+        "examples": {
+          "items": {
+            "$ref": "#/$defs/ToolSemanticExample"
+          },
+          "title": "Examples",
+          "type": "array"
+        },
+        "limitations": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Limitations",
+          "type": "array"
+        },
+        "query_shapes": {
+          "items": {
+            "$ref": "#/$defs/ToolSemanticQueryShape"
+          },
+          "minItems": 1,
+          "title": "Query Shapes",
+          "type": "array"
+        }
+      },
+      "required": [
+        "subject",
+        "metrics",
+        "dimensions",
+        "filters",
+        "operators",
+        "sort",
+        "completeness",
+        "output_forms",
+        "examples",
+        "limitations",
+        "query_shapes"
+      ],
+      "title": "ToolSemanticContract",
+      "type": "object"
+    },
+    "ToolSemanticDimension": {
+      "additionalProperties": false,
+      "properties": {
+        "dimension_id": {
+          "maxLength": 64,
+          "minLength": 1,
+          "pattern": "^[a-z][a-z0-9_]*$",
+          "title": "Dimension Id",
+          "type": "string"
+        },
+        "label": {
+          "maxLength": 100,
+          "minLength": 1,
+          "title": "Label",
+          "type": "string"
+        },
+        "kind": {
+          "enum": [
+            "category",
+            "administrative_area",
+            "time"
+          ],
+          "title": "Kind",
+          "type": "string"
+        },
+        "intent_terms": {
+          "default": [],
+          "items": {
+            "type": "string"
+          },
+          "title": "Intent Terms",
+          "type": "array"
+        }
+      },
+      "required": [
+        "dimension_id",
+        "label",
+        "kind"
+      ],
+      "title": "ToolSemanticDimension",
+      "type": "object"
+    },
+    "ToolSemanticExample": {
+      "additionalProperties": false,
+      "properties": {
+        "question": {
+          "maxLength": 500,
+          "minLength": 1,
+          "title": "Question",
+          "type": "string"
+        },
+        "operator": {
+          "enum": [
+            "list",
+            "sum",
+            "avg",
+            "min",
+            "max",
+            "top",
+            "bottom",
+            "rank"
+          ],
+          "title": "Operator",
+          "type": "string"
+        },
+        "metric": {
+          "maxLength": 64,
+          "minLength": 1,
+          "title": "Metric",
+          "type": "string"
+        },
+        "dimension": {
+          "anyOf": [
+            {
+              "maxLength": 64,
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Dimension"
+        }
+      },
+      "required": [
+        "question",
+        "operator",
+        "metric"
+      ],
+      "title": "ToolSemanticExample",
+      "type": "object"
+    },
+    "ToolSemanticFilter": {
+      "additionalProperties": false,
+      "properties": {
+        "field": {
+          "maxLength": 64,
+          "minLength": 1,
+          "pattern": "^[a-z][a-z0-9_]*$",
+          "title": "Field",
+          "type": "string"
+        },
+        "label": {
+          "maxLength": 100,
+          "minLength": 1,
+          "title": "Label",
+          "type": "string"
+        },
+        "operators": {
+          "items": {
+            "enum": [
+              "eq",
+              "ne",
+              "in",
+              "not_in",
+              "gt",
+              "gte",
+              "lt",
+              "lte",
+              "between"
+            ],
+            "type": "string"
+          },
+          "minItems": 1,
+          "title": "Operators",
+          "type": "array"
+        },
+        "allowed_values": {
+          "default": [],
+          "items": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "integer"
+              },
+              {
+                "type": "number"
+              },
+              {
+                "type": "boolean"
+              }
+            ]
+          },
+          "title": "Allowed Values",
+          "type": "array"
+        }
+      },
+      "required": [
+        "field",
+        "label",
+        "operators"
+      ],
+      "title": "ToolSemanticFilter",
+      "type": "object"
+    },
+    "ToolSemanticMetric": {
+      "additionalProperties": false,
+      "properties": {
+        "metric_id": {
+          "maxLength": 64,
+          "minLength": 1,
+          "pattern": "^[a-z][a-z0-9_]*$",
+          "title": "Metric Id",
+          "type": "string"
+        },
+        "label": {
+          "maxLength": 100,
+          "minLength": 1,
+          "title": "Label",
+          "type": "string"
+        },
+        "unit": {
+          "anyOf": [
+            {
+              "maxLength": 32,
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Unit"
+        },
+        "value_type": {
+          "enum": [
+            "integer",
+            "number"
+          ],
+          "title": "Value Type",
+          "type": "string"
+        },
+        "intent_terms": {
+          "default": [],
+          "items": {
+            "type": "string"
+          },
+          "title": "Intent Terms",
+          "type": "array"
+        }
+      },
+      "required": [
+        "metric_id",
+        "label",
+        "value_type"
+      ],
+      "title": "ToolSemanticMetric",
+      "type": "object"
+    },
+    "ToolSemanticOperatorIntent": {
+      "additionalProperties": false,
+      "properties": {
+        "operator": {
+          "enum": [
+            "list",
+            "sum",
+            "avg",
+            "min",
+            "max",
+            "top",
+            "bottom",
+            "rank"
+          ],
+          "title": "Operator",
+          "type": "string"
+        },
+        "terms": {
+          "items": {
+            "type": "string"
+          },
+          "minItems": 1,
+          "title": "Terms",
+          "type": "array"
+        }
+      },
+      "required": [
+        "operator",
+        "terms"
+      ],
+      "title": "ToolSemanticOperatorIntent",
+      "type": "object"
+    },
+    "ToolSemanticQueryShape": {
+      "additionalProperties": false,
+      "properties": {
+        "shape_id": {
+          "maxLength": 64,
+          "minLength": 1,
+          "pattern": "^[a-z][a-z0-9_]*$",
+          "title": "Shape Id",
+          "type": "string"
+        },
+        "metric_selection": {
+          "items": {
+            "type": "string"
+          },
+          "minItems": 1,
+          "title": "Metric Selection",
+          "type": "array"
+        },
+        "dimension_selection": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Dimension Selection",
+          "type": "array"
+        },
+        "operator_selection": {
+          "items": {
+            "enum": [
+              "list",
+              "sum",
+              "avg",
+              "min",
+              "max",
+              "top",
+              "bottom",
+              "rank"
+            ],
+            "type": "string"
+          },
+          "minItems": 1,
+          "title": "Operator Selection",
+          "type": "array"
+        },
+        "scope_levels": {
+          "items": {
+            "enum": [
+              4,
+              6,
+              9,
+              12,
+              15
+            ],
+            "type": "integer"
+          },
+          "minItems": 1,
+          "title": "Scope Levels",
+          "type": "array"
+        },
+        "allowed_filters": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Allowed Filters",
+          "type": "array"
+        },
+        "output_forms": {
+          "items": {
+            "enum": [
+              "table",
+              "metric_card",
+              "bar",
+              "line",
+              "choropleth",
+              "csv"
+            ],
+            "type": "string"
+          },
+          "minItems": 1,
+          "title": "Output Forms",
+          "type": "array"
+        },
+        "completeness": {
+          "$ref": "#/$defs/ToolSemanticCompleteness"
+        },
+        "result_schema_ref": {
+          "maxLength": 300,
+          "minLength": 1,
+          "title": "Result Schema Ref",
+          "type": "string"
+        },
+        "result_row_fields": {
+          "items": {
+            "type": "string"
+          },
+          "minItems": 1,
+          "title": "Result Row Fields",
+          "type": "array"
+        },
+        "result_fingerprint_domain": {
+          "maxLength": 300,
+          "minLength": 1,
+          "title": "Result Fingerprint Domain",
+          "type": "string"
+        },
+        "argument_template": {
+          "anyOf": [
+            {
+              "additionalProperties": {
+                "$ref": "#/$defs/JsonValue"
+              },
+              "type": "object"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Argument Template"
+        }
+      },
+      "required": [
+        "shape_id",
+        "metric_selection",
+        "dimension_selection",
+        "operator_selection",
+        "scope_levels",
+        "allowed_filters",
+        "output_forms",
+        "completeness",
+        "result_schema_ref",
+        "result_row_fields",
+        "result_fingerprint_domain"
+      ],
+      "title": "ToolSemanticQueryShape",
+      "type": "object"
+    },
+    "ToolSemanticSort": {
+      "additionalProperties": false,
+      "properties": {
+        "allowed_fields": {
+          "items": {
+            "type": "string"
+          },
+          "minItems": 1,
+          "title": "Allowed Fields",
+          "type": "array"
+        },
+        "default_direction": {
+          "default": "desc",
+          "enum": [
+            "asc",
+            "desc"
+          ],
+          "title": "Default Direction",
+          "type": "string"
+        },
+        "tie_policy": {
+          "enum": [
+            "include_all",
+            "secondary_sort"
+          ],
+          "title": "Tie Policy",
+          "type": "string"
+        },
+        "tie_breakers": {
+          "default": [],
+          "items": {
+            "type": "string"
+          },
+          "title": "Tie Breakers",
+          "type": "array"
+        }
+      },
+      "required": [
+        "allowed_fields",
+        "tie_policy"
+      ],
+      "title": "ToolSemanticSort",
+      "type": "object"
+    }
+  },
+  "additionalProperties": false,
+  "properties": {
+    "schema_version": {
+      "const": "1.1",
+      "default": "1.1",
+      "title": "Schema Version",
+      "type": "string"
+    },
+    "tool_id": {
+      "title": "Tool Id",
+      "type": "string"
+    },
+    "tool_version": {
+      "title": "Tool Version",
+      "type": "string"
+    },
+    "status": {
+      "default": "active",
+      "enum": [
+        "active",
+        "disabled"
+      ],
+      "title": "Status",
+      "type": "string"
+    },
+    "domain": {
+      "const": "governance",
+      "default": "governance",
+      "title": "Domain",
+      "type": "string"
+    },
+    "owner": {
+      "title": "Owner",
+      "type": "string"
+    },
+    "effect": {
+      "const": "read",
+      "default": "read",
+      "title": "Effect",
+      "type": "string"
+    },
+    "risk_level": {
+      "enum": [
+        "low",
+        "medium"
+      ],
+      "title": "Risk Level",
+      "type": "string"
+    },
+    "dataset_id": {
+      "title": "Dataset Id",
+      "type": "string"
+    },
+    "data_classifications": {
+      "items": {
+        "enum": [
+          "public",
+          "internal",
+          "aggregated",
+          "sensitive"
+        ],
+        "type": "string"
+      },
+      "title": "Data Classifications",
+      "type": "array"
+    },
+    "required_permissions": {
+      "items": {
+        "type": "string"
+      },
+      "title": "Required Permissions",
+      "type": "array"
+    },
+    "input_schema_ref": {
+      "title": "Input Schema Ref",
+      "type": "string"
+    },
+    "result_schemas": {
+      "items": {
+        "$ref": "#/$defs/ToolResultSchemaBinding"
+      },
+      "title": "Result Schemas",
+      "type": "array"
+    },
+    "limits": {
+      "$ref": "#/$defs/ToolLimits"
+    },
+    "cache_policy": {
+      "$ref": "#/$defs/ToolCachePolicy"
+    },
+    "policy": {
+      "$ref": "#/$defs/ToolPolicyBinding"
+    },
+    "adapter_ref": {
+      "title": "Adapter Ref",
+      "type": "string"
+    },
+    "semantic_contract": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/ToolSemanticContract"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null
+    }
+  },
+  "required": [
+    "tool_id",
+    "tool_version",
+    "owner",
+    "risk_level",
+    "dataset_id",
+    "data_classifications",
+    "required_permissions",
+    "input_schema_ref",
+    "result_schemas",
+    "limits",
+    "cache_policy",
+    "policy",
+    "adapter_ref"
+  ],
+  "title": "InternalToolManifest",
+  "type": "object"
+}

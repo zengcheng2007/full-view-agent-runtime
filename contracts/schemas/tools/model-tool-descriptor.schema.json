@@ -1,0 +1,49 @@
+{
+  "$defs": {
+    "ModelInputSchemaReference": {
+      "additionalProperties": false,
+      "properties": {
+        "$ref": {
+          "title": "$Ref",
+          "type": "string"
+        }
+      },
+      "required": [
+        "$ref"
+      ],
+      "title": "ModelInputSchemaReference",
+      "type": "object"
+    }
+  },
+  "additionalProperties": false,
+  "properties": {
+    "tool_id": {
+      "title": "Tool Id",
+      "type": "string"
+    },
+    "tool_version": {
+      "title": "Tool Version",
+      "type": "string"
+    },
+    "name": {
+      "title": "Name",
+      "type": "string"
+    },
+    "description": {
+      "title": "Description",
+      "type": "string"
+    },
+    "input_schema": {
+      "$ref": "#/$defs/ModelInputSchemaReference"
+    }
+  },
+  "required": [
+    "tool_id",
+    "tool_version",
+    "name",
+    "description",
+    "input_schema"
+  ],
+  "title": "ModelToolDescriptor",
+  "type": "object"
+}

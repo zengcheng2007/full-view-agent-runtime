@@ -1,0 +1,42 @@
+{
+  "schema_version": "1.1",
+  "tool_id": "knowledge.search",
+  "tool_version": "1.0.0",
+  "status": "active",
+  "domain": "governance",
+  "owner": "full-information-domain-team",
+  "effect": "read",
+  "risk_level": "low",
+  "dataset_id": "knowledge",
+  "data_classifications": [
+    "internal"
+  ],
+  "required_permissions": [
+    "knowledge.search"
+  ],
+  "input_schema_ref": "schema://tools/knowledge-search-input/1.0.0",
+  "result_schemas": [
+    {
+      "kind": "table",
+      "data_schema_ref": "schema://data/table-data-result/1.0.0"
+    }
+  ],
+  "limits": {
+    "timeout_ms": 8000,
+    "max_attempts": 2,
+    "max_result_rows": 1000,
+    "max_group_buckets": 200
+  },
+  "cache_policy": {
+    "enabled": false,
+    "ttl_seconds": 0
+  },
+  "policy": {
+    "action": "knowledge.search",
+    "pre_check": true,
+    "post_filter": true,
+    "denial_scope": "dataset_area_fields"
+  },
+  "adapter_ref": "adapter://agent-runtime/knowledge-search/1.0",
+  "semantic_contract": null
+}

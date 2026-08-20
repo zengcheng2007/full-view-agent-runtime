@@ -1,0 +1,84 @@
+{
+  "$defs": {
+    "GovernanceObjectRef": {
+      "additionalProperties": false,
+      "properties": {
+        "object_type": {
+          "enum": [
+            "person",
+            "building",
+            "room",
+            "enterprise",
+            "event"
+          ],
+          "title": "Object Type",
+          "type": "string"
+        },
+        "object_id": {
+          "maxLength": 128,
+          "minLength": 1,
+          "title": "Object Id",
+          "type": "string"
+        }
+      },
+      "required": [
+        "object_type",
+        "object_id"
+      ],
+      "title": "GovernanceObjectRef",
+      "type": "object"
+    },
+    "MetricQueryScope": {
+      "additionalProperties": false,
+      "properties": {
+        "area_code": {
+          "maxLength": 32,
+          "minLength": 1,
+          "title": "Area Code",
+          "type": "string"
+        },
+        "include_descendants": {
+          "default": true,
+          "title": "Include Descendants",
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "area_code"
+      ],
+      "title": "MetricQueryScope",
+      "type": "object"
+    }
+  },
+  "additionalProperties": false,
+  "properties": {
+    "object_ref": {
+      "$ref": "#/$defs/GovernanceObjectRef"
+    },
+    "scope": {
+      "$ref": "#/$defs/MetricQueryScope"
+    },
+    "field_sets": {
+      "items": {
+        "enum": [
+          "summary",
+          "demographics",
+          "location",
+          "governance_status",
+          "contact"
+        ],
+        "type": "string"
+      },
+      "maxItems": 5,
+      "minItems": 1,
+      "title": "Field Sets",
+      "type": "array"
+    }
+  },
+  "required": [
+    "object_ref",
+    "scope"
+  ],
+  "title": "GetObjectProfileInput",
+  "type": "object"
+}

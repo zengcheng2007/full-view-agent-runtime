@@ -1,0 +1,89 @@
+{
+  "$defs": {
+    "HousingMetricQuerySpec": {
+      "additionalProperties": false,
+      "properties": {
+        "schema_version": {
+          "const": "1.1",
+          "default": "1.1",
+          "title": "Schema Version",
+          "type": "string"
+        },
+        "metrics": {
+          "items": {
+            "enum": [
+              "dwelling_count",
+              "building_count",
+              "room_count"
+            ],
+            "type": "string"
+          },
+          "maxItems": 2,
+          "minItems": 1,
+          "title": "Metrics",
+          "type": "array"
+        },
+        "scope": {
+          "$ref": "#/$defs/MetricQueryScope"
+        },
+        "group_by": {
+          "items": {
+            "enum": [
+              "next_area",
+              "descendant_street",
+              "room_use"
+            ],
+            "type": "string"
+          },
+          "maxItems": 1,
+          "title": "Group By",
+          "type": "array"
+        },
+        "limit": {
+          "default": 200,
+          "maximum": 1000,
+          "minimum": 1,
+          "title": "Limit",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "scope"
+      ],
+      "title": "HousingMetricQuerySpec",
+      "type": "object"
+    },
+    "MetricQueryScope": {
+      "additionalProperties": false,
+      "properties": {
+        "area_code": {
+          "maxLength": 32,
+          "minLength": 1,
+          "title": "Area Code",
+          "type": "string"
+        },
+        "include_descendants": {
+          "default": true,
+          "title": "Include Descendants",
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "area_code"
+      ],
+      "title": "MetricQueryScope",
+      "type": "object"
+    }
+  },
+  "additionalProperties": false,
+  "properties": {
+    "query": {
+      "$ref": "#/$defs/HousingMetricQuerySpec"
+    }
+  },
+  "required": [
+    "query"
+  ],
+  "title": "QueryHousingMetricsInput",
+  "type": "object"
+}

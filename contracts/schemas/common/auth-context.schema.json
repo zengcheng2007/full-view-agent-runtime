@@ -1,0 +1,189 @@
+{
+  "$defs": {
+    "AgentApplication": {
+      "additionalProperties": false,
+      "properties": {
+        "app_id": {
+          "title": "App Id",
+          "type": "string"
+        },
+        "agent_id": {
+          "title": "Agent Id",
+          "type": "string"
+        }
+      },
+      "required": [
+        "app_id",
+        "agent_id"
+      ],
+      "title": "AgentApplication",
+      "type": "object"
+    },
+    "AuthDataScopes": {
+      "additionalProperties": false,
+      "properties": {
+        "areas": {
+          "items": {
+            "$ref": "#/$defs/AuthorizedAreaScope"
+          },
+          "title": "Areas",
+          "type": "array"
+        },
+        "datasets": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Datasets",
+          "type": "array"
+        },
+        "field_policy_set": {
+          "title": "Field Policy Set",
+          "type": "string"
+        }
+      },
+      "required": [
+        "areas",
+        "datasets",
+        "field_policy_set"
+      ],
+      "title": "AuthDataScopes",
+      "type": "object"
+    },
+    "AuthorizedAreaScope": {
+      "additionalProperties": false,
+      "properties": {
+        "area_code": {
+          "maxLength": 32,
+          "minLength": 1,
+          "title": "Area Code",
+          "type": "string"
+        },
+        "include_descendants": {
+          "default": true,
+          "title": "Include Descendants",
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "area_code"
+      ],
+      "title": "AuthorizedAreaScope",
+      "type": "object"
+    },
+    "Principal": {
+      "additionalProperties": false,
+      "properties": {
+        "tenant_id": {
+          "title": "Tenant Id",
+          "type": "string"
+        },
+        "user_id": {
+          "title": "User Id",
+          "type": "string"
+        },
+        "org_id": {
+          "title": "Org Id",
+          "type": "string"
+        },
+        "roles": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Roles",
+          "type": "array"
+        }
+      },
+      "required": [
+        "tenant_id",
+        "user_id",
+        "org_id"
+      ],
+      "title": "Principal",
+      "type": "object"
+    }
+  },
+  "additionalProperties": false,
+  "properties": {
+    "schema_version": {
+      "const": "1.1",
+      "default": "1.1",
+      "title": "Schema Version",
+      "type": "string"
+    },
+    "auth_context_id": {
+      "title": "Auth Context Id",
+      "type": "string"
+    },
+    "auth_context_fingerprint": {
+      "title": "Auth Context Fingerprint",
+      "type": "string"
+    },
+    "principal": {
+      "$ref": "#/$defs/Principal"
+    },
+    "application": {
+      "$ref": "#/$defs/AgentApplication"
+    },
+    "entitlements": {
+      "items": {
+        "type": "string"
+      },
+      "title": "Entitlements",
+      "type": "array"
+    },
+    "data_scopes": {
+      "$ref": "#/$defs/AuthDataScopes"
+    },
+    "purpose": {
+      "enum": [
+        "interactive_analysis",
+        "registered_workflow"
+      ],
+      "title": "Purpose",
+      "type": "string"
+    },
+    "session_id": {
+      "title": "Session Id",
+      "type": "string"
+    },
+    "run_id": {
+      "title": "Run Id",
+      "type": "string"
+    },
+    "credential_ref": {
+      "title": "Credential Ref",
+      "type": "string"
+    },
+    "issued_at": {
+      "format": "date-time",
+      "title": "Issued At",
+      "type": "string"
+    },
+    "expires_at": {
+      "format": "date-time",
+      "title": "Expires At",
+      "type": "string"
+    },
+    "policy_version": {
+      "title": "Policy Version",
+      "type": "string"
+    }
+  },
+  "required": [
+    "auth_context_id",
+    "auth_context_fingerprint",
+    "principal",
+    "application",
+    "entitlements",
+    "data_scopes",
+    "purpose",
+    "session_id",
+    "run_id",
+    "credential_ref",
+    "issued_at",
+    "expires_at",
+    "policy_version"
+  ],
+  "title": "AuthContext",
+  "type": "object"
+}

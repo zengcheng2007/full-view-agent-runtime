@@ -1,0 +1,158 @@
+{
+  "$defs": {
+    "ClientCapabilities": {
+      "additionalProperties": false,
+      "properties": {
+        "client_instance_id": {
+          "maxLength": 128,
+          "minLength": 1,
+          "title": "Client Instance Id",
+          "type": "string"
+        },
+        "frontend_command_schema_versions": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Frontend Command Schema Versions",
+          "type": "array"
+        },
+        "supported_commands": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Supported Commands",
+          "type": "array"
+        }
+      },
+      "required": [
+        "client_instance_id"
+      ],
+      "title": "ClientCapabilities",
+      "type": "object"
+    },
+    "MessageInput": {
+      "additionalProperties": false,
+      "properties": {
+        "client_message_id": {
+          "maxLength": 128,
+          "minLength": 1,
+          "title": "Client Message Id",
+          "type": "string"
+        },
+        "content": {
+          "items": {
+            "$ref": "#/$defs/TextContent"
+          },
+          "maxItems": 1,
+          "minItems": 1,
+          "title": "Content",
+          "type": "array"
+        }
+      },
+      "required": [
+        "client_message_id",
+        "content"
+      ],
+      "title": "MessageInput",
+      "type": "object"
+    },
+    "TextContent": {
+      "additionalProperties": false,
+      "properties": {
+        "type": {
+          "const": "text",
+          "title": "Type",
+          "type": "string"
+        },
+        "text": {
+          "maxLength": 10000,
+          "minLength": 1,
+          "title": "Text",
+          "type": "string"
+        }
+      },
+      "required": [
+        "type",
+        "text"
+      ],
+      "title": "TextContent",
+      "type": "object"
+    },
+    "WorkflowRef": {
+      "additionalProperties": false,
+      "properties": {
+        "workflow_id": {
+          "maxLength": 128,
+          "minLength": 1,
+          "title": "Workflow Id",
+          "type": "string"
+        },
+        "workflow_version": {
+          "maxLength": 32,
+          "minLength": 1,
+          "title": "Workflow Version",
+          "type": "string"
+        }
+      },
+      "required": [
+        "workflow_id",
+        "workflow_version"
+      ],
+      "title": "WorkflowRef",
+      "type": "object"
+    }
+  },
+  "additionalProperties": false,
+  "properties": {
+    "input": {
+      "$ref": "#/$defs/MessageInput"
+    },
+    "client": {
+      "$ref": "#/$defs/ClientCapabilities"
+    },
+    "mode": {
+      "default": "agent",
+      "enum": [
+        "agent",
+        "workflow",
+        "analysis"
+      ],
+      "title": "Mode",
+      "type": "string"
+    },
+    "inference_mode": {
+      "anyOf": [
+        {
+          "enum": [
+            "fast",
+            "auto",
+            "deep"
+          ],
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Inference Mode"
+    },
+    "workflow_ref": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/WorkflowRef"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null
+    }
+  },
+  "required": [
+    "input",
+    "client"
+  ],
+  "title": "RunCreateRequest",
+  "type": "object"
+}

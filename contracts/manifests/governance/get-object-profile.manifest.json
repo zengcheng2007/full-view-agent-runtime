@@ -1,0 +1,43 @@
+{
+  "schema_version": "1.1",
+  "tool_id": "governance.get_object_profile",
+  "tool_version": "1.0.0",
+  "status": "active",
+  "domain": "governance",
+  "owner": "full-information-domain-team",
+  "effect": "read",
+  "risk_level": "medium",
+  "dataset_id": "governance_objects",
+  "data_classifications": [
+    "internal",
+    "sensitive"
+  ],
+  "required_permissions": [
+    "governance.object.profile.read"
+  ],
+  "input_schema_ref": "schema://tools/get-object-profile-input/1.0.0",
+  "result_schemas": [
+    {
+      "kind": "object_profile",
+      "data_schema_ref": "schema://data/object-profile/1.0.0"
+    }
+  ],
+  "limits": {
+    "timeout_ms": 8000,
+    "max_attempts": 2,
+    "max_result_rows": 1000,
+    "max_group_buckets": 200
+  },
+  "cache_policy": {
+    "enabled": false,
+    "ttl_seconds": 0
+  },
+  "policy": {
+    "action": "governance.object.profile.read",
+    "pre_check": true,
+    "post_filter": true,
+    "denial_scope": "object_fields"
+  },
+  "adapter_ref": "adapter://geo-qxst/object-profile/1.0",
+  "semantic_contract": null
+}

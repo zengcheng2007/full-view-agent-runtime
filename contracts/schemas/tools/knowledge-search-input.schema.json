@@ -1,0 +1,23 @@
+{
+  "additionalProperties": false,
+  "properties": {
+    "query": {
+      "maxLength": 4000,
+      "minLength": 1,
+      "title": "Query",
+      "type": "string"
+    },
+    "limit": {
+      "default": 5,
+      "maximum": 20,
+      "minimum": 1,
+      "title": "Limit",
+      "type": "integer"
+    }
+  },
+  "required": [
+    "query"
+  ],
+  "title": "KnowledgeSearchInput",
+  "type": "object"
+}

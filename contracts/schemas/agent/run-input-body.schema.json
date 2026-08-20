@@ -1,0 +1,169 @@
+{
+  "$defs": {
+    "ApprovalInputResponse": {
+      "additionalProperties": false,
+      "properties": {
+        "type": {
+          "const": "approval",
+          "title": "Type",
+          "type": "string"
+        },
+        "decision": {
+          "enum": [
+            "approve",
+            "reject"
+          ],
+          "title": "Decision",
+          "type": "string"
+        }
+      },
+      "required": [
+        "type",
+        "decision"
+      ],
+      "title": "ApprovalInputResponse",
+      "type": "object"
+    },
+    "ChoiceInputResponse": {
+      "additionalProperties": false,
+      "properties": {
+        "type": {
+          "const": "choice",
+          "title": "Type",
+          "type": "string"
+        },
+        "option_id": {
+          "maxLength": 128,
+          "minLength": 1,
+          "title": "Option Id",
+          "type": "string"
+        }
+      },
+      "required": [
+        "type",
+        "option_id"
+      ],
+      "title": "ChoiceInputResponse",
+      "type": "object"
+    },
+    "ReauthenticationInputResponse": {
+      "additionalProperties": false,
+      "properties": {
+        "type": {
+          "const": "reauthenticated",
+          "title": "Type",
+          "type": "string"
+        }
+      },
+      "required": [
+        "type"
+      ],
+      "title": "ReauthenticationInputResponse",
+      "type": "object"
+    },
+    "TextInputResponse": {
+      "additionalProperties": false,
+      "properties": {
+        "type": {
+          "const": "text",
+          "title": "Type",
+          "type": "string"
+        },
+        "text": {
+          "maxLength": 10000,
+          "minLength": 1,
+          "title": "Text",
+          "type": "string"
+        }
+      },
+      "required": [
+        "type",
+        "text"
+      ],
+      "title": "TextInputResponse",
+      "type": "object"
+    }
+  },
+  "additionalProperties": false,
+  "properties": {
+    "input_request_id": {
+      "maxLength": 128,
+      "minLength": 1,
+      "title": "Input Request Id",
+      "type": "string"
+    },
+    "client_instance_id": {
+      "maxLength": 128,
+      "minLength": 1,
+      "title": "Client Instance Id",
+      "type": "string"
+    },
+    "run_state_version": {
+      "minimum": 1,
+      "title": "Run State Version",
+      "type": "integer"
+    },
+    "response": {
+      "discriminator": {
+        "mapping": {
+          "approval": "#/$defs/ApprovalInputResponse",
+          "choice": "#/$defs/ChoiceInputResponse",
+          "reauthenticated": "#/$defs/ReauthenticationInputResponse",
+          "text": "#/$defs/TextInputResponse"
+        },
+        "propertyName": "type"
+      },
+      "oneOf": [
+        {
+          "$ref": "#/$defs/TextInputResponse"
+        },
+        {
+          "$ref": "#/$defs/ChoiceInputResponse"
+        },
+        {
+          "$ref": "#/$defs/ApprovalInputResponse"
+        },
+        {
+          "$ref": "#/$defs/ReauthenticationInputResponse"
+        }
+      ],
+      "title": "Response"
+    },
+    "analysis_plan_id": {
+      "anyOf": [
+        {
+          "maxLength": 128,
+          "minLength": 1,
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Analysis Plan Id"
+    },
+    "analysis_request_id": {
+      "anyOf": [
+        {
+          "maxLength": 128,
+          "minLength": 1,
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Analysis Request Id"
+    }
+  },
+  "required": [
+    "input_request_id",
+    "client_instance_id",
+    "run_state_version",
+    "response"
+  ],
+  "title": "RunInputBody",
+  "type": "object"
+}
