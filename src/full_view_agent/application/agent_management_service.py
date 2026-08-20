@@ -316,6 +316,22 @@ class AgentManagementService:
             effective_knowledge_refs = tuple(sorted(knowledge_base_refs))
             reason = "backfill trusted legacy default baseline"
 
+        if active is not None:
+            ordered_model_ids = (
+                model_policy.primary_model_config_id,
+                *model_policy.fallback_model_config_ids,
+            )
+            try:
+                for model_id in ordered_model_ids:
+                    config = await self._models.get_config(model_id)
+                    await self._models.assert_agent_eligible(model_id, config.version)
+            except (ResourceNotFound, RunStateConflict):
+                # The immutable active release remains executable from its pinned
+                # snapshots. Do not let a later model edit turn grant refresh into
+                # a Runtime startup failure; operators can publish the model and
+                # the next refresh will roll the managed baseline forward.
+                return active
+
         version = AgentVersion(
             app_id=app_id,
             agent_id=agent_id,

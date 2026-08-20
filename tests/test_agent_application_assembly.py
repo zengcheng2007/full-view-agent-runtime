@@ -337,6 +337,77 @@ async def test_managed_legacy_baseline_rolls_forward_new_application_grants() ->
 
 
 @pytest.mark.asyncio
+async def test_managed_legacy_baseline_keeps_active_release_when_model_becomes_ineligible() -> None:
+    service, _, applications, _, capabilities = await _service()
+    app_id = "full_information_view"
+    agent_id = "governance_general_agent"
+    await service.create_agent(
+        AgentDefinition(app_id=app_id, agent_id=agent_id, name="Legacy governance")
+    )
+    trusted_model = await publish_tested_model(
+        service._models,  # type: ignore[attr-defined]
+        name="Trusted model",
+        model_name="trusted-model",
+        legacy_default=True,
+    )
+    resolve = ToolCapability(
+        capability_id="governance.resolve_area",
+        name="Resolve area",
+        owner="governance",
+        version="1.0.0",
+        status="published",
+        guidance="Test guidance for Resolve area",
+        connector_ref="governance-gateway",
+        resource_path="/areas/resolve",
+    )
+    await capabilities.save_tool(resolve)
+    await applications.bind_capability(
+        ApplicationCapabilityBinding(
+            app_id=app_id,
+            capability_id=resolve.capability_id,
+            capability_version=resolve.version,
+        )
+    )
+    active = await service.ensure_legacy_baseline_release(
+        app_id=app_id,
+        agent_id=agent_id,
+    )
+    assert active is not None
+
+    await service._models.disable_config(  # type: ignore[attr-defined]
+        config_id=trusted_model.config_id,
+        expected_etag=trusted_model.etag,
+        actor="admin",
+        reason="simulate an operator disabling the model after release",
+    )
+    power = ToolCapability(
+        capability_id="governance.query_governance_power_metrics",
+        name="Governance power",
+        owner="governance",
+        version="1.0.0",
+        status="published",
+        guidance="Test guidance for Governance power",
+        connector_ref="governance-gateway",
+        resource_path="/governance-power",
+    )
+    await capabilities.save_tool(power)
+    await applications.bind_capability(
+        ApplicationCapabilityBinding(
+            app_id=app_id,
+            capability_id=power.capability_id,
+            capability_version=power.version,
+        )
+    )
+
+    retained = await service.ensure_legacy_baseline_release(
+        app_id=app_id,
+        agent_id=agent_id,
+    )
+
+    assert retained == active
+
+
+@pytest.mark.asyncio
 async def test_non_system_agent_release_is_not_expanded_from_application_grants() -> None:
     service, _, applications, models, capabilities = await _service()
     app_id = "full_information_view"

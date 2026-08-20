@@ -16,7 +16,6 @@ display_order = 10,
 updated_at = NOW(),
 etag = etag + 1
 WHERE capability_id = 'knowledge.search'
-  AND version = '1.0.0'
   AND guidance = '';
 
 -- 2. governance.resolve_area
@@ -28,7 +27,6 @@ display_order = 20,
 updated_at = NOW(),
 etag = etag + 1
 WHERE capability_id = 'governance.resolve_area'
-  AND version = '1.0.0'
   AND guidance = '';
 
 -- 3. governance.query_population_metrics
@@ -47,7 +45,6 @@ display_order = 30,
 updated_at = NOW(),
 etag = etag + 1
 WHERE capability_id = 'governance.query_population_metrics'
-  AND version = '1.0.0'
   AND guidance = '';
 
 -- 4. governance.query_housing_metrics
@@ -67,7 +64,6 @@ display_order = 40,
 updated_at = NOW(),
 etag = etag + 1
 WHERE capability_id = 'governance.query_housing_metrics'
-  AND version = '1.0.0'
   AND guidance = '';
 
 -- 5. governance.query_event_metrics
@@ -86,7 +82,6 @@ display_order = 50,
 updated_at = NOW(),
 etag = etag + 1
 WHERE capability_id = 'governance.query_event_metrics'
-  AND version = '1.0.0'
   AND guidance = '';
 
 -- 6. governance.get_object_profile
@@ -99,7 +94,6 @@ display_order = 60,
 updated_at = NOW(),
 etag = etag + 1
 WHERE capability_id = 'governance.get_object_profile'
-  AND version = '1.0.0'
   AND guidance = '';
 
 -- 7. governance.get_governance_overview
@@ -112,7 +106,6 @@ display_order = 70,
 updated_at = NOW(),
 etag = etag + 1
 WHERE capability_id = 'governance.get_governance_overview'
-  AND version = '1.0.0'
   AND guidance = '';
 
 -- 8. governance.query_governance_power_metrics
@@ -125,7 +118,6 @@ display_order = 80,
 updated_at = NOW(),
 etag = etag + 1
 WHERE capability_id = 'governance.query_governance_power_metrics'
-  AND version = '1.0.0'
   AND guidance = '';
 
 -- 9. governance.query_enterprise_metrics
@@ -148,7 +140,6 @@ display_order = 90,
 updated_at = NOW(),
 etag = etag + 1
 WHERE capability_id = 'governance.query_enterprise_metrics'
-  AND version = '1.0.0'
   AND guidance = '';
 
 COMMIT;

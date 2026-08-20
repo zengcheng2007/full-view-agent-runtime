@@ -54,6 +54,20 @@ def test_v034_v035_in_startup_migration_list() -> None:
     assert (migrations_dir / "V035_populate_tool_guidance.sql").is_file()
 
 
+def test_v035_backfills_guidance_for_every_existing_tool_version() -> None:
+    """Published versions created after 1.0 must not block Runtime startup."""
+
+    migration = (
+        pathlib.Path(__file__).resolve().parents[1]
+        / "scripts"
+        / "migrations"
+        / "V035_populate_tool_guidance.sql"
+    ).read_text(encoding="utf-8")
+
+    assert "version = '1.0.0'" not in migration
+    assert migration.count("AND guidance = ''") == 9
+
+
 # ---------------------------------------------------------------------------
 # Helpers for tests 2 + 3
 # ---------------------------------------------------------------------------
