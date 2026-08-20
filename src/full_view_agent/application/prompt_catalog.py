@@ -168,8 +168,8 @@ def build_full_view_system_prompt(
 
         tool_guidance_pairs.append((tool_id, lines))
 
-    # Sort by display_order if available (simplified - in production would need full capability objects)
-    for tool_id, lines in tool_guidance_pairs:
+    # Preserve the display_order already established by the caller.
+    for _tool_id, lines in tool_guidance_pairs:
         for line in lines:
             capability_lines.append(f"({line_number}) {line}")
             line_number += 1

@@ -17,14 +17,13 @@ import pathlib
 import pytest
 
 from full_view_agent.application.context_builder import AgentContextBuilder
+from full_view_agent.application.harness import HarnessState
 from full_view_agent.application.session_run_service import SessionRunService
 from full_view_agent.application.tool_registry import ToolRegistry
-from full_view_agent.application.harness import HarnessState
 from full_view_agent.infrastructure.memory_store import InMemoryAgentStore
 
 from .test_policy import population_auth_context
 from .test_session_run_service import run_request
-
 
 # ---------------------------------------------------------------------------
 # 1. V034/V035 in startup migration list

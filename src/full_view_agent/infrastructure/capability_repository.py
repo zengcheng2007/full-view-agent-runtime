@@ -1307,6 +1307,10 @@ def _workflow_params(wf: WorkflowCapability) -> dict[str, object]:
 
 def _tool_from_row(row: tuple[object, ...] | list[object]) -> ToolCapability:
     r = list(row)
+    guidance_examples_value = _json_field(r[32], []) if len(r) > 32 else []
+    guidance_examples = (
+        guidance_examples_value if isinstance(guidance_examples_value, list) else []
+    )
     return ToolCapability(
         capability_id=_str_field(r[0]),
         name=_str_field(r[1]),
@@ -1344,8 +1348,8 @@ def _tool_from_row(row: tuple[object, ...] | list[object]) -> ToolCapability:
         guidance=_str_field(r[31]) if len(r) > 31 else "",
         guidance_examples=[
             GuidanceExample.model_validate(ex) if isinstance(ex, dict) else ex
-            for ex in (_json_field(r[32], []) if len(r) > 32 else [])
-        ] if len(r) > 32 else [],
+            for ex in guidance_examples
+        ],
         display_order=int(r[33]) if len(r) > 33 and r[33] is not None else None,
     )
 

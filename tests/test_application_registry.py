@@ -374,7 +374,13 @@ async def test_management_service_binds_only_published_capabilities() -> None:
         )
 
     await capabilities.save_tool(
-        draft.model_copy(update={"status": "published", "guidance": "Test guidance for address_lookup", "etag": 2})
+        draft.model_copy(
+            update={
+                "status": "published",
+                "guidance": "Test guidance for address_lookup",
+                "etag": 2,
+            }
+        )
     )
     binding = await service.bind_capability(
         app_id="full_information_view",

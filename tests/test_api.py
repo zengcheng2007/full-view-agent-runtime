@@ -2160,7 +2160,13 @@ class _CountingOrchPort:
 
 
 @pytest.mark.asyncio
-@pytest.mark.xfail(reason="Python 3.14 async generator StopIteration propagation in polling loop. TODO: refactor waiting_input polling to use explicit status check without generator exhaustion.")
+@pytest.mark.xfail(
+    reason=(
+        "Python 3.14 async generator StopIteration propagation in polling loop. "
+        "TODO: refactor waiting_input polling to use explicit status check without "
+        "generator exhaustion."
+    )
+)
 async def test_resume_idempotency_via_http_api() -> None:
     """Real API test: non-replay input → +1 resume +1 schedule;
     replay → no additional calls; input.received before run.resumed."""
