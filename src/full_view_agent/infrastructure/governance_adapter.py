@@ -82,6 +82,7 @@ PRODUCTION_HTTP_ADAPTER_TOOL_IDS = frozenset(
         "governance.query_population_metrics",
         "governance.query_housing_metrics",
         "governance.query_event_metrics",
+        "governance.get_object_profile",
     }
 )
 

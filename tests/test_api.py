@@ -55,6 +55,7 @@ def test_runtime_selects_http_governance_adapter_only_when_explicitly_enabled(
     assert isinstance(runtime.governance_adapter, HttpGovernanceAdapter)
     assert runtime.tool_registry.list_tool_ids() == [
         "governance.get_governance_overview",
+        "governance.get_object_profile",
         "governance.query_enterprise_metrics",
         "governance.query_event_metrics",
         "governance.query_governance_power_metrics",

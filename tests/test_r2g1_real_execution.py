@@ -270,6 +270,7 @@ async def test_real_dynamic_tool_execution(upstream_server: str) -> None:
                 }
             },
         },
+        guidance="Test guidance for Dynamic Query Tool",
         created_by="test",
         updated_by="test",
     )
@@ -353,6 +354,7 @@ async def test_version_isolation_across_runs(upstream_server: str) -> None:
         resource_path="/api/v1",
         input_schema={"type": "object", "properties": {}},
         result_kind="table",
+        guidance="Test guidance for Version Test Tool",
         created_by="test",
         updated_by="test",
     )
@@ -383,6 +385,7 @@ async def test_version_isolation_across_runs(upstream_server: str) -> None:
         resource_path="/api/v2",
         input_schema={"type": "object", "properties": {}},
         result_kind="table",
+        guidance="Test guidance for Version Test Tool",
         created_by="test",
         updated_by="test",
     )

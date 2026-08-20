@@ -209,6 +209,7 @@ async def test_published_bound_dynamic_tool_executes_in_new_run_with_evidence(
                 "data_schema_ref": "schema://population-metric-table/1.0",
                 "required_permissions": ["governance.population.aggregate.read"],
                 "dataset_ids": ["population"],
+                "guidance": "Use this tool to query dynamic population metrics for a given area code.",
             },
         )
         assert created.status_code == 201, created.text

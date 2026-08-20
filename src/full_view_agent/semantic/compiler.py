@@ -408,6 +408,7 @@ def _contract_tool(manifest):
         owner=manifest.owner,
         version=manifest.tool_version,
         status="published",
+        guidance=f"Runtime contract tool for {manifest.tool_id}",
         connector_ref="runtime.contract",
         resource_path="/runtime-contract",
         dataset_ids=[manifest.dataset_id],

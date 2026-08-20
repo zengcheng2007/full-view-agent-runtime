@@ -64,6 +64,7 @@ def _tool(*, capability_id: str = "tool.live", version: str = "1.0.0") -> ToolCa
         owner="test",
         version=version,
         status="published",
+        guidance="Test guidance for tool.live",
         connector_ref="test.connector",
         resource_path="/query",
         input_schema={"type": "object"},
@@ -91,6 +92,7 @@ def _workflow(
         owner="test",
         version="1.0.0",
         status="published",
+        guidance="Test workflow guidance",
         nodes=[
             WorkflowNodeDefinition(node_id="start", node_type="start"),
             WorkflowNodeDefinition(

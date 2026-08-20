@@ -53,6 +53,7 @@ def _workflow(
         owner="test",
         version="1.0.0",
         status=status,
+        guidance="Test workflow guidance",
         nodes=nodes
         or [
             WorkflowNodeDefinition(node_id="start", node_type="start"),
@@ -80,6 +81,7 @@ def _tool(*, status: CapabilityStatus = "published") -> ToolCapability:
         owner="test",
         version="1.0.0",
         status=status,
+        guidance="Test guidance for Resolve area",
         connector_ref="geo-qxst",
         resource_path="/resolve-area",
     )
@@ -103,13 +105,16 @@ async def test_loader_returns_only_published_skills_as_frozen_runtime_contracts(
 
 @pytest.mark.asyncio
 async def test_loader_rejects_published_skill_without_runtime_guidance() -> None:
-    repository = InMemoryCapabilityRepository()
-    await repository.save_skill(
-        _skill(capability_id="skill.empty", status="published", guidance="")
-    )
-
-    with pytest.raises(RuntimeCapabilityDefinitionInvalid, match="guidance"):
-        await PublishedRuntimeCapabilityLoader(repository).load_skills()
+    with pytest.raises(ValidationError):
+        SkillCapability(
+            capability_id="skill.empty",
+            name="skill.empty",
+            owner="test",
+            version="1.0.0",
+            status="published",
+            guidance="",
+            allowed_tool_ids=["tool.resolve_area"],
+        )
 
 
 @pytest.mark.asyncio

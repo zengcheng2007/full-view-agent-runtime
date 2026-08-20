@@ -122,10 +122,27 @@ def convert_tool_capability_to_descriptor(
     """Convert a published ToolCapability to a ModelToolDescriptor.
 
     This creates a descriptor that the model can understand for tool selection.
+    Uses the tool's guidance field (rich capability guidance) when available,
+    falling back to the short description.
     """
     semantic_suffix = _semantic_descriptor_suffix(tool)
+    # Prefer guidance (rich capability description) over short description
+    guidance_text = tool.guidance.strip() if tool.guidance else ""
     if tool.capability_id in BUILT_IN_TOOL_IDS:
         descriptor = ToolRegistry.default().get_model_descriptor(tool.capability_id)
+        if guidance_text:
+            # Extract canonical semantic suffix from the static descriptor
+            canonical_description = descriptor.description
+            canonical_suffix = ""
+            if " Semantic contract Tool@" in canonical_description:
+                idx = canonical_description.index(" Semantic contract Tool@")
+                canonical_suffix = canonical_description[idx:]
+            return descriptor.model_copy(
+                update={
+                    "tool_version": tool.version,
+                    "description": f"{guidance_text}{canonical_suffix}{semantic_suffix}",
+                }
+            )
         return descriptor.model_copy(
             update={
                 "tool_version": tool.version,
@@ -137,7 +154,7 @@ def convert_tool_capability_to_descriptor(
         tool_id=tool.capability_id,
         tool_version=tool.version,
         name=tool.name,
-        description=(tool.description or f"Dynamic tool: {tool.name}")
+        description=(guidance_text or tool.description or f"Dynamic tool: {tool.name}")
         + semantic_suffix,
         input_schema=ModelInputSchemaReference(
             **{"$ref": f"schema://dynamic/{tool.capability_id}/input/{tool.version}"}

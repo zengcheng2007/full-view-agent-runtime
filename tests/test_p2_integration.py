@@ -68,6 +68,7 @@ def sample_tool():
         owner="test-team",
         version="1.0.0",
         status="published",
+        guidance="Test guidance for Test Query Tool",
         risk_level="low",
         required_permissions=["test.read"],
         dataset_ids=["test_dataset"],
@@ -116,7 +117,8 @@ class TestDynamicToolBridge:
         assert descriptor.tool_id == "tool.test_query"
         assert descriptor.tool_version == "1.0.0"
         assert descriptor.name == "Test Query Tool"
-        assert "test tool" in descriptor.description.lower()
+        # Guidance takes precedence over description when available
+        assert "test guidance" in descriptor.description.lower()
 
     def test_builtin_tool_keeps_its_verified_execution_contract(self):
         """DB lifecycle metadata must not turn a built-in into a generic HTTP tool."""
@@ -127,6 +129,7 @@ class TestDynamicToolBridge:
             owner="system",
             version="1.0.0",
             status="published",
+            guidance="Test guidance for 数据库中的旧名称",
             required_permissions=["governance.population.aggregate.read"],
             dataset_ids=["population"],
             description="数据库中的宽泛人口描述",
@@ -140,9 +143,12 @@ class TestDynamicToolBridge:
         descriptor = convert_tool_capability_to_descriptor(tool)
         canonical = ToolRegistry.default()
 
+        # Manifest (execution contract) must remain identical to canonical built-in
         assert manifest == canonical.get_manifest(tool.capability_id)
-        assert descriptor == canonical.get_model_descriptor(tool.capability_id)
-        assert "独居老人" in descriptor.description
+        # Descriptor uses DB guidance when available
+        assert "test guidance" in descriptor.description.lower()
+        # Tool version is updated from DB
+        assert descriptor.tool_version == "1.0.0"
 
     @pytest.mark.asyncio
     async def test_load_published_tools(self):
@@ -158,6 +164,7 @@ class TestDynamicToolBridge:
             owner="test",
             version="1.0.0",
             status="published",
+            guidance="Test guidance for Published Tool",
             connector_ref="test.api",
             resource_path="/api/test",
         )
@@ -226,6 +233,7 @@ class TestDynamicToolBridge:
             owner="test",
             version="1.0.0",
             status="published",
+            guidance="Test guidance for Dynamic Tool",
             connector_ref="test.api",
             resource_path="/api/dynamic",
         )

@@ -22,6 +22,7 @@ from full_view_agent.domain.capability import (
     CapabilityType,
     Connector,
     ConnectorAuditEvent,
+    GuidanceExample,
     ModelAuditEvent,
     ModelConfig,
     ModelConfigVersion,
@@ -372,6 +373,7 @@ class PostgresCapabilityRepository:
                     result_kind, data_schema_ref, timeout_ms, max_attempts,
                     max_result_rows, cache_enabled, cache_ttl_seconds,
                     credential_ref, created_by, updated_by, etag, semantic_contract,
+                    guidance, guidance_examples, display_order,
                     created_at, updated_at
                 ) VALUES (
                     %(capability_id)s, %(name)s, %(domain)s, %(owner)s,
@@ -383,12 +385,16 @@ class PostgresCapabilityRepository:
                     %(timeout_ms)s, %(max_attempts)s, %(max_result_rows)s,
                     %(cache_enabled)s, %(cache_ttl_seconds)s, %(credential_ref)s,
                     %(created_by)s, %(updated_by)s, %(etag)s, %(semantic_contract)s,
+                    %(guidance)s, %(guidance_examples)s, %(display_order)s,
                     %(created_at)s, %(updated_at)s
                 )
                 ON CONFLICT (capability_id, version) DO UPDATE SET
                     name = EXCLUDED.name, status = EXCLUDED.status,
                     description = EXCLUDED.description,
                     semantic_contract = EXCLUDED.semantic_contract,
+                    guidance = EXCLUDED.guidance,
+                    guidance_examples = EXCLUDED.guidance_examples,
+                    display_order = EXCLUDED.display_order,
                     updated_by = EXCLUDED.updated_by, etag = EXCLUDED.etag,
                     updated_at = EXCLUDED.updated_at
                 """,
@@ -408,6 +414,7 @@ class PostgresCapabilityRepository:
                     applicable_questions, guidance, allowed_tool_ids,
                     input_constraints, output_constraints,
                     examples, counter_examples,
+                    display_order,
                     created_by, updated_by, etag,
                     created_at, updated_at
                 ) VALUES (
@@ -417,11 +424,14 @@ class PostgresCapabilityRepository:
                     %(applicable_questions)s, %(guidance)s, %(allowed_tool_ids)s,
                     %(input_constraints)s, %(output_constraints)s,
                     %(examples)s, %(counter_examples)s,
+                    %(display_order)s,
                     %(created_by)s, %(updated_by)s, %(etag)s,
                     %(created_at)s, %(updated_at)s
                 )
                 ON CONFLICT (capability_id, version) DO UPDATE SET
                     name = EXCLUDED.name, status = EXCLUDED.status,
+                    guidance = EXCLUDED.guidance,
+                    display_order = EXCLUDED.display_order,
                     updated_by = EXCLUDED.updated_by, etag = EXCLUDED.etag,
                     updated_at = EXCLUDED.updated_at
                 """,
@@ -441,6 +451,7 @@ class PostgresCapabilityRepository:
                     capability_id, name, domain, owner, version, status,
                     risk_level, required_permissions, dataset_ids, description,
                     nodes, edges, timeout_seconds, requires_human_confirmation,
+                    guidance, display_order,
                     created_by, updated_by, etag,
                     created_at, updated_at
                 ) VALUES (
@@ -449,12 +460,15 @@ class PostgresCapabilityRepository:
                     %(required_permissions)s, %(dataset_ids)s, %(description)s,
                     %(nodes)s, %(edges)s, %(timeout_seconds)s,
                     %(requires_human_confirmation)s,
+                    %(guidance)s, %(display_order)s,
                     %(created_by)s, %(updated_by)s, %(etag)s,
                     %(created_at)s, %(updated_at)s
                 )
                 ON CONFLICT (capability_id, version) DO UPDATE SET
                     name = EXCLUDED.name, status = EXCLUDED.status,
                     nodes = EXCLUDED.nodes, edges = EXCLUDED.edges,
+                    guidance = EXCLUDED.guidance,
+                    display_order = EXCLUDED.display_order,
                     updated_by = EXCLUDED.updated_by, etag = EXCLUDED.etag,
                     updated_at = EXCLUDED.updated_at
                 """,
@@ -1205,6 +1219,11 @@ def _tool_params(tool: ToolCapability) -> dict[str, object]:
             if tool.semantic_contract is not None
             else None
         ),
+        "guidance": tool.guidance,
+        "guidance_examples": json.dumps(
+            [ex.model_dump(mode="json") for ex in tool.guidance_examples]
+        ),
+        "display_order": tool.display_order,
         "created_by": tool.created_by,
         "updated_by": tool.updated_by,
         "etag": tool.etag,
@@ -1251,6 +1270,7 @@ def _skill_params(skill: SkillCapability) -> dict[str, object]:
         "output_constraints": json.dumps(skill.output_constraints),
         "examples": json.dumps(skill.examples),
         "counter_examples": json.dumps(skill.counter_examples),
+        "display_order": skill.display_order,
         "created_by": skill.created_by,
         "updated_by": skill.updated_by,
         "etag": skill.etag,
@@ -1275,6 +1295,8 @@ def _workflow_params(wf: WorkflowCapability) -> dict[str, object]:
         "edges": json.dumps([e.model_dump(mode="json") for e in wf.edges]),
         "timeout_seconds": wf.timeout_seconds,
         "requires_human_confirmation": wf.requires_human_confirmation,
+        "guidance": wf.guidance,
+        "display_order": wf.display_order,
         "created_by": wf.created_by,
         "updated_by": wf.updated_by,
         "etag": wf.etag,
@@ -1319,6 +1341,12 @@ def _tool_from_row(row: tuple[object, ...] | list[object]) -> ToolCapability:
         semantic_contract=(
             _json_field(r[30], None) if len(r) > 30 else None
         ),
+        guidance=_str_field(r[31]) if len(r) > 31 else "",
+        guidance_examples=[
+            GuidanceExample.model_validate(ex) if isinstance(ex, dict) else ex
+            for ex in (_json_field(r[32], []) if len(r) > 32 else [])
+        ] if len(r) > 32 else [],
+        display_order=int(r[33]) if len(r) > 33 and r[33] is not None else None,
     )
 
 
@@ -1347,6 +1375,7 @@ def _skill_from_row(row: tuple[object, ...] | list[object]) -> SkillCapability:
         created_by=_str_field(r[19]) if len(r) > 19 else "system",
         updated_by=_str_field(r[20]) if len(r) > 20 else "system",
         etag=int(r[21]) if len(r) > 21 else 1,  # type: ignore[arg-type]
+        display_order=int(r[22]) if len(r) > 22 and r[22] is not None else None,
     )
 
 
@@ -1372,6 +1401,8 @@ def _workflow_from_row(row: tuple[object, ...] | list[object]) -> WorkflowCapabi
         created_by=_str_field(r[16]) if len(r) > 16 else "system",
         updated_by=_str_field(r[17]) if len(r) > 17 else "system",
         etag=int(r[18]) if len(r) > 18 else 1,  # type: ignore[arg-type]
+        guidance=_str_field(r[19]) if len(r) > 19 else "",
+        display_order=int(r[20]) if len(r) > 20 and r[20] is not None else None,
     )
 
 

@@ -75,6 +75,7 @@ async def test_skill_and_workflow_testing_actions_are_real_lifecycle_transitions
             name="区域研判",
             owner="platform",
             version="1.0.0",
+            guidance="Test skill guidance",
             allowed_tool_ids=["governance.resolve_area"],
         )
         await repository.save_skill(capability)
@@ -111,6 +112,7 @@ async def test_capability_lifecycle_rejects_stale_etag() -> None:
         name="区域研判",
         owner="platform",
         version="1.0.0",
+        guidance="Test skill guidance",
         allowed_tool_ids=["governance.resolve_area"],
     )
     await repository.save_skill(skill)
@@ -140,6 +142,7 @@ async def test_rollback_cannot_publish_a_never_approved_draft() -> None:
         name="区域研判",
         owner="platform",
         version="1.0.0",
+        guidance="Test skill guidance",
         allowed_tool_ids=["governance.resolve_area"],
     )
     await repository.save_skill(draft)

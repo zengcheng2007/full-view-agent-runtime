@@ -315,6 +315,7 @@ async def test_new_semantic_subject_compiles_and_executes_without_catalog_source
         owner="device-team",
         version="1.0.0",
         status="published",
+        guidance="Test guidance for 设备聚合查询",
         connector_ref="device-api",
         resource_path="/device/metrics",
         input_schema={

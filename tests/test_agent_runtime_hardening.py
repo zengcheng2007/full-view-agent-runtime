@@ -193,6 +193,7 @@ async def test_agent_validation_rejects_duplicate_resource_references() -> None:
             owner="platform",
             version="1.0.0",
             status="published",
+            guidance="Test guidance for governance.resolve_area",
             connector_ref="governance",
             resource_path="/area/resolve",
         )
@@ -239,6 +240,7 @@ async def test_agent_validation_requires_transitive_tool_dependencies(
                 owner="platform",
                 version="1.0.0",
                 status="published",
+                guidance="Test skill guidance",
                 allowed_tool_ids=["governance.resolve_area"],
             )
         )
@@ -250,6 +252,7 @@ async def test_agent_validation_requires_transitive_tool_dependencies(
                 owner="platform",
                 version="1.0.0",
                 status="published",
+                guidance="Test workflow guidance",
                 nodes=[
                     WorkflowNodeDefinition(
                         node_id="resolve",

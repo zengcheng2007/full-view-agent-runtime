@@ -374,7 +374,7 @@ async def test_management_service_binds_only_published_capabilities() -> None:
         )
 
     await capabilities.save_tool(
-        draft.model_copy(update={"status": "published", "etag": 2})
+        draft.model_copy(update={"status": "published", "guidance": "Test guidance for address_lookup", "etag": 2})
     )
     binding = await service.bind_capability(
         app_id="full_information_view",
@@ -408,6 +408,7 @@ async def test_run_snapshot_discovers_only_capabilities_bound_to_its_application
                 owner="platform",
                 version="1.0.0",
                 status="published",
+                guidance=f"Test guidance for {tool_id}",
                 connector_ref="connector.shared",
                 resource_path=f"/v1/{tool_id.replace('.', '/')}",
             )

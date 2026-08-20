@@ -21,6 +21,7 @@ from full_view_agent.application.tool_registry import (
     ToolRegistry,
 )
 from full_view_agent.domain.models import (
+    GetObjectProfileInput,
     QueryEnterpriseMetricsInput,
     QueryEventMetricsInput,
     QueryGovernanceOverviewInput,
@@ -101,6 +102,13 @@ _PRODUCTION_CONTRACTS: dict[str, _CapabilityContract] = {
         adapter_ref="adapter://geo-qxst/event-metrics/1.0",
         subject_id="event",
     ),
+    "governance.get_object_profile": _CapabilityContract(
+        input_model=GetObjectProfileInput,
+        dataset_id="governance_objects",
+        permission="governance.object.profile.read",
+        input_schema_ref="schema://tools/get-object-profile-input/1.0.0",
+        adapter_ref="adapter://geo-qxst/object-profile/1.0",
+    ),
 }
 
 
@@ -121,8 +129,6 @@ def validate_production_http_capabilities(
     _expect_equal(errors, "production registry tools", registry_ids, expected_ids)
     _expect_equal(errors, "declared HTTP tools", declared_ids, expected_ids)
     _expect_equal(errors, "HTTP adapter tools", adapter_ids, expected_ids)
-    if "governance.get_object_profile" in registry_ids:
-        errors.append("unverified governance.get_object_profile is exposed over HTTP")
 
     for tool_id, contract in _PRODUCTION_CONTRACTS.items():
         if tool_id not in registry_ids:

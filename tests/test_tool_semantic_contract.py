@@ -148,6 +148,7 @@ def _tool(*, version: str, contract: ToolSemanticContract | None) -> ToolCapabil
         owner="governance",
         version=version,
         status="published",
+        guidance="Test guidance for population query tool",
         connector_ref="geo",
         resource_path="/population",
         dataset_ids=["population"],
