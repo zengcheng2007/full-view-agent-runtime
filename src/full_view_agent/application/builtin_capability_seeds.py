@@ -189,6 +189,8 @@ def population_tool_v1_1() -> ToolCapability:
         owner="full-information-domain-team",
         version="1.1.0",
         status="published",
+        guidance="查询行政区划级人口聚合指标（总数、均值、极值、排名等），"
+        "支持按区县、街道、社区、网格维度聚合，可叠加独居老人筛选。",
         risk_level="low",
         required_permissions=["governance.population.aggregate.read"],
         dataset_ids=["population"],

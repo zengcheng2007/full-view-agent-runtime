@@ -43,6 +43,14 @@ _SEMVER_RE = re.compile(r"^\d+\.\d+\.\d+$")
 _CAPABILITY_ID_RE = re.compile(r"^[a-z][a-z0-9]*(?:\.[a-z][a-z0-9_-]+)+$")
 
 
+class GuidanceExample(ContractModel):
+    """Example demonstrating when and how to use a capability."""
+
+    question: str = Field(min_length=1, max_length=500)
+    reasoning: str = Field(min_length=1, max_length=1000)
+    expected_output: str | None = Field(default=None, max_length=2000)
+
+
 def is_valid_transition(
     from_status: CapabilityStatus, to_status: CapabilityStatus
 ) -> bool:
@@ -331,6 +339,9 @@ class ToolCapability(CapabilityBase):
     cache_ttl_seconds: int = Field(default=60, ge=0, le=86_400)
     credential_ref: str | None = Field(default=None, max_length=128)
     semantic_contract: ToolSemanticContract | None = None
+    guidance: str = Field(default="", max_length=5000)
+    guidance_examples: list[GuidanceExample] = Field(default_factory=list, max_length=20)
+    display_order: int | None = Field(default=None, ge=0, le=1000)
 
     @field_validator("resource_path")
     @classmethod
@@ -341,18 +352,27 @@ class ToolCapability(CapabilityBase):
             raise ValueError("resource_path must not contain .. or //")
         return v
 
+    @model_validator(mode="after")
+    def validate_published_has_guidance(self) -> ToolCapability:
+        if self.status == "published" and not self.guidance.strip():
+            raise ValueError(
+                "published tools must have guidance explaining when and how to use them"
+            )
+        return self
+
 
 class SkillCapability(CapabilityBase):
     """Model usage guidance with tool whitelist."""
 
     capability_type: Literal["skill"] = "skill"
     applicable_questions: list[str] = Field(default_factory=list, max_length=50)
-    guidance: str = Field(default="", max_length=5000)
+    guidance: str = Field(min_length=1, max_length=5000)
     allowed_tool_ids: list[str] = Field(default_factory=list, max_length=50)
     input_constraints: dict[str, object] = Field(default_factory=dict)
     output_constraints: dict[str, object] = Field(default_factory=dict)
     examples: list[dict[str, str]] = Field(default_factory=list, max_length=20)
     counter_examples: list[dict[str, str]] = Field(default_factory=list, max_length=20)
+    display_order: int | None = Field(default=None, ge=0, le=1000)
 
     @model_validator(mode="after")
     def validate_published_has_tools(self) -> SkillCapability:
@@ -409,6 +429,16 @@ class WorkflowCapability(CapabilityBase):
     edges: list[WorkflowEdgeDefinition] = Field(default_factory=list, max_length=100)
     timeout_seconds: int = Field(default=300, ge=10, le=3600)
     requires_human_confirmation: bool = False
+    guidance: str = Field(default="", max_length=5000)
+    display_order: int | None = Field(default=None, ge=0, le=1000)
+
+    @model_validator(mode="after")
+    def validate_published_has_guidance(self) -> WorkflowCapability:
+        if self.status == "published" and not self.guidance.strip():
+            raise ValueError(
+                "published workflows must have guidance explaining when to trigger them"
+            )
+        return self
 
 
 Capability = Annotated[

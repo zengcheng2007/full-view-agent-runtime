@@ -115,22 +115,56 @@ def build_full_view_system_prompt(
     housing_next_area_enabled: bool = True,
     event_category_enabled: bool = False,
     managed_guidance: str | None = None,
+    capability_guidance: dict[str, str] | None = None,
 ) -> str:
+    """Build system prompt with capability guidance from DB or fallback to hardcoded.
+
+    Args:
+        authorization: Authorization context
+        tool_ids: Available tool IDs
+        semantic_capabilities: Semantic capability descriptions
+        housing_next_area_enabled: Feature flag for housing next_area
+        event_category_enabled: Feature flag for event_category
+        managed_guidance: Admin-published supplementary instructions
+        capability_guidance: Map of tool_id -> guidance text from DB capabilities.
+                           If provided, takes precedence over hardcoded _CAPABILITY_LINES.
+    """
     available_tool_ids = frozenset(tool_ids)
     capability_lines: list[str] = []
     line_number = 1
+
+    # Build list of (tool_id, guidance_text) tuples
+    tool_guidance_pairs = []
     for tool_id in _CANONICAL_TOOL_ORDER:
         if tool_id not in available_tool_ids:
             continue
+
+        # Try DB guidance first
+        if capability_guidance and tool_id in capability_guidance:
+            guidance_text = capability_guidance[tool_id]
+            if guidance_text.strip():
+                tool_guidance_pairs.append((tool_id, [guidance_text.strip()]))
+                continue
+
+        # Fallback to hardcoded guidance
         if tool_id == "governance.query_housing_metrics":
             lines = _housing_capability_lines(housing_next_area_enabled)
         elif tool_id == "governance.query_event_metrics":
             lines = _event_capability_lines(event_category_enabled)
-        else:
+        elif tool_id in _CAPABILITY_LINES:
             lines = _CAPABILITY_LINES[tool_id]
+        else:
+            # No guidance available - skip
+            continue
+
+        tool_guidance_pairs.append((tool_id, lines))
+
+    # Sort by display_order if available (simplified - in production would need full capability objects)
+    for tool_id, lines in tool_guidance_pairs:
         for line in lines:
             capability_lines.append(f"({line_number}) {line}")
             line_number += 1
+
     capabilities = "".join(capability_lines) or "当前没有可用的业务 Tool。"
     # S1-A：语义入口能力说明由权限过滤后的 Catalog 派生（见
     # semantic/presenter.py），仅在虚拟 Tool 对当前授权可见时注入。

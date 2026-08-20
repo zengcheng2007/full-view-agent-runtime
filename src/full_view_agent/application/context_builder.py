@@ -79,6 +79,7 @@ class AgentContextBuilder:
         application_prompt_snapshot: RuntimePromptSnapshot | None = None,
         agent_prompt_snapshot: RuntimePromptSnapshot | None = None,
         pin_application_prompt_snapshot: bool = False,
+        capability_guidance: dict[str, str] | None = None,
     ) -> None:
         self._store = store
         self._registry = registry
@@ -93,11 +94,16 @@ class AgentContextBuilder:
             pin_application_prompt_snapshot or application_prompt_snapshot is not None
         )
         self._agent_prompt_snapshot = agent_prompt_snapshot
+        self._capability_guidance = capability_guidance or {}
         if prompt_snapshot is not None:
             if prompt_snapshot.layer == "agent":
                 self._agent_prompt_snapshot = prompt_snapshot
             elif self._application_prompt_snapshot is None:
                 self._application_prompt_snapshot = prompt_snapshot
+
+    def update_capability_guidance(self, guidance: dict[str, str]) -> None:
+        """Replace the capability guidance map (called after runtime reload)."""
+        self._capability_guidance = dict(guidance)
 
     def for_registry(
         self,
@@ -143,6 +149,7 @@ class AgentContextBuilder:
                 or application_prompt_snapshot is not None
                 or self._application_prompt_pinned
             ),
+            capability_guidance=self._capability_guidance,
         )
 
     def skill_registry_snapshot(self):
@@ -227,7 +234,10 @@ class AgentContextBuilder:
         capability_descriptions = tuple(
             (
                 tool_id,
-                self._registry.get_model_descriptor(tool_id).description,
+                self._capability_guidance.get(
+                    tool_id,
+                    self._registry.get_model_descriptor(tool_id).description,
+                ),
             )
             for tool_id in authorized_tool_ids
         )

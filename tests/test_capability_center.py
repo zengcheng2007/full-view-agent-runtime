@@ -53,6 +53,7 @@ def _tool_kwargs(**overrides: Any) -> dict[str, Any]:
         "version": "1.0.0",
         "connector_ref": "conn.governance",
         "resource_path": "/v1/areas",
+        "guidance": "Test guidance for resolve_area",
     }
     defaults.update(overrides)
     return defaults
@@ -148,6 +149,7 @@ class TestDomainValidation:
             owner="team",
             version="1.0.0",
             status="published",
+            guidance="Test skill guidance",
             allowed_tool_ids=["tool.query"],
         )
         assert skill.status == "published"
@@ -160,6 +162,7 @@ class TestDomainValidation:
                 owner="team",
                 version="1.0.0",
                 status="published",
+                guidance="Test skill guidance",
                 allowed_tool_ids=[],
             )
 
@@ -170,6 +173,7 @@ class TestDomainValidation:
             owner="team",
             version="1.0.0",
             status="draft",
+            guidance="Test skill guidance",
             allowed_tool_ids=[],
         )
         assert skill_draft.status == "draft"
@@ -337,6 +341,7 @@ class TestInMemoryRepository:
             name="Analysis Skill",
             owner="team",
             version="1.0.0",
+            guidance="Test skill guidance",
             allowed_tool_ids=["tool.resolve_area"],
         )
         await repo.save_skill(skill)
@@ -368,6 +373,7 @@ class TestInMemoryRepository:
                 capability_id="tool.two",
                 version="1.0.0",
                 status="published",
+                guidance="Test guidance for tool.two",
             )
         )
         await repo.save_tool(tool2)

@@ -225,6 +225,7 @@ def _advanced_workflow_capability() -> WorkflowCapability:
         owner="test",
         version=runtime.version,
         status="published",
+        guidance="Test workflow guidance",
         nodes=[
             WorkflowNodeDefinition(
                 node_id=node.node_id,

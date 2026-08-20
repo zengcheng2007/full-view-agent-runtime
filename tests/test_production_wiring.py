@@ -66,6 +66,7 @@ def _full_governance_auth_context() -> models.AuthContext:
                 "governance.event.aggregate.read",
                 "governance.enterprise.aggregate.read",
                 "governance.housing.aggregate.read",
+                "governance.object.profile.read",
                 "governance.overview.aggregate.read",
                 "governance.power.aggregate.read",
                 "governance.population.aggregate.read",
@@ -79,8 +80,9 @@ def _full_governance_auth_context() -> models.AuthContext:
                     ],
                     "datasets": [
                         "administrative_area",
-                        "event",
                         "enterprise",
+                        "event",
+                        "governance_objects",
                         "governance_overview",
                         "governance_power",
                         "housing",
@@ -177,7 +179,8 @@ async def test_production_context_advertises_wired_aggregate_tools() -> None:
     )
     assert event_tool.description in prompt
     assert "min_finish_rate" not in event_tool.input_schema["properties"]
-    assert "get_object_profile" not in prompt
+    # governance.get_object_profile is now a verified production HTTP tool
+    assert "get_object_profile" in prompt
     assert "base_room_lease" not in prompt
     assert "getNextSiteData" not in prompt
     assert "getRoomLeaseType" not in prompt
@@ -310,7 +313,8 @@ def test_prompt_only_lists_registered_and_authorized_capabilities() -> None:
     assert "query_housing_metrics" in production_subset
     assert "query_event_metrics" in production_subset
     assert "不支持按阈值筛选" in production_subset
-    assert "get_object_profile" not in production_subset
+    # governance.get_object_profile is now a verified production HTTP tool
+    assert "get_object_profile" in production_subset
 
 
 # ---------------------------------------------------------------------------

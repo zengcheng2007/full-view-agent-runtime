@@ -153,6 +153,7 @@ async def test_legacy_default_agent_gets_idempotent_trusted_baseline_release() -
         owner="governance",
         version="1.0.0",
         status="published",
+        guidance="Test guidance for Resolve area",
         connector_ref="governance-gateway",
         resource_path="/areas/resolve",
     )
@@ -210,6 +211,7 @@ async def test_managed_legacy_baseline_rolls_forward_new_application_grants() ->
         owner="governance",
         version="1.0.0",
         status="published",
+        guidance="Test guidance for Resolve area",
         connector_ref="governance-gateway",
         resource_path="/areas/resolve",
     )
@@ -219,6 +221,7 @@ async def test_managed_legacy_baseline_rolls_forward_new_application_grants() ->
         owner="governance",
         version="1.0.0",
         status="published",
+        guidance="Test guidance for Governance power",
         connector_ref="governance-gateway",
         resource_path="/governance-power",
     )
@@ -228,6 +231,7 @@ async def test_managed_legacy_baseline_rolls_forward_new_application_grants() ->
         owner="operator",
         version="1.0.0",
         status="published",
+        guidance="Test guidance for Operator tool",
         connector_ref="operator-gateway",
         resource_path="/custom",
     )
@@ -351,6 +355,7 @@ async def test_non_system_agent_release_is_not_expanded_from_application_grants(
         owner="governance",
         version="1.0.0",
         status="published",
+        guidance="Test guidance for Resolve area",
         connector_ref="governance-gateway",
         resource_path="/areas/resolve",
     )
@@ -360,6 +365,7 @@ async def test_non_system_agent_release_is_not_expanded_from_application_grants(
         owner="governance",
         version="1.0.0",
         status="published",
+        guidance="Test guidance for Governance power",
         connector_ref="governance-gateway",
         resource_path="/governance-power",
     )
@@ -458,6 +464,7 @@ async def test_agent_release_requires_real_model_and_published_capabilities() ->
             owner="platform",
             version="1.0.0",
             status="published",
+            guidance="Test guidance for 解析区划",
             connector_ref="governance",
             resource_path="/area/resolve",
         )
@@ -692,6 +699,7 @@ async def test_release_validates_every_nonempty_versioned_resource_reference() -
             owner="platform",
             version="1.0.0",
             status="published",
+            guidance="Test skill guidance",
             allowed_tool_ids=["governance.resolve_area"],
         )
     )
@@ -702,6 +710,7 @@ async def test_release_validates_every_nonempty_versioned_resource_reference() -
             owner="platform",
             version="1.0.0",
             status="published",
+            guidance="Test guidance for Resolve area",
             connector_ref="governance",
             resource_path="/area/resolve",
         )
@@ -713,6 +722,7 @@ async def test_release_validates_every_nonempty_versioned_resource_reference() -
             owner="platform",
             version="1.0.0",
             status="published",
+            guidance="Test workflow guidance",
         )
     )
     for capability_id in (
@@ -816,6 +826,7 @@ async def test_agent_validation_requires_workflow_skill_dependency_closure() -> 
             owner="platform",
             version="1.0.0",
             status="published",
+            guidance="Test skill guidance",
             allowed_tool_ids=["governance.resolve_area"],
         )
     )
@@ -826,6 +837,7 @@ async def test_agent_validation_requires_workflow_skill_dependency_closure() -> 
             owner="platform",
             version="1.0.0",
             status="published",
+            guidance="Test workflow guidance",
             nodes=[
                 {"node_id": "start", "node_type": "start"},
                 {

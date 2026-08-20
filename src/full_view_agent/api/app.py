@@ -563,6 +563,11 @@ class RuntimeContainer:
     capability_management_service: CapabilityManagementService | None = field(
         default=None, init=False
     )
+    # Reference to the context builder for updating capability guidance
+    # after runtime capability reload.
+    _context_builder: AgentContextBuilder | None = field(
+        default=None, init=False, repr=False
+    )
     model_config_service: ModelConfigService | None = field(
         default=None, init=False
     )
@@ -933,6 +938,13 @@ class RuntimeContainer:
         # ``initialize()`` once the provider is resolved.
         self._build_downstream_components(database_url)
 
+    def _store_context_builder(
+        self, builder: AgentContextBuilder
+    ) -> AgentContextBuilder:
+        """Retain a reference for post-init capability guidance updates."""
+        self._context_builder = builder
+        return builder
+
     def _build_downstream_components(self, database_url: str | None) -> None:
         """Build semantic stack, executor, and analysis services.
 
@@ -1025,13 +1037,13 @@ class RuntimeContainer:
         planner_factory: RunPlannerFactory | None = ModelPlannerFactory(
             provider=base_model_provider,
             event_publisher=self.events,
-            context_builder=AgentContextBuilder(
+            context_builder=self._store_context_builder(AgentContextBuilder(
                 store=self.store,
                 registry=self.tool_registry,
                 semantic_presenter=self.semantic_stack.presenter,
                 skill_registry=self.runtime_skill_registry,
                 prompt_registry=self.runtime_prompt_registry,
-            ),
+            )),
             max_total_tokens=int(
                 os.getenv("FULL_VIEW_MODEL_TOKEN_BUDGET", "32000")
             ),
@@ -1270,7 +1282,24 @@ class RuntimeContainer:
             candidate = await self._build_runtime_capability_candidate(
                 self.capability_repository
             )
-            return self._activate_runtime_capability_candidate(candidate)
+            result = self._activate_runtime_capability_candidate(candidate)
+        # Refresh capability guidance outside the lock (it's a read-only operation)
+        await self._refresh_capability_guidance()
+        return result
+
+    async def _refresh_capability_guidance(self) -> None:
+        """Build capability guidance dict from published tools and update context builder."""
+        if self._context_builder is None or self.capability_repository is None:
+            return
+        from full_view_agent.application.dynamic_tool_bridge import load_published_tools
+        from full_view_agent.domain.capability import ToolCapability
+
+        published_tools = await load_published_tools(self.capability_repository)
+        guidance: dict[str, str] = {}
+        for tool in published_tools:
+            if isinstance(tool, ToolCapability) and tool.guidance and tool.guidance.strip():
+                guidance[tool.capability_id] = tool.guidance.strip()
+        self._context_builder.update_capability_guidance(guidance)
 
     async def validate_runtime_capability_transition(
         self,

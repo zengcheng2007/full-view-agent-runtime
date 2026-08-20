@@ -37,6 +37,7 @@ PRODUCTION_HTTP_TOOL_IDS = (
     "governance.query_housing_metrics",
     "governance.query_population_metrics",
     "governance.resolve_area",
+    "governance.get_object_profile",
 )
 
 

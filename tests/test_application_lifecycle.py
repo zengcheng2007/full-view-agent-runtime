@@ -105,6 +105,7 @@ async def test_binding_is_created_disabled_then_explicitly_enabled_and_disabled(
         owner="address-team",
         version="1.0.0",
         status="published",
+        guidance="Test guidance for 标准地址解析",
         connector_ref="address-api",
         resource_path="/v1/resolve",
     )
@@ -154,6 +155,7 @@ async def test_binding_cannot_be_enabled_while_application_is_disabled() -> None
         owner="address-team",
         version="1.0.0",
         status="published",
+        guidance="Test guidance for 标准地址解析",
         connector_ref="address-api",
         resource_path="/v1/resolve",
     )

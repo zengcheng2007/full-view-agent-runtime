@@ -53,6 +53,7 @@ from full_view_agent.domain.application import AgentApplicationDefinition
 from full_view_agent.domain.capability import (
     CapabilityStatus,
     Connector,
+    GuidanceExample,
     ModelCapabilityDeclaration,
     ModelConfigMasked,
     ModelParameterProfiles,
@@ -129,6 +130,9 @@ class ToolCreateBody(ContractModel):
     required_permissions: list[str] = []
     dataset_ids: list[str] = Field(min_length=1)
     semantic_contract: ToolSemanticContract | None = None
+    guidance: str = Field(default="", max_length=5000)
+    guidance_examples: list[GuidanceExample] = Field(default_factory=list)
+    display_order: int | None = None
 
 
 class ToolUpdateBody(ContractModel):
@@ -150,6 +154,9 @@ class ToolUpdateBody(ContractModel):
     required_permissions: list[str] | None = None
     dataset_ids: list[str] | None = None
     semantic_contract: ToolSemanticContract | None = None
+    guidance: str | None = None
+    guidance_examples: list[GuidanceExample] | None = None
+    display_order: int | None = None
 
 
 class ToolSemanticValidateBody(ContractModel):
@@ -262,11 +269,12 @@ class SkillCreateBody(ContractModel):
     version: str = Field(min_length=1, max_length=32)
     domain: str = "governance"
     description: str = ""
-    guidance: str = ""
+    guidance: str = Field(min_length=1, max_length=5000)
     allowed_tool_ids: list[str] = []
     applicable_questions: list[str] = []
     examples: list[dict[str, str]] = []
     counter_examples: list[dict[str, str]] = []
+    display_order: int | None = None
 
 
 class WorkflowCreateBody(ContractModel):
@@ -280,11 +288,43 @@ class WorkflowCreateBody(ContractModel):
     edges: list[WorkflowEdgeDefinition] = []
     timeout_seconds: int = 300
     requires_human_confirmation: bool = False
+    guidance: str = Field(default="", max_length=5000)
+    display_order: int | None = None
 
 
 class RollbackBody(AuditedActionBody):
     to_version: str = Field(min_length=1, max_length=32)
     expected_etag: int = Field(ge=1)
+
+
+class GuidancePreviewBody(ContractModel):
+    """Request body for guidance preview."""
+    available_tool_ids: list[str] = Field(default_factory=list)
+
+
+class GuidancePreviewData(ContractModel):
+    """Preview of how guidance will appear in system prompt."""
+    rendered_guidance: str
+    position_in_prompt: int
+    total_tools_in_prompt: int
+
+
+class GuidancePreviewResponse(ContractModel):
+    data: GuidancePreviewData
+    meta: ResponseMeta
+
+
+class GuidanceCoverageData(ContractModel):
+    """Guidance coverage statistics for published capabilities."""
+    total_published_capabilities: int
+    capabilities_with_guidance: int
+    capabilities_without_guidance: list[str]
+    coverage_rate: float
+
+
+class GuidanceCoverageResponse(ContractModel):
+    data: GuidanceCoverageData
+    meta: ResponseMeta
 
 
 class ConnectorCreateBody(ContractModel):
@@ -442,6 +482,9 @@ class ToolDefinitionData(ContractModel):
     cache_ttl_seconds: int
     credential_configured: bool
     semantic_contract: ToolSemanticContract | None
+    guidance: str = ""
+    guidance_examples: list[GuidanceExample] = Field(default_factory=list)
+    display_order: int | None = None
 
 
 class ToolDefinitionResponse(ContractModel):
@@ -806,6 +849,11 @@ def create_capability_router(
             required_permissions=body.required_permissions,
             dataset_ids=body.dataset_ids,
             semantic_contract=body.semantic_contract,
+            guidance=body.guidance,
+            guidance_examples=[
+                ex.model_dump(mode="python") for ex in body.guidance_examples
+            ],
+            display_order=body.display_order,
             created_by=user.user_id,
         )
         return ToolDefinitionResponse(data=_tool_definition_data(tool), meta=_meta())
@@ -1135,6 +1183,105 @@ def create_capability_router(
         )
         await _reload_runtime()
         return ToolSnapshotResponse(data=_tool_snapshot_data(snapshot), meta=_meta())
+
+    # ---- Guidance Preview & Coverage ----
+
+    @router.post("/tools/{capability_id}/{version}/preview-guidance")
+    async def preview_tool_guidance(
+        capability_id: str,
+        version: str,
+        body: GuidancePreviewBody,
+        user: Annotated[CurrentUser, Depends(require_capability_identity)],
+    ) -> GuidancePreviewResponse:
+        """Preview how this tool's guidance will appear in the system prompt."""
+        _require(user, ControlPlanePermission.CAPABILITY_READ)
+        tool = await management_service.get(capability_id, version)
+        if not isinstance(tool, ToolCapability):
+            raise ResourceNotFound("tool version not found")
+
+        # Build rendered guidance
+        rendered_lines = []
+        if tool.guidance.strip():
+            rendered_lines.append(f"{tool.name} - {tool.guidance.strip()}")
+
+        # Calculate position (simplified - in production would need full prompt assembly)
+        published_tools = await management_service.list_capabilities(
+            capability_type="tool", status="published"
+        )
+        sorted_tools = sorted(
+            [t for t in published_tools if isinstance(t, ToolCapability)],
+            key=lambda t: (t.display_order or 999, t.capability_id)
+        )
+        position = next(
+            (i + 1 for i, t in enumerate(sorted_tools) if t.capability_id == capability_id),
+            0
+        )
+
+        return GuidancePreviewResponse(
+            data=GuidancePreviewData(
+                rendered_guidance="\n".join(rendered_lines),
+                position_in_prompt=position,
+                total_tools_in_prompt=len(sorted_tools),
+            ),
+            meta=_meta(),
+        )
+
+    @router.get("/capabilities/guidance-coverage")
+    async def get_guidance_coverage(
+        user: Annotated[CurrentUser, Depends(require_capability_identity)],
+    ) -> GuidanceCoverageResponse:
+        """Check guidance coverage for all published capabilities."""
+        _require(user, ControlPlanePermission.CAPABILITY_READ)
+
+        published_tools = await management_service.list_capabilities(
+            capability_type="tool", status="published"
+        )
+        published_skills = await management_service.list_capabilities(
+            capability_type="skill", status="published"
+        )
+        published_workflows = await management_service.list_capabilities(
+            capability_type="workflow", status="published"
+        )
+
+        tools_without_guidance = []
+        total_with_guidance = 0
+        total_published = 0
+
+        for tool in published_tools:
+            if isinstance(tool, ToolCapability):
+                total_published += 1
+                if tool.guidance.strip():
+                    total_with_guidance += 1
+                else:
+                    tools_without_guidance.append(tool.capability_id)
+
+        for skill in published_skills:
+            if isinstance(skill, SkillCapability):
+                total_published += 1
+                if skill.guidance.strip():
+                    total_with_guidance += 1
+                else:
+                    tools_without_guidance.append(skill.capability_id)
+
+        for workflow in published_workflows:
+            if isinstance(workflow, WorkflowCapability):
+                total_published += 1
+                if workflow.guidance.strip():
+                    total_with_guidance += 1
+                else:
+                    tools_without_guidance.append(workflow.capability_id)
+
+        coverage_rate = (total_with_guidance / total_published) if total_published > 0 else 1.0
+
+        return GuidanceCoverageResponse(
+            data=GuidanceCoverageData(
+                total_published_capabilities=total_published,
+                capabilities_with_guidance=total_with_guidance,
+                capabilities_without_guidance=tools_without_guidance,
+                coverage_rate=coverage_rate,
+            ),
+            meta=_meta(),
+        )
 
     # ---- Skills ----
 

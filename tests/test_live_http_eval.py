@@ -93,7 +93,9 @@ async def test_http_eval_environment_uses_real_identity_admission_and_http_tool(
         },
         {"method": "POST", "path": "/geo-qxst/getNextSiteData", "count": 1},
     ]
-    assert "governance.get_object_profile" not in trace.model_requests[0].tool_ids
+    # governance.get_object_profile is now a verified production HTTP tool
+    # (no longer blocked from exposure); it is available alongside other tools.
+    assert "governance.resolve_area" in trace.model_requests[0].tool_ids
     assert seen_paths == [
         "/getUserByToken",
         "/geo-qxst/area/getAreaInfoByAreaName",

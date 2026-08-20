@@ -76,6 +76,7 @@ def _tool(capability_id: str, version: str) -> ToolCapability:
         owner="test",
         version=version,
         status="published",
+        guidance="Test guidance for tool",
         risk_level="low",
         required_permissions=[],
         dataset_ids=[],

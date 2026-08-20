@@ -24,6 +24,7 @@ from full_view_agent.domain.capability import (
     CapabilityType,
     Connector,
     ConnectorAuditEvent,
+    GuidanceExample,
     SkillCapability,
     ToolCapability,
     ToolSemanticContract,
@@ -91,6 +92,9 @@ class CapabilityManagementService:
         required_permissions: list[str] | None = None,
         dataset_ids: list[str] | None = None,
         semantic_contract: ToolSemanticContract | dict[str, object] | None = None,
+        guidance: str = "",
+        guidance_examples: list[dict[str, object]] | None = None,
+        display_order: int | None = None,
         created_by: str = "system",
     ) -> ToolCapability:
         connector = await self._repo.get_connector(connector_ref)
@@ -131,6 +135,12 @@ class CapabilityManagementService:
                 if semantic_contract is not None
                 else None
             ),
+            guidance=guidance,
+            guidance_examples=[
+                GuidanceExample.model_validate(ex) if isinstance(ex, dict) else ex
+                for ex in (guidance_examples or [])
+            ],
+            display_order=display_order,
             created_by=created_by,
             updated_by=created_by,
         )
