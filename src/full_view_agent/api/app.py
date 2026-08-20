@@ -1296,10 +1296,27 @@ class RuntimeContainer:
 
         published_tools = await load_published_tools(self.capability_repository)
         guidance: dict[str, str] = {}
+        display_order: dict[str, int] = {}
+        examples: dict[str, list[dict[str, object]]] = {}
         for tool in published_tools:
-            if isinstance(tool, ToolCapability) and tool.guidance and tool.guidance.strip():
+            if not isinstance(tool, ToolCapability):
+                continue
+            if tool.guidance and tool.guidance.strip():
                 guidance[tool.capability_id] = tool.guidance.strip()
-        self._context_builder.update_capability_guidance(guidance)
+            if tool.display_order is not None:
+                display_order[tool.capability_id] = tool.display_order
+            if tool.guidance_examples:
+                examples[tool.capability_id] = [
+                    ex.model_dump(mode="python")
+                    if hasattr(ex, "model_dump")
+                    else dict(ex)
+                    for ex in tool.guidance_examples
+                ]
+        self._context_builder.update_capability_guidance(
+            guidance,
+            display_order=display_order,
+            examples=examples,
+        )
 
     async def validate_runtime_capability_transition(
         self,

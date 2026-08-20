@@ -1558,6 +1558,8 @@ class PostgresAgentPersistence:
             "V031_model_resource_center.sql",
             "V032_model_reasoning_test_profile.sql",
             "V033_population_median_contract_boundary.sql",
+            "V034_capability_guidance_fields.sql",
+            "V035_populate_tool_guidance.sql",
         ):
             path = migrations_dir / name
             if path.exists():

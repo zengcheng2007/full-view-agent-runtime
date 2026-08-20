@@ -95,15 +95,33 @@ class AgentContextBuilder:
         )
         self._agent_prompt_snapshot = agent_prompt_snapshot
         self._capability_guidance = capability_guidance or {}
+        self._capability_display_order: dict[str, int] = {}
+        self._capability_guidance_examples: dict[str, list[dict[str, object]]] = {}
         if prompt_snapshot is not None:
             if prompt_snapshot.layer == "agent":
                 self._agent_prompt_snapshot = prompt_snapshot
             elif self._application_prompt_snapshot is None:
                 self._application_prompt_snapshot = prompt_snapshot
 
-    def update_capability_guidance(self, guidance: dict[str, str]) -> None:
-        """Replace the capability guidance map (called after runtime reload)."""
+    def update_capability_guidance(
+        self,
+        guidance: dict[str, str],
+        *,
+        display_order: dict[str, int] | None = None,
+        examples: dict[str, list[dict[str, object]]] | None = None,
+    ) -> None:
+        """Replace the capability guidance map (called after runtime reload).
+
+        ``display_order`` and ``examples`` are optional enrichment maps that
+        control the rendered order in the system prompt and append
+        few-shot examples to each capability line.
+        """
+
         self._capability_guidance = dict(guidance)
+        self._capability_display_order = dict(display_order or {})
+        self._capability_guidance_examples = {
+            tool_id: list(exs) for tool_id, exs in (examples or {}).items()
+        }
 
     def for_registry(
         self,
@@ -117,7 +135,7 @@ class AgentContextBuilder:
     ) -> "AgentContextBuilder":
         """Clone model context construction against the Run-pinned registry."""
 
-        return AgentContextBuilder(
+        clone = AgentContextBuilder(
             store=self._store,
             registry=registry,
             max_context_messages=self._max_messages,
@@ -151,6 +169,12 @@ class AgentContextBuilder:
             ),
             capability_guidance=self._capability_guidance,
         )
+        clone._capability_display_order = dict(self._capability_display_order)
+        clone._capability_guidance_examples = {
+            tool_id: list(exs)
+            for tool_id, exs in self._capability_guidance_examples.items()
+        }
+        return clone
 
     def skill_registry_snapshot(self):
         """Expose immutable contracts for integration tests and diagnostics."""
@@ -231,15 +255,43 @@ class AgentContextBuilder:
             else self._prompt_registry.snapshot()
         )
         agent_prompt = self._agent_prompt_snapshot
-        capability_descriptions = tuple(
-            (
+        enriched_guidance: dict[str, str] = {}
+        for tool_id in authorized_tool_ids:
+            base = self._capability_guidance.get(
                 tool_id,
-                self._capability_guidance.get(
-                    tool_id,
-                    self._registry.get_model_descriptor(tool_id).description,
-                ),
+                self._registry.get_model_descriptor(tool_id).description,
             )
-            for tool_id in authorized_tool_ids
+            examples = self._capability_guidance_examples.get(tool_id)
+            if examples:
+                example_lines: list[str] = []
+                for ex in examples:
+                    q = ex.get("question") if isinstance(ex, dict) else None
+                    reasoning = (
+                        ex.get("reasoning") if isinstance(ex, dict) else None
+                    )
+                    expected = (
+                        ex.get("expected_output") if isinstance(ex, dict) else None
+                    )
+                    if not q:
+                        continue
+                    line = f"Q: {q}"
+                    if reasoning:
+                        line += f" | 推理: {reasoning}"
+                    if expected:
+                        line += f" | 输出: {expected}"
+                    example_lines.append(line)
+                if example_lines:
+                    base = base + "\n  示例:\n  - " + "\n  - ".join(example_lines)
+            enriched_guidance[tool_id] = base
+        ordered_tool_ids = sorted(
+            authorized_tool_ids,
+            key=lambda tid: (
+                self._capability_display_order.get(tid, 999),
+                tid,
+            ),
+        )
+        capability_descriptions = tuple(
+            (tool_id, enriched_guidance[tool_id]) for tool_id in ordered_tool_ids
         )
         system_sections = [
             build_runtime_safety_kernel(authorization),
