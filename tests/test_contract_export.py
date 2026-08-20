@@ -237,7 +237,9 @@ def test_exported_contracts_cover_the_analysis_report_union(tmp_path) -> None:
 
 
 def test_committed_contracts_cover_the_analysis_report_union() -> None:
-    committed_root = Path(__file__).resolve().parents[2] / "contracts"
+    # Contracts are versioned inside the agent-runtime repo (parents[1] =
+    # repo root).
+    committed_root = Path(__file__).resolve().parents[1] / "contracts"
 
     result_metadata = json.loads(
         (
